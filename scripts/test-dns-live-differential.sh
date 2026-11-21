@@ -45,6 +45,10 @@ c = json.load(open(sys.argv[1], encoding="utf-8"))
 r = json.load(open(sys.argv[2], encoding="utf-8"))
 for item in c:
     item.pop("end", None)
+    for service in item["dns_services"]:
+        # У экрана R2O свой текст для уже применённого пробного плана.
+        if service.get("status_reason") == "План применён к пробному соединению D2O; корректный DNS-ответ ещё не подтверждён.":
+            service["status_reason"] = "План применён к пробному соединению. Корректный DNS-ответ ещё не подтверждён."
 if c != r:
     for left, right in zip(c, r):
         if left != right:

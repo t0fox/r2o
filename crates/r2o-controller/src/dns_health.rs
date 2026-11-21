@@ -46,6 +46,7 @@ impl DnsHealthFailure {
 /// Результат health-пробы для controller/live.json.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DnsHealthResult {
+    pub local_endpoint: Option<SocketAddr>,
     pub tcp_reachable: bool,
     pub tls_handshake: bool,
     pub http_status: i32,
@@ -804,6 +805,7 @@ fn probe_doh(
     let timeout = deadline.saturating_duration_since(Instant::now());
     let stream = match connect_tcp(address, mark, timeout) {
         Ok(stream) => {
+            result.local_endpoint = stream.local_addr().ok();
             result.tcp_reachable = true;
             stream
         }
@@ -906,6 +908,7 @@ fn probe_dot(
     let timeout = deadline.saturating_duration_since(Instant::now());
     let stream = match connect_tcp(address, mark, timeout) {
         Ok(stream) => {
+            result.local_endpoint = stream.local_addr().ok();
             result.tcp_reachable = true;
             stream
         }

@@ -1068,6 +1068,7 @@ fn merge_live_snapshot(primary: &mut Value, extra: &Value) {
             }
         }
     }
+    merge_live_dns(primary, extra);
 
     for key in ["probes_used", "client_unfit"] {
         add_live_counter(primary, extra, key);
@@ -1136,6 +1137,42 @@ fn merge_live_snapshot(primary: &mut Value, extra: &Value) {
             if let Some(value) = extra.get(key) {
                 primary[key] = value.clone();
             }
+        }
+    }
+}
+
+fn merge_live_dns(primary: &mut Value, extra: &Value) {
+    let Some(extra_rows) = extra.get("dns_services").and_then(Value::as_array) else {
+        return;
+    };
+    let Some(primary) = primary.as_object_mut() else {
+        return;
+    };
+    let rows = primary
+        .entry("dns_services")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(rows) = rows.as_array_mut() else {
+        return;
+    };
+    for row in extra_rows {
+        let Some(profile) = row.get("profile_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(address) = row.get("resolved_ip").and_then(Value::as_str) else {
+            continue;
+        };
+        if address.parse::<std::net::Ipv6Addr>().is_err() {
+            continue;
+        }
+        if let Some(previous) = rows.iter_mut().find(|previous| {
+            previous["profile_id"].as_str() == Some(profile)
+                && previous["resolved_ip"]
+                    .as_str()
+                    .is_none_or(|ip| ip.is_empty() || ip == address)
+        }) {
+            *previous = row.clone();
+        } else {
+            rows.push(row.clone());
         }
     }
 }

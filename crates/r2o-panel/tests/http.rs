@@ -1250,6 +1250,29 @@ fn status_merges_independent_controller_live_snapshots() {
         r#"{"linked":true,"catalog_at":"catalog.json","boxes":[{"id":"box6"}],"groups":[{"suffix":"ipv6.example"}],"searches":[{"target":"v6.example","family":6,"transport":6,"ip":"2001:db8::6","port":443,"phase":"кандидат"}],"measurements":{"active":1,"queued":0,"limit":2,"cores":2,"free_pct":88},"autopick":{"datapath_events":8,"suspect_events":2,"target":"v6.example"},"targets":1,"confirms":1,"probes_used":5,"client_unfit":2}"#,
     )
     .unwrap();
+    for (path, dns_services) in [
+        (
+            &live4,
+            serde_json::json!([
+                {"profile_id":"a", "resolved_ip":"192.0.2.42", "state":"direct_ok"},
+                {"profile_id":"b", "resolved_ip":"2001:db8::7", "state":"detected"},
+                {"profile_id":"c", "resolved_ip":"", "state":"detected"}
+            ]),
+        ),
+        (
+            &live6,
+            serde_json::json!([
+                {"profile_id":"a", "resolved_ip":"2001:db8::6", "state":"recovered"},
+                {"profile_id":"b", "resolved_ip":"2001:db8::7", "state":"direct_ok"},
+                {"profile_id":"c", "resolved_ip":"2001:db8::8", "state":"checking"},
+                {"profile_id":"a", "resolved_ip":"192.0.2.42", "state":"detected"}
+            ]),
+        ),
+    ] {
+        let mut snapshot: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        snapshot["dns_services"] = dns_services;
+        fs::write(path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    }
     let mut config = Config::default();
     config.live_path = live4;
     config.live_extra_paths = vec![live6];
@@ -1271,6 +1294,13 @@ fn status_merges_independent_controller_live_snapshots() {
     assert_eq!(knowledge["client_unfit"], 3);
     assert_eq!(knowledge["autopick"]["datapath_events"], 20);
     assert_eq!(knowledge["boxes"][0]["id"], "box6");
+    let dns = knowledge["dns_services"].as_array().unwrap();
+    assert_eq!(dns.len(), 4);
+    assert_eq!(dns[0]["resolved_ip"], "192.0.2.42");
+    assert_eq!(dns[0]["state"], "direct_ok");
+    assert_eq!(dns[1]["state"], "direct_ok");
+    assert_eq!(dns[2]["resolved_ip"], "2001:db8::8");
+    assert_eq!(dns[3]["state"], "recovered");
     let revision = value["catalog_revision"].as_str().unwrap();
     let (_, _, cached_body) = request(
         &config,

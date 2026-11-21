@@ -149,6 +149,7 @@ impl DnsTask {
 #[derive(Clone, Debug)]
 pub struct DnsServiceLive {
     pub generation: u64,
+    pub profile_id: Option<String>,
     pub ip: String,
     pub applied_plan_id: String,
     pub state: DnsServiceState,
@@ -163,6 +164,10 @@ pub struct DnsServiceLive {
     pub check_elapsed_ms: Option<u64>,
     pub answer_rtt_ms: Option<u64>,
     pub failure: Option<crate::dns_health::DnsHealthFailure>,
+    pub consecutive_network_failures: u8,
+    pub recovery_retry_at: Option<std::time::Instant>,
+    pub recovery_in_progress: bool,
+    pub verified_recovery: Option<DnsVerifiedRecovery>,
     /// C `dns_service_live.next_check_ms`: монотонные миллисекунды
     /// планировщика; 0 — срок не задан.
     pub next_check_ms: i64,
@@ -174,10 +179,18 @@ pub struct DnsServiceLive {
     pub router_seen: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct DnsVerifiedRecovery {
+    pub plan_id: String,
+    pub checked_at: i64,
+    pub rtt_ms: Option<u64>,
+}
+
 impl Default for DnsServiceLive {
     fn default() -> Self {
         Self {
             generation: 0,
+            profile_id: None,
             ip: String::new(),
             applied_plan_id: String::new(),
             state: DnsServiceState::Detected,
@@ -191,6 +204,10 @@ impl Default for DnsServiceLive {
             check_elapsed_ms: None,
             answer_rtt_ms: None,
             failure: None,
+            consecutive_network_failures: 0,
+            recovery_retry_at: None,
+            recovery_in_progress: false,
+            verified_recovery: None,
             next_check_ms: 0,
             plan_applied_at: None,
             reason: String::new(),
@@ -735,8 +752,20 @@ fn r2o_live_dns_services(
                 http_status = task.ver.status;
             }
 
+            let recovered = state
+                .verified_recovery
+                .as_ref()
+                .filter(|_| state.state != DnsServiceState::DirectOk);
             let (state_name, reason) = if state.state == DnsServiceState::DirectOk {
                 ("direct_ok", state.reason.clone())
+            } else if recovered.is_some() {
+                (
+                    "recovered",
+                    "Получен корректный DNS-ответ на повторной проверке установленного плана."
+                        .to_owned(),
+                )
+            } else if state.recovery_in_progress {
+                ("bypass_ok", "Проверяется DNS-сервис через Discovery.".to_owned())
             } else if candidate_answer {
                 let probe = match service.protocol.as_str() {
                     "doh" => "DoH",
@@ -823,13 +852,24 @@ fn r2o_live_dns_services(
                 "dns_answer_via_plan": candidate_answer,
                 "dns_answer_confirmed": answered,
             });
+            if let Some(profile_id) = &state.profile_id {
+                row["profile_id"] = json!(profile_id);
+            }
             if let Some(elapsed) = state.check_elapsed_ms {
                 row["check_elapsed_ms"] = json!(elapsed);
             }
-            if let Some(rtt) = state.answer_rtt_ms {
+            if let Some(recovered) = recovered {
+                row["checked_at"] = r2o_live_optional_time(Some(recovered.checked_at));
+                row["plan_applied_at"] = r2o_live_optional_time(Some(recovered.checked_at));
+                row["applied_plan_id"] = json!(recovered.plan_id);
+                row["plan_applied"] = json!(true);
+                row["dns_answer_via_plan"] = json!(true);
+                row["dns_answer_confirmed"] = json!(true);
+            }
+            if let Some(rtt) = recovered.map_or(state.answer_rtt_ms, |proof| proof.rtt_ms) {
                 row["answer_rtt_ms"] = json!(rtt);
             }
-            if let Some(failure) = state.failure {
+            if let Some(failure) = state.failure.filter(|_| recovered.is_none()) {
                 row["failure"] = json!(failure.as_str());
             }
             row

@@ -57,6 +57,12 @@ for item in c:
     for service in item["dns_services"]:
         reason = service["status_reason"]
         service["status_reason"] = reasons.get(reason, reason)
+for item in r:
+    for service in item["dns_services"]:
+        # Идентификатор конфигурации нужен только для сборки сводок R2O.
+        profile = service.pop("profile_id", None)
+        if profile is not None:
+            assert len(profile) == 64 and all(ch in "0123456789abcdef" for ch in profile)
 # Прямой ответ не подтверждает пробу кандидата. Для этой ветки нужен
 # отдельный контракт, поскольку донор смешивает два источника ответа.
 case = "candidate_without_answer_live_answer"
@@ -121,6 +127,11 @@ import sys
 
 c = json.load(open(sys.argv[1], encoding="utf-8"))
 r = json.load(open(sys.argv[2], encoding="utf-8"))
+for item in r:
+    for service in item["dns_services"]:
+        profile = service.pop("profile_id", None)
+        if profile is not None:
+            assert len(profile) == 64 and all(ch in "0123456789abcdef" for ch in profile)
 if c != r:
     for left, right in zip(c, r):
         if left != right:

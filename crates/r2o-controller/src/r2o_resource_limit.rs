@@ -692,6 +692,10 @@ impl R2oMeasurementGate {
         self.dual_stack_family.is_some()
     }
 
+    pub fn dual_stack_ip_family(&self) -> Option<u8> {
+        self.dual_stack_family.map(|ipv6| if ipv6 { 6 } else { 4 })
+    }
+
     pub fn note_nfqueue_stats(&self, stats: NfqueueStats) {
         if !unix_time_ms()
             .and_then(|now| now.checked_sub(stats.sampled_at_ms))

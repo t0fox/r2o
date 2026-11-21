@@ -37,6 +37,37 @@ pub struct KeeneticDnsPolicy {
 }
 
 impl DnsService {
+    pub fn profile_id(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        let mut add = |value: &str| {
+            hash.update((value.len() as u32).to_be_bytes());
+            hash.update(value.as_bytes());
+        };
+        for value in [
+            &self.protocol,
+            &self.host,
+            &self.sni,
+            &self.path,
+            &self.bootstrap_dns,
+            &self.source,
+        ] {
+            add(value);
+        }
+        if let Some(policy) = &self.keenetic {
+            for value in [
+                &policy.doh_format,
+                &policy.spki,
+                &policy.interface,
+                &policy.domain,
+            ] {
+                add(value);
+            }
+        }
+        hash.update(self.port.to_be_bytes());
+        format!("{:x}", hash.finalize())
+    }
+
     pub fn transport(&self) -> u8 {
         if matches!(self.protocol.as_str(), "doq" | "doh3") {
             17
@@ -448,11 +479,23 @@ pub fn dns_query_one(host: &str, server: &str, qtype: u16, mark: u32) -> Option<
 /// двух серверов из списка, A затем AAAA. Ошибка/таймаут — None.
 #[cfg(unix)]
 pub fn dns_resolve_bootstrap(host: &str, servers: &str, mark: u32) -> Option<std::net::IpAddr> {
+    dns_resolve_bootstrap_for_family(host, servers, mark, None)
+}
+
+#[cfg(unix)]
+pub fn dns_resolve_bootstrap_for_family(
+    host: &str,
+    servers: &str,
+    mark: u32,
+    family: Option<u8>,
+) -> Option<std::net::IpAddr> {
     if host.is_empty() || servers.is_empty() {
         return None;
     }
     if let Ok(address) = host.parse::<std::net::IpAddr>() {
-        return Some(address);
+        return family
+            .is_none_or(|allowed| allowed == if address.is_ipv4() { 4 } else { 6 })
+            .then_some(address);
     }
     if servers.len() >= DNS_BOOTSTRAP_MAX {
         return None;
@@ -462,10 +505,14 @@ pub fn dns_resolve_bootstrap(host: &str, servers: &str, mark: u32) -> Option<std
         if server.is_empty() {
             continue;
         }
-        if let Some(address) = dns_query_one(host, server, 1, mark) {
+        if family != Some(6)
+            && let Some(address) = dns_query_one(host, server, 1, mark)
+        {
             return Some(address);
         }
-        if let Some(address) = dns_query_one(host, server, 28, mark) {
+        if family != Some(4)
+            && let Some(address) = dns_query_one(host, server, 28, mark)
+        {
             return Some(address);
         }
     }
