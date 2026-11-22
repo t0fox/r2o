@@ -35,8 +35,13 @@ ln -s telegram.log.target "$install_root/log/telegram.log"
 
 before_inode=$(stat -c %i "$install_root/log/panel.log")
 before_unowned=$(wc -c < "$install_root/log/unowned.log")
+printf 'stale tail\n' > "$TEMP/runtime/log-tail.2147483647.stale"
+printf 'pending tail\n' > "$TEMP/runtime/log-tail.$$.pending"
 env R2O_DIR="$install_root" R2O_CONFIG="$install_root/config" \
     R2O_RUNTIME_DIR="$TEMP/runtime" sh "$ROOT/router/S99r2o" log-tick
+[ ! -e "$TEMP/runtime/log-tail.2147483647.stale" ]
+[ -f "$TEMP/runtime/log-tail.$$.pending" ]
+rm -f "$TEMP/runtime/log-tail.$$.pending"
 
 [ "$(wc -c < "$install_root/log/panel.log")" -eq 1024 ]
 tail -c 14 "$install_root/log/panel.log" | grep -qx 'retained-tail'

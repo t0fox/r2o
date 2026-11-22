@@ -47,7 +47,7 @@ rotate_one() {
     [ -f "$1" ] && [ ! -L "$1" ] || return 0
     size=$(file_size "$1") || return 0
     [ "$size" -gt "$LOGMAX" ] 2>/dev/null || return 0
-    stage=$(mktemp "$RUNTIME_DIR/log-tail.XXXXXX") || return 0
+    stage=$(mktemp "$RUNTIME_DIR/log-tail.$$.XXXXXX") || return 0
     if tail -c "$LOGKEEP" "$1" > "$stage" 2>/dev/null &&
        [ "$(file_size "$stage")" -eq "$LOGKEEP" ] 2>/dev/null; then
         cat "$stage" > "$1"
@@ -58,6 +58,14 @@ rotate_one() {
 
 tick() {
     prepare_runtime || return 1
+    # Удаляем хвосты, оставшиеся после аварийной остановки ротации.
+    for tail_file in "$RUNTIME_DIR"/log-tail.*.*; do
+        if [ ! -f "$tail_file" ] || [ -L "$tail_file" ]; then continue; fi
+        tail_pid=${tail_file##*/log-tail.}
+        tail_pid=${tail_pid%%.*}
+        case "$tail_pid" in ''|0|*[!0-9]*) continue ;; esac
+        kill -0 "$tail_pid" 2>/dev/null || rm -f "$tail_file"
+    done
     for name in r2o-datapath.log r2o-controller.log \
                 r2o-datapath4.log r2o-datapath6.log \
                 r2o-controller4.log r2o-controller6.log \
