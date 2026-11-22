@@ -122,9 +122,9 @@ cmp "$TEMP/fallback-tail" "$install_root/log/panel.log"
 cat > "$install_root/config-default" <<'EOF'
 MODE=observe
 EOF
-head -c 262144 /dev/zero | tr '\000' a > "$install_root/log/panel.log"
-head -c 131072 /dev/zero | tr '\000' z >> "$install_root/log/panel.log"
-head -c 131072 /dev/zero | tr '\000' z > "$TEMP/default-tail"
+head -c 131072 /dev/zero | tr '\000' a > "$install_root/log/panel.log"
+head -c 65536 /dev/zero | tr '\000' z >> "$install_root/log/panel.log"
+head -c 65536 /dev/zero | tr '\000' z > "$TEMP/default-tail"
 env R2O_DIR="$install_root" R2O_CONFIG="$install_root/config-default" \
     R2O_RUNTIME_DIR="$TEMP/runtime" sh "$ROOT/router/r2o-log-maintenance.sh" tick
 cmp "$TEMP/default-tail" "$install_root/log/panel.log"

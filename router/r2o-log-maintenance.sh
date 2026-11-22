@@ -14,15 +14,12 @@ valid_bytes() {
     [ "${#1}" -le 8 ] && [ "$1" -ge 1024 ] && [ "$1" -le 67108864 ]
 }
 
-if ! valid_bytes "${LOGMAX:-262144}" ||
-   ! valid_bytes "${LOGKEEP:-131072}" ||
-   [ "${LOGKEEP:-131072}" -ge "${LOGMAX:-262144}" ]; then
-    echo 'r2o: invalid LOGMAX/LOGKEEP; using 256 KiB / 128 KiB' >&2
-    LOGMAX=262144
-    LOGKEEP=131072
-else
-    LOGMAX=${LOGMAX:-262144}
-    LOGKEEP=${LOGKEEP:-131072}
+LOGMAX=${LOGMAX:-131072}
+LOGKEEP=${LOGKEEP:-65536}
+if ! valid_bytes "$LOGMAX" || ! valid_bytes "$LOGKEEP" || [ "$LOGKEEP" -ge "$LOGMAX" ]; then
+    echo 'r2o: invalid LOGMAX/LOGKEEP; using 128 KiB / 64 KiB' >&2
+    LOGMAX=131072
+    LOGKEEP=65536
 fi
 while [ "${LOGMAX#0}" != "$LOGMAX" ]; do LOGMAX=${LOGMAX#0}; done
 while [ "${LOGKEEP#0}" != "$LOGKEEP" ]; do LOGKEEP=${LOGKEEP#0}; done
