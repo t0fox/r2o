@@ -933,10 +933,13 @@ fn link_controller_applets(staging: &Path, architecture: &str) -> io::Result<()>
         let Ok(metadata) = fs::metadata(&installed) else {
             continue;
         };
+        if !metadata.is_file() || rollback_archive::same_file(&metadata, &controller_metadata) {
+            continue;
+        }
         // На ФС без жёстких ссылок оставляем отдельный проверенный ELF из архива.
-        if metadata.is_file()
-            && !rollback_archive::same_file(&metadata, &controller_metadata)
-            && fs::hard_link(&controller, &temporary).is_ok()
+        if fs::hard_link(&controller, &temporary).is_ok()
+            || fs::symlink_metadata(&temporary)
+                .is_ok_and(|link| rollback_archive::same_file(&link, &controller_metadata))
         {
             fs::rename(temporary, installed)?;
             changed = true;
@@ -1482,6 +1485,11 @@ mod tests {
         .unwrap();
 
         let builds = release.join("builds");
+        fs::hard_link(
+            builds.join("r2o-controller-linux-mipsel"),
+            builds.join(".r2o-manager.link"),
+        )
+        .unwrap();
         for _ in 0..2 {
             link_active_applets(&root).unwrap();
             let controller = active_component_path(&root, "r2o-controller").unwrap();
