@@ -1595,23 +1595,30 @@ pub fn r2k_quic_initial_sni_result_from_datagrams(
     r2k_quic_initial_sni(datagrams, None)
 }
 
-/// Возвращает SNI только для полного ClientHello с единственным ALPN doq.
+/// Возвращает SNI для полного ClientHello с ALPN DoQ.
 pub fn r2k_quic_doq_sni(datagrams: &[&[u8]]) -> Result<Option<Vec<u8>>, &'static str> {
-    r2k_quic_initial_sni(datagrams, Some(b"\0\x04\x03doq"))
+    // DNSProxy предлагает стандартный DoQ и три его черновых варианта.
+    r2k_quic_initial_sni(
+        datagrams,
+        Some(&[
+            b"\0\x04\x03doq",
+            b"\0\x17\x03doq\x07doq-i00\x02dq\x07doq-i02",
+        ]),
+    )
 }
 
 /// Для DNS-привязки HTTP/3 требуется полный ClientHello с единственным ALPN h3.
 pub fn r2k_quic_doh3_sni(datagrams: &[&[u8]]) -> Result<Option<Vec<u8>>, &'static str> {
-    r2k_quic_initial_sni(datagrams, Some(b"\0\x03\x02h3"))
+    r2k_quic_initial_sni(datagrams, Some(&[b"\0\x03\x02h3"]))
 }
 
 fn r2k_quic_initial_sni(
     datagrams: &[&[u8]],
-    required_alpn: Option<&[u8]>,
+    allowed_alpn_lists: Option<&[&[u8]]>,
 ) -> Result<Option<Vec<u8>>, &'static str> {
     let client_hello = r2k_quic_initial_client_hello_from_datagrams(datagrams)
         .ok_or("полный ClientHello QUIC Initial не найден")?;
-    let Some(details) = find_client_hello_sni_details(&client_hello, required_alpn)? else {
+    let Some(details) = find_client_hello_sni_details(&client_hello, allowed_alpn_lists)? else {
         return Ok(None);
     };
     Ok(Some(
@@ -2217,7 +2224,7 @@ struct ClientHelloSniDetails {
 
 fn find_client_hello_sni_details(
     bytes: &[u8],
-    required_alpn: Option<&[u8]>,
+    allowed_alpn_lists: Option<&[&[u8]]>,
 ) -> Result<Option<ClientHelloSniDetails>, &'static str> {
     if bytes.len() < 4 || bytes[0] != 1 {
         return Err("неверный заголовок TLS ClientHello");
@@ -2273,11 +2280,11 @@ fn find_client_hello_sni_details(
             .checked_add(extension_len)
             .filter(|extension_end| *extension_end <= extensions_end)
             .ok_or("расширение ClientHello выходит за границы списка")?;
-        if let Some(required_alpn) = required_alpn
+        if let Some(allowed_alpn_lists) = allowed_alpn_lists
             && extension_type == 16
         {
-            if alpn_seen || &bytes[offset..extension_end] != required_alpn {
-                return Err("QUIC ClientHello не содержит ожидаемый единственный ALPN");
+            if alpn_seen || !allowed_alpn_lists.contains(&&bytes[offset..extension_end]) {
+                return Err("QUIC ClientHello содержит неподдерживаемый список ALPN");
             }
             alpn_seen = true;
         }
@@ -2329,7 +2336,7 @@ fn find_client_hello_sni_details(
         }
         offset = extension_end;
     }
-    if required_alpn.is_some() && !alpn_seen {
+    if allowed_alpn_lists.is_some() && !alpn_seen {
         return Err("QUIC ClientHello не содержит обязательный ALPN");
     }
     Ok(sni)

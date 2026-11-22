@@ -6921,6 +6921,14 @@ mod tests {
             .unwrap();
         assert_eq!(applied.binding, binding);
         assert_eq!(applied.trial_id, [0; 16]);
+        let dnsproxy = initial(host, b"\x03doq\x07doq-i00\x02dq\x07doq-i02", 853);
+        assert_eq!(
+            plans
+                .applied_event_for_packet_at_hook(&dnsproxy, 1, out)
+                .unwrap()
+                .binding,
+            binding
+        );
         let (head, tail) = r2k_core::quic::r2k_quic_hello_split(&addressed[28..], host).unwrap();
         let split = udp_packet(&head, 853);
         let snapshot = r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&head, &tail]).unwrap();
@@ -6959,6 +6967,7 @@ mod tests {
             initial("healthy.example", b"\x03doq", 853),
             initial(host, b"\x03doq", 8853),
             initial(host, b"\x02h3", 853),
+            initial(host, b"\x03doq\x02h3", 853),
             initial(host, b"\x03doq\x02h3", 853),
         ] {
             assert!(
