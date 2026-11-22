@@ -16,6 +16,8 @@ const CACHE_HEADER: &str = "D2K-CF-DOMAINS 1\n";
 const CACHE_MAX_BYTES: usize = 64 * 254 + 128;
 /// C `TG_CF_REMOTE_MAX`.
 const REMOTE_MAX: usize = 32;
+const RATE_LIMIT_CAPACITY: usize = 256;
+const RATE_LIMIT_HISTORY: Duration = Duration::from_secs(86400);
 
 #[derive(Clone, Debug)]
 pub struct CfDomainSnapshot {
@@ -94,20 +96,32 @@ impl CfDomainPool {
     }
 
     pub fn mark_rate_limited(&self, domain: &str) {
+        let now = Instant::now();
         let mut rate_limits = self
             .rate_limits
             .lock()
             .expect("повреждена блокировка ограничения частоты Cloudflare");
+        rate_limits
+            .retain(|_, state| now.saturating_duration_since(state.until) < RATE_LIMIT_HISTORY);
+        if rate_limits.len() == RATE_LIMIT_CAPACITY
+            && !rate_limits.contains_key(domain)
+            && let Some(oldest) = rate_limits
+                .iter()
+                .min_by_key(|(_, state)| state.until)
+                .map(|(domain, _)| domain.clone())
+        {
+            rate_limits.remove(&oldest);
+        }
         let state = rate_limits
             .entry(domain.to_string())
             .or_insert_with(|| RateLimitState {
                 failures: 0,
-                until: Instant::now(),
+                until: now,
             });
         state.failures = state.failures.saturating_add(1);
         let exponent = u32::from(state.failures.saturating_sub(1).min(3));
         let seconds = (45_u64.saturating_mul(1 << exponent)).min(300);
-        state.until = Instant::now() + Duration::from_secs(seconds);
+        state.until = now + Duration::from_secs(seconds);
     }
 
     pub fn mark_available(&self, domain: &str) {
@@ -203,15 +217,15 @@ fn load_cached(path: &Path) -> Option<(Vec<String>, u64)> {
     {
         return None;
     }
-    let data = fs::read(path).ok()?;
-    if data.len() > CACHE_MAX_BYTES || data.contains(&0) {
+    let data = crate::list_update::read_cached_text(path, CACHE_MAX_BYTES as u64)?;
+    if data.contains('\0') {
         return None;
     }
-    if data.starts_with(CACHE_HEADER.as_bytes()) {
+    if data.starts_with(CACHE_HEADER) {
         return parse_text_cache(&data);
     }
     // Совместимость с прежним JSON-кэшем R2O.
-    let cache: CachedDomainPool = serde_json::from_slice(&data).ok()?;
+    let cache: CachedDomainPool = serde_json::from_str(&data).ok()?;
     if cache.schema_version != CACHE_SCHEMA_VERSION {
         return None;
     }
@@ -219,8 +233,7 @@ fn load_cached(path: &Path) -> Option<(Vec<String>, u64)> {
     (domains.len() >= MIN_VALID_DOMAINS).then_some((domains, cache.fetched_at))
 }
 
-fn parse_text_cache(data: &[u8]) -> Option<(Vec<String>, u64)> {
-    let text = std::str::from_utf8(data).ok()?;
+fn parse_text_cache(text: &str) -> Option<(Vec<String>, u64)> {
     let body = text.strip_prefix(CACHE_HEADER)?;
     let (timestamp, rest) = body.split_once('\n')?;
     let timestamp = timestamp.strip_prefix("fetched_at=")?;
@@ -321,7 +334,7 @@ fn write_cache_atomically(path: &Path, fetched_at: u64, domains: &[String]) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::CfDomainPool;
+    use super::{CfDomainPool, RATE_LIMIT_CAPACITY};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -446,5 +459,16 @@ mod tests {
         pool.mark_available("alpha.example.co.uk");
         assert!(!pool.is_rate_limited("alpha.example.co.uk"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn история_429_ограничена_при_смене_доменов() {
+        let pool = CfDomainPool::new(Vec::new(), true, cache_path());
+        for index in 0..RATE_LIMIT_CAPACITY {
+            pool.mark_rate_limited(&format!("cf-{index}.example.org"));
+        }
+        pool.mark_rate_limited("fresh.example.org");
+        assert_eq!(pool.rate_limits.lock().unwrap().len(), RATE_LIMIT_CAPACITY);
+        assert!(pool.is_rate_limited("fresh.example.org"));
     }
 }

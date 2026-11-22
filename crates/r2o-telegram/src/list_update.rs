@@ -1179,7 +1179,7 @@ pub(crate) fn verified_meta_source(
     Some((manifest.fetched_at, manifest.sha256, body))
 }
 
-fn read_cached_text(path: &Path, limit: u64) -> Option<String> {
+pub(crate) fn read_cached_text(path: &Path, limit: u64) -> Option<String> {
     use std::io::Read;
 
     let mut options = std::fs::OpenOptions::new();
