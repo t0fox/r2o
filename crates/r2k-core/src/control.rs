@@ -63,6 +63,8 @@ pub const EVENT_R2O_TCP_RST_CUT: u16 = 0x001b;
 pub const EVENT_R2O_TCP_EXCHANGE: u16 = 0x001c;
 pub const EVENT_R2O_VOICE_STUN_PROOF: u16 = 0x001d;
 pub const EVENT_R2O_VOICE_RTP_PROOF: u16 = 0x001e;
+pub const EVENT_R2O_STUN_SUSPECT: u16 = 0x001f;
+pub const EVENT_R2O_STUN_EXCHANGE: u16 = 0x0020;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
 pub const COMMAND_SET_NAME: u16 = 0x0081;
@@ -171,6 +173,13 @@ fn dns_plan_endpoint(prefix: &str, key: &[u8]) -> Option<SocketAddr> {
 pub const COMMAND_SET_VOICE_ADDR: u16 = 0x0094;
 pub const COMMAND_SET_VOICE_ADDR_PROBE: u16 = 0x0095;
 pub const COMMAND_DEL_VOICE_ADDR_PROBE: u16 = 0x0096;
+// Команды R2OP: номера D2K для endpoint пересекаются с уже занятыми voice-командами.
+pub const COMMAND_SET_ENDPOINT: u16 = 0x00a0;
+pub const COMMAND_DEL_ENDPOINT: u16 = 0x00a1;
+pub const COMMAND_SET_ENDPOINT_BOUND: u16 = 0x00a2;
+pub const COMMAND_SET_DNS_PROBE: u16 = 0x009c;
+pub const COMMAND_SET_DNS_ENDPOINT: u16 = 0x009d;
+pub const ENDPOINT_KEY_LEN: usize = 20;
 pub const COMMAND_SET_ADDR_PROBE: u16 = 0x0089;
 pub const COMMAND_DEL_ADDR_PROBE: u16 = 0x008a;
 pub const MAX_TCP_STALL_BUDGETS: usize = 8;
@@ -209,6 +218,8 @@ pub const SHAPE_ECH_NO_TS: u8 = 10;
 pub const SHAPE_MODERN_TS: u8 = 11;
 pub const SHAPE_LEGACY_TS: u8 = 12;
 pub const SHAPE_ECH_TS: u8 = 13;
+pub const SHAPE_DNS_PROBE: u8 = 14;
+pub const SHAPE_DNS_TCP: u8 = 15;
 pub const TCP_PROFILE_UNKNOWN: u8 = 0;
 pub const TCP_PROFILE_NO_TS: u8 = 1;
 pub const TCP_PROFILE_TS: u8 = 2;
@@ -544,6 +555,18 @@ pub struct AppliedEvent {
 }
 
 impl AppliedEvent {
+    pub fn is_stun_trial_execution(&self) -> bool {
+        self.key[37] == 17
+            && self.binding.is_known()
+            && self.binding.kind == 2
+            && self.binding.family == self.key[0]
+            && self.binding.shape == SHAPE_VOICE
+            && self.binding.temporary
+            && self.execution_id != 0
+            && self.trial_id != [0; 16]
+            && self.plan_id != [0; 16]
+    }
+
     pub fn event_body(&self) -> Option<Vec<u8>> {
         if !valid_flow_key(&self.key) || !valid_binding(&self.binding) {
             return None;
@@ -772,11 +795,13 @@ pub struct R2oVoiceSuspectEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct R2oQuicSuspectEvent {
+pub struct R2oUdpSuspectEvent {
     pub key: [u8; KEY_LEN],
     pub client_is_low: bool,
     pub planned: bool,
 }
+
+pub type R2oQuicSuspectEvent = R2oUdpSuspectEvent;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct R2oTcpSilenceEvent {
@@ -990,7 +1015,7 @@ impl R2oTcpSilenceEvent {
     }
 }
 
-impl R2oQuicSuspectEvent {
+impl R2oUdpSuspectEvent {
     pub fn event_body(&self) -> Option<Vec<u8>> {
         if !valid_flow_key(&self.key) || self.key[37] != 17 {
             return None;
@@ -1707,6 +1732,134 @@ pub fn encode_set_name_bound(
     encode_frame(COMMAND_SET_NAME_BOUND, &body)
 }
 
+/// Ключ D2K endpoint: семейство, канонический адрес, форма, серверный порт.
+pub fn decode_endpoint_key(bytes: &[u8]) -> Option<(SocketAddr, u8)> {
+    let &[family, ip @ .., shape, port_hi, port_lo]: &[u8; ENDPOINT_KEY_LEN] =
+        bytes.try_into().ok()?;
+    let ip = match family {
+        4 if ip[4..].iter().all(|byte| *byte == 0) => {
+            IpAddr::from(<[u8; 4]>::try_from(&ip[..4]).ok()?)
+        }
+        6 => IpAddr::from(ip),
+        _ => return None,
+    };
+    let port = u16::from_be_bytes([port_hi, port_lo]);
+    (endpoint_shape_valid(shape) && port != 0 && !ip.is_unspecified() && !ip.is_multicast())
+        .then_some((SocketAddr::new(ip, port), shape))
+}
+
+const fn endpoint_shape_valid(shape: u8) -> bool {
+    matches!(
+        shape,
+        SHAPE_QUIC | SHAPE_VOICE | SHAPE_DNS_PROBE | SHAPE_DNS_TCP
+    )
+}
+
+pub const fn dns_endpoint_shape(transport: u8) -> Option<u8> {
+    match transport {
+        6 => Some(SHAPE_DNS_TCP),
+        17 => Some(SHAPE_DNS_PROBE),
+        _ => None,
+    }
+}
+
+pub const fn dns_endpoint_transport(shape: u8) -> Option<u8> {
+    match shape {
+        SHAPE_DNS_TCP => Some(6),
+        SHAPE_DNS_PROBE => Some(17),
+        _ => None,
+    }
+}
+
+fn endpoint_key(endpoint: SocketAddr, shape: u8) -> Result<[u8; ENDPOINT_KEY_LEN], &'static str> {
+    if !endpoint_shape_valid(shape)
+        || endpoint.port() == 0
+        || endpoint.ip().is_unspecified()
+        || endpoint.ip().is_multicast()
+        || matches!(endpoint, SocketAddr::V6(addr) if addr.scope_id() != 0 || addr.flowinfo() != 0)
+    {
+        return Err("неверный ключ адресной привязки");
+    }
+    let mut key = [0; ENDPOINT_KEY_LEN];
+    match endpoint.ip() {
+        IpAddr::V4(ip) => {
+            key[0] = 4;
+            key[1..5].copy_from_slice(&ip.octets());
+        }
+        IpAddr::V6(ip) => {
+            key[0] = 6;
+            key[1..17].copy_from_slice(&ip.octets());
+        }
+    }
+    key[17] = shape;
+    key[18..20].copy_from_slice(&endpoint.port().to_be_bytes());
+    Ok(key)
+}
+
+pub fn encode_set_endpoint(
+    endpoint: SocketAddr,
+    shape: u8,
+    plan_records: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let mut body = Vec::with_capacity(ENDPOINT_KEY_LEN + plan_records.len());
+    body.extend_from_slice(&endpoint_key(endpoint, shape)?);
+    body.extend_from_slice(plan_records);
+    encode_frame(COMMAND_SET_ENDPOINT, &body)
+}
+
+pub fn encode_delete_endpoint(endpoint: SocketAddr, shape: u8) -> Result<Vec<u8>, &'static str> {
+    encode_frame(COMMAND_DEL_ENDPOINT, &endpoint_key(endpoint, shape)?)
+}
+
+pub fn encode_set_endpoint_bound(
+    endpoint: SocketAddr,
+    shape: u8,
+    plan_records: &[u8],
+    token: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    if token == [0; 16] {
+        return Err("подтверждаемая UDP-привязка требует ненулевой токен");
+    }
+    let mut body = Vec::with_capacity(ENDPOINT_KEY_LEN + plan_records.len() + token.len());
+    body.extend_from_slice(&endpoint_key(endpoint, shape)?);
+    body.extend_from_slice(plan_records);
+    body.extend_from_slice(&token);
+    encode_frame(COMMAND_SET_ENDPOINT_BOUND, &body)
+}
+
+/// Закрепляем измеренную форму DNS/UDP за точным endpoint.
+pub fn encode_set_dns_endpoint(
+    endpoint: SocketAddr,
+    query_len: u16,
+    plan_records: &[u8],
+    token: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    encode_set_dns_endpoint_for_transport(endpoint, 17, query_len, plan_records, token)
+}
+
+/// Длина относится к байтам на проводе, включая двухбайтный префикс DNS/TCP.
+pub fn encode_set_dns_endpoint_for_transport(
+    endpoint: SocketAddr,
+    transport: u8,
+    query_len: u16,
+    plan_records: &[u8],
+    token: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    let shape = dns_endpoint_shape(transport).ok_or("неподдерживаемый транспорт DNS")?;
+    let key = endpoint_key(endpoint, shape)?;
+    if token == [0; 16]
+        || !crate::dns_probe::is_dns_probe_wire_length(usize::from(query_len), transport)
+    {
+        return Err("DNS endpoint требует измеренную длину запроса и ненулевой токен");
+    }
+    let mut body = Vec::with_capacity(ENDPOINT_KEY_LEN + 2 + plan_records.len() + token.len());
+    body.extend_from_slice(&key);
+    body.extend_from_slice(&query_len.to_be_bytes());
+    body.extend_from_slice(plan_records);
+    body.extend_from_slice(&token);
+    encode_frame(COMMAND_SET_DNS_ENDPOINT, &body)
+}
+
 pub fn encode_set_addr(
     address: IpAddr,
     shape: u8,
@@ -1923,7 +2076,7 @@ pub fn encode_set_addr_probe(
     plan_records: &[u8],
     trial_id: [u8; 16],
 ) -> Result<Vec<u8>, &'static str> {
-    let flow = udp_addr_probe_flow(source, destination)?;
+    let flow = addr_probe_flow(source, destination, 17)?;
     // C `d2k_link_set_addr_probe_family` не сверяет план с формой.
     if lease_ms == 0 || lease_ms > ADDR_PROBE_LEASE_MAX_MS || trial_id.iter().all(|byte| *byte == 0)
     {
@@ -1942,14 +2095,105 @@ pub fn encode_delete_addr_probe(
     destination: SocketAddr,
     trial_id: [u8; 16],
 ) -> Result<Vec<u8>, &'static str> {
-    let flow = udp_addr_probe_flow(source, destination)?;
+    let flow = addr_probe_flow(source, destination, 17)?;
+    delete_addr_probe_flow(flow, trial_id)
+}
+
+pub fn encode_delete_dns_tcp_probe(
+    source: SocketAddr,
+    destination: SocketAddr,
+    trial_id: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    delete_addr_probe_flow(dns_probe_flow(source, destination, 6)?, trial_id)
+}
+
+fn delete_addr_probe_flow(
+    flow: [u8; KEY_LEN],
+    trial_id: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
     if trial_id.iter().all(|byte| *byte == 0) {
-        return Err("идентификатор временной QUIC-привязки не может быть нулевым");
+        return Err("идентификатор временной адресной привязки не может быть нулевым");
     }
     let mut body = Vec::with_capacity(KEY_LEN + 16);
     body.extend_from_slice(&flow);
     body.extend_from_slice(&trial_id);
     encode_frame(COMMAND_DEL_ADDR_PROBE, &body)
+}
+
+/// Временный план DNS/UDP для собственного сокета и точных байтов вопроса.
+pub fn encode_set_dns_probe(
+    source: SocketAddr,
+    destination: SocketAddr,
+    lease_ms: u32,
+    plan_records: &[u8],
+    trial_id: [u8; 16],
+    question: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    encode_dns_probe(
+        dns_probe_flow(source, destination, 17)?,
+        lease_ms,
+        plan_records,
+        trial_id,
+        question,
+    )
+}
+
+/// Временный план DNS/TCP, защищённый длиной и байтами полного DNS-кадра.
+pub fn encode_set_dns_tcp_probe(
+    source: SocketAddr,
+    destination: SocketAddr,
+    lease_ms: u32,
+    plan_records: &[u8],
+    trial_id: [u8; 16],
+    frame: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    encode_dns_probe(
+        dns_probe_flow(source, destination, 6)?,
+        lease_ms,
+        plan_records,
+        trial_id,
+        frame,
+    )
+}
+
+fn dns_probe_flow(
+    source: SocketAddr,
+    destination: SocketAddr,
+    transport: u8,
+) -> Result<[u8; KEY_LEN], &'static str> {
+    let flow = addr_probe_flow(source, destination, transport)?;
+    if source.is_ipv4() != destination.is_ipv4()
+        || [source, destination].into_iter().any(|address| {
+            matches!(address, SocketAddr::V6(address) if address.scope_id() != 0
+                || address.flowinfo() != 0 || address.ip().to_ipv4_mapped().is_some())
+        })
+        || !valid_exact_addr_probe_flow(&flow, transport)
+    {
+        return Err("некорректные параметры временной DNS-пробы");
+    }
+    Ok(flow)
+}
+
+fn encode_dns_probe(
+    flow: [u8; KEY_LEN],
+    lease_ms: u32,
+    plan_records: &[u8],
+    trial_id: [u8; 16],
+    wire: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    if lease_ms == 0 || lease_ms > ADDR_PROBE_LEASE_MAX_MS || trial_id == [0; 16] {
+        return Err("некорректные параметры временной DNS-пробы");
+    }
+    let guard = crate::dns_probe::DnsProbeGuard::from_wire(wire, flow[37])
+        .ok_or("DNS-проба требует одного полного вопроса класса IN")?;
+    let mut body = Vec::with_capacity(KEY_LEN + 54 + plan_records.len());
+    body.extend_from_slice(&flow);
+    body.extend_from_slice(&trial_id);
+    body.extend_from_slice(&lease_ms.to_be_bytes());
+    body.extend_from_slice(&guard.length.to_be_bytes());
+    body.extend_from_slice(&guard.sha256);
+    body.extend_from_slice(plan_records);
+    encode_frame(COMMAND_SET_DNS_PROBE, &body)
 }
 
 fn address_bytes_16(address: IpAddr) -> [u8; 16] {
@@ -1963,14 +2207,15 @@ fn address_bytes_16(address: IpAddr) -> [u8; 16] {
     }
 }
 
-fn udp_addr_probe_flow(
+fn addr_probe_flow(
     source: SocketAddr,
     destination: SocketAddr,
+    transport: u8,
 ) -> Result<[u8; KEY_LEN], &'static str> {
     // C `addr_probe_flow_bytes`: только dst_port != 0; src_port 0, нулевые
     // адреса и разные семейства допускаются, ширина — по family источника.
     if destination.port() == 0 {
-        return Err("UDP-поток временной привязки имеет недопустимый dst port");
+        return Err("поток временной привязки имеет недопустимый dst port");
     }
     let family = if source.is_ipv4() { 4 } else { 6 };
     let width = if family == 4 { 4 } else { 16 };
@@ -1982,12 +2227,20 @@ fn udp_addr_probe_flow(
     flow[17..17 + width].copy_from_slice(&dst[..width]);
     flow[33..35].copy_from_slice(&source.port().to_be_bytes());
     flow[35..37].copy_from_slice(&destination.port().to_be_bytes());
-    flow[37] = 17;
+    flow[37] = transport;
     Ok(flow)
 }
 
 pub fn valid_udp_addr_probe_flow(flow: &[u8; KEY_LEN]) -> bool {
-    if !matches!(flow[0], 4 | 6) || flow[37] != 17 {
+    valid_exact_addr_probe_flow(flow, 17)
+}
+
+pub fn valid_tcp_addr_probe_flow(flow: &[u8; KEY_LEN]) -> bool {
+    valid_exact_addr_probe_flow(flow, 6)
+}
+
+fn valid_exact_addr_probe_flow(flow: &[u8; KEY_LEN], transport: u8) -> bool {
+    if !matches!(flow[0], 4 | 6) || flow[37] != transport {
         return false;
     }
     if u16::from_be_bytes([flow[33], flow[34]]) == 0
@@ -2282,17 +2535,24 @@ pub fn encode_ack_with_identifiers_profile(
     area_id: Option<[u8; 16]>,
     binding_context: Option<BindingContext>,
 ) -> Result<Vec<u8>, &'static str> {
-    if command == COMMAND_SET_NAME_BOUND && (trial_id.is_none() || binding_context.is_none()) {
-        return Err("SET_NAME_BOUND ACK требует trial ID и контекст привязки");
+    let bound_install = matches!(
+        command,
+        COMMAND_SET_NAME_BOUND | COMMAND_SET_ENDPOINT_BOUND | COMMAND_SET_DNS_ENDPOINT
+    );
+    if bound_install && (trial_id.is_none() || binding_context.is_none()) {
+        return Err("ACK подтверждаемой установки требует токен и контекст привязки");
     }
     if trial_id.is_some()
         && !matches!(
             command,
             COMMAND_SET_NAME_BOUND
+                | COMMAND_SET_ENDPOINT_BOUND
+                | COMMAND_SET_DNS_ENDPOINT
                 | COMMAND_SET_NAME_PROBE
                 | COMMAND_SET_VOICE_ADDR_PROBE
                 | COMMAND_DEL_VOICE_ADDR_PROBE
                 | COMMAND_SET_ADDR_PROBE
+                | COMMAND_SET_DNS_PROBE
                 | COMMAND_DEL_ADDR_PROBE
         )
         && !(profile == WireProfile::V48 && command == COMMAND_DEL_NAME_PROBE)
@@ -2308,17 +2568,12 @@ pub fn encode_ack_with_identifiers_profile(
         return Err("area ID ACK разрешён только для команды области");
     }
     if let Some(binding) = binding_context {
-        let valid_binding = valid_ack_name_binding(binding);
-        if command == COMMAND_SET_NAME_BOUND {
+        let valid_binding = valid_install_ack_binding(command, &binding);
+        if bound_install {
             if ok && !valid_binding || !ok && binding != BindingContext::default() {
-                return Err("SET_NAME_BOUND ACK содержит неверный контекст привязки");
+                return Err("ACK подтверждаемой установки содержит неверный контекст привязки");
             }
-        } else if !ok
-            || trial_id.is_some()
-            || command != COMMAND_SET_NAME
-            || !valid_binding
-            || binding.shape != SHAPE_HTTP
-        {
+        } else if !ok || trial_id.is_some() || command != COMMAND_SET_NAME || !valid_binding {
             return Err("контекст привязки ACK допустим только для постоянного HTTP-плана имени");
         }
     }
@@ -2359,14 +2614,6 @@ pub fn encode_ack_with_identifiers_profile(
     encode_frame(EVENT_ACK, &body)
 }
 
-fn valid_ack_name_binding(binding: BindingContext) -> bool {
-    binding.is_known()
-        && matches!(binding.family, 4 | 6)
-        && !binding.temporary
-        && (binding.kind == 1 && is_tcp_plan_shape(binding.shape)
-            || binding.kind == 2 && binding.shape == SHAPE_QUIC)
-}
-
 pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
     decode_ack_profile(WireProfile::V48, frame)
 }
@@ -2386,13 +2633,20 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
     if ok && reason != ACK_OK {
         return Err("успешное подтверждение содержит код отказа");
     }
+    let bound_install = matches!(
+        command,
+        COMMAND_SET_NAME_BOUND | COMMAND_SET_ENDPOINT_BOUND | COMMAND_SET_DNS_ENDPOINT
+    );
     let supports_trial_id = matches!(
         command,
         COMMAND_SET_NAME_BOUND
+            | COMMAND_SET_ENDPOINT_BOUND
+            | COMMAND_SET_DNS_ENDPOINT
             | COMMAND_SET_NAME_PROBE
             | COMMAND_SET_VOICE_ADDR_PROBE
             | COMMAND_DEL_VOICE_ADDR_PROBE
             | COMMAND_SET_ADDR_PROBE
+            | COMMAND_SET_DNS_PROBE
             | COMMAND_DEL_ADDR_PROBE
     ) || profile == WireProfile::V48 && command == COMMAND_DEL_NAME_PROBE;
     let supports_area_id = matches!(
@@ -2403,7 +2657,7 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
     let remaining = frame.body.len() - cursor;
     let trial_id = if supports_trial_id
         && (remaining == 16
-            || command == COMMAND_SET_NAME_BOUND
+            || bound_install
                 && (remaining == 16 + ACK_BINDING_CONTEXT_LEN
                     || remaining == 16 + BINDING_CONTEXT_LEN))
     {
@@ -2427,7 +2681,7 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
     };
     let binding_context = if cursor == frame.body.len() {
         None
-    } else if matches!(command, COMMAND_SET_NAME | COMMAND_SET_NAME_BOUND) {
+    } else if bound_install || command == COMMAND_SET_NAME {
         let context = if frame.body.len() == cursor + ACK_BINDING_CONTEXT_LEN
             && frame.body[cursor..cursor + 4] == *ACK_BINDING_CONTEXT_MAGIC
         {
@@ -2455,20 +2709,20 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
                 .try_into()
                 .map_err(|_| "неверная эпоха таблицы привязок ACK")?,
         };
-        let valid_binding = valid_ack_name_binding(binding);
-        if command == COMMAND_SET_NAME_BOUND {
+        let valid_binding = valid_install_ack_binding(command, &binding);
+        if bound_install {
             if ok && !valid_binding || !ok && binding != BindingContext::default() {
-                return Err("ACK содержит неверный контекст SET_NAME_BOUND");
+                return Err("ACK содержит неверный контекст подтверждаемой установки");
             }
-        } else if !valid_binding || binding.shape != SHAPE_HTTP || !ok {
+        } else if !valid_binding || !ok {
             return Err("ACK содержит неверный HTTP-контекст привязки");
         }
         Some(binding)
     } else {
         return Err("неверная длина подтверждения команды");
     };
-    if command == COMMAND_SET_NAME_BOUND && (trial_id.is_none() || binding_context.is_none()) {
-        return Err("SET_NAME_BOUND ACK не содержит trial ID или контекст привязки");
+    if bound_install && (trial_id.is_none() || binding_context.is_none()) {
+        return Err("ACK подтверждаемой установки не содержит токен или контекст привязки");
     }
     Ok(Ack {
         command,
@@ -2478,6 +2732,26 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
         area_id,
         binding_context,
     })
+}
+
+fn valid_install_ack_binding(command: u16, binding: &BindingContext) -> bool {
+    binding.is_known()
+        && matches!(binding.family, 4 | 6)
+        && !binding.temporary
+        && match command {
+            COMMAND_SET_ENDPOINT_BOUND => {
+                binding.kind == 2 && matches!(binding.shape, SHAPE_QUIC | SHAPE_VOICE)
+            }
+            COMMAND_SET_DNS_ENDPOINT => matches!(
+                (binding.kind, binding.shape),
+                (2, SHAPE_DNS_PROBE) | (1, SHAPE_DNS_TCP)
+            ),
+            COMMAND_SET_NAME_BOUND => {
+                binding.kind == 1 && is_tcp_plan_shape(binding.shape)
+                    || binding.kind == 2 && binding.shape == SHAPE_QUIC
+            }
+            _ => binding.kind == 1 && binding.shape == SHAPE_HTTP,
+        }
 }
 
 #[cfg(test)]
@@ -2681,25 +2955,42 @@ mod ack_binding_context_tests {
 }
 
 pub fn decode_applied(frame: &Frame) -> Result<AppliedEvent, &'static str> {
+    if frame.kind != EVENT_APPLIED {
+        return Err("неверный тип события APPLIED");
+    }
+    decode_applied_body(&frame.body)
+}
+
+/// Binding-ответ клиента с контекстом фактически выполненного временного плана.
+pub fn decode_stun_exchange(frame: &Frame) -> Result<AppliedEvent, &'static str> {
+    if frame.kind != EVENT_R2O_STUN_EXCHANGE {
+        return Err("неверный тип события STUN-обмена");
+    }
+    let event = decode_applied_body(&frame.body)?;
+    if !event.is_stun_trial_execution() {
+        return Err("STUN-обмен не связан с исполнением временной UDP-пробы");
+    }
+    Ok(event)
+}
+
+fn decode_applied_body(body: &[u8]) -> Result<AppliedEvent, &'static str> {
     let base_len = KEY_LEN + 16 + 16;
-    if frame.kind != EVENT_APPLIED
-        || (frame.body.len() != base_len && frame.body.len() != base_len + EXECUTION_CONTEXT_LEN)
-    {
+    if body.len() != base_len && body.len() != base_len + EXECUTION_CONTEXT_LEN {
         return Err("неверный размер события APPLIED");
     }
-    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
+    let key: [u8; KEY_LEN] = body[..KEY_LEN]
         .try_into()
         .map_err(|_| "неверный ключ события APPLIED")?;
     if !valid_flow_key(&key) {
         return Err("событие APPLIED содержит неверный ключ потока");
     }
-    let plan_id = frame.body[KEY_LEN..KEY_LEN + 16]
+    let plan_id = body[KEY_LEN..KEY_LEN + 16]
         .try_into()
         .map_err(|_| "неверный идентификатор плана в событии APPLIED")?;
-    let trial_id = frame.body[KEY_LEN + 16..KEY_LEN + 32]
+    let trial_id = body[KEY_LEN + 16..KEY_LEN + 32]
         .try_into()
         .map_err(|_| "неверный идентификатор испытания в событии APPLIED")?;
-    let context = &frame.body[base_len..];
+    let context = &body[base_len..];
     let (execution_id, binding) = if context.is_empty() {
         // d2k_link_next accepts the pre-context APPLIED form; zeroes mean
         // unknown, matching the zero-initialized C event.
@@ -3311,44 +3602,40 @@ pub fn decode_r2o_voice_suspect(frame: &Frame) -> Result<R2oVoiceSuspectEvent, &
 }
 
 pub fn decode_r2o_quic_suspect(frame: &Frame) -> Result<R2oQuicSuspectEvent, &'static str> {
-    if frame.kind != EVENT_R2O_QUIC_SUSPECT || frame.body.len() != KEY_LEN + 2 {
+    if frame.kind != EVENT_R2O_QUIC_SUSPECT {
         return Err("неверное событие подозрения молчания QUIC");
     }
-    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
-        .try_into()
-        .map_err(|_| "неверный ключ UDP-потока QUIC")?;
-    if !valid_flow_key(&key)
-        || key[37] != 17
-        || frame.body[KEY_LEN] > 1
-        || frame.body[KEY_LEN + 1] > 1
-    {
-        return Err("подозрение содержит неверный UDP-поток или направление клиента");
-    }
-    Ok(R2oQuicSuspectEvent {
-        key,
-        client_is_low: frame.body[KEY_LEN] == 1,
-        planned: frame.body[KEY_LEN + 1] == 1,
-    })
+    decode_udp_suspect(&frame.body)
 }
 
 pub fn decode_r2o_quic_stall(frame: &Frame) -> Result<R2oQuicSuspectEvent, &'static str> {
-    if frame.kind != EVENT_R2O_QUIC_STALL || frame.body.len() != KEY_LEN + 2 {
+    if frame.kind != EVENT_R2O_QUIC_STALL {
         return Err("неверное событие зависания QUIC после ответа");
     }
-    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
-        .try_into()
-        .map_err(|_| "неверный ключ зависшего UDP-потока QUIC")?;
-    if !valid_flow_key(&key)
-        || key[37] != 17
-        || frame.body[KEY_LEN] > 1
-        || frame.body[KEY_LEN + 1] > 1
-    {
-        return Err("зависание содержит неверный UDP-поток или направление клиента");
+    decode_udp_suspect(&frame.body)
+}
+
+pub fn decode_stun_suspect(frame: &Frame) -> Result<R2oUdpSuspectEvent, &'static str> {
+    if frame.kind != EVENT_R2O_STUN_SUSPECT {
+        return Err("неверное событие молчания STUN");
     }
-    Ok(R2oQuicSuspectEvent {
+    decode_udp_suspect(&frame.body)
+}
+
+fn decode_udp_suspect(body: &[u8]) -> Result<R2oUdpSuspectEvent, &'static str> {
+    if body.len() != KEY_LEN + 2 {
+        return Err("неверная длина события молчания UDP");
+    }
+    let key: [u8; KEY_LEN] = body[..KEY_LEN]
+        .try_into()
+        .map_err(|_| "неверный ключ UDP-потока")?;
+    if !valid_flow_key(&key) || key[37] != 17 || body[KEY_LEN] > 1 || body[KEY_LEN + 1] > 1 {
+        return Err("подозрение содержит неверный UDP-поток или направление клиента");
+    }
+    Ok(R2oUdpSuspectEvent {
         key,
-        client_is_low: frame.body[KEY_LEN] == 1,
-        planned: frame.body[KEY_LEN + 1] == 1,
+        client_is_low: body[KEY_LEN] == 1,
+        planned: body[KEY_LEN + 1] == 1,
     })
 }
 
@@ -3578,7 +3865,16 @@ pub fn decode_r2o_tcp_stall(frame: &Frame) -> Result<R2oTcpStallEvent, &'static 
 }
 
 fn valid_binding(binding: &BindingContext) -> bool {
-    binding.kind <= 4 && matches!(binding.family, 0 | 4 | 6) && binding.shape <= SHAPE_ECH_TS
+    binding.kind <= 4
+        && matches!(binding.family, 0 | 4 | 6)
+        && (binding.shape <= SHAPE_ECH_TS
+            || binding.shape == SHAPE_DNS_PROBE
+                && binding.family != 0
+                && (binding.kind == 2 || (binding.kind == 1 && binding.temporary))
+            || binding.shape == SHAPE_DNS_TCP
+                && binding.kind == 1
+                && binding.family != 0
+                && !binding.temporary)
 }
 
 /// Разбирает событие HTTP-портала v22 с необязательным контекстом запроса.

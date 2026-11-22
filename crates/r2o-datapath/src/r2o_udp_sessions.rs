@@ -4,7 +4,7 @@ use crate::netlink::{
 };
 use crate::r2o_quic::R2oUdpExchangeEvent;
 use r2k_core::addr::Address;
-use r2k_core::control::KEY_LEN;
+use r2k_core::control::{KEY_LEN, R2oUdpSuspectEvent};
 use r2k_core::packet::PacketView;
 use std::collections::{HashMap, TryReserveError, VecDeque};
 use std::time::{Duration, Instant};
@@ -14,6 +14,8 @@ const UDP_HELLO_WINDOW: u8 = 8;
 const R2O_UDP_PROOF_NONE: u8 = 0;
 const R2O_UDP_PROOF_STUN: u8 = 2;
 const STUN_TRANSACTION_ID_LEN: usize = 12;
+const STUN_SILENCE: Duration = Duration::from_secs(2);
+const STUN_OBSERVATION_WINDOW: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Endpoint {
@@ -66,6 +68,34 @@ struct StunFlow {
     transaction_id: [u8; STUN_TRANSACTION_ID_LEN],
     exchange_told: bool,
     proof_told: bool,
+    address_attempts: Option<Box<[Option<StunAttempt>; 4]>>,
+}
+
+#[derive(Clone, Copy)]
+struct StunAttempt {
+    transaction_id: [u8; STUN_TRANSACTION_ID_LEN],
+    started: Instant,
+    repeated: bool,
+    finished: bool,
+    fragmented: bool,
+}
+
+fn stun_packet_transaction(
+    packet: &[u8],
+) -> Option<(R2oUdpFlowKey, &[u8; STUN_TRANSACTION_ID_LEN])> {
+    let view = PacketView::parse(packet)?;
+    let payload = packet.get(view.udp_payload_range(packet)?)?;
+    Some((
+        flow_key_from_packet(packet)?,
+        payload.get(8..20)?.try_into().ok()?,
+    ))
+}
+
+impl StunAttempt {
+    fn needs_measurement(&self, now: Instant) -> bool {
+        let age = now.saturating_duration_since(self.started);
+        self.repeated && !self.finished && (STUN_SILENCE..STUN_OBSERVATION_WINDOW).contains(&age)
+    }
 }
 
 struct FlowState {
@@ -298,21 +328,48 @@ impl R2oUdpSessions {
         };
         flow.last_seen = now;
 
-        if flow.stun.is_none() {
-            if !client_packet || !r2k_core::stun::is_binding_request(payload) {
-                return;
-            }
+        if client_packet && r2k_core::stun::is_binding_request(payload) {
             let Some(transaction_id) = payload.get(8..20).and_then(|bytes| bytes.try_into().ok())
             else {
                 return;
             };
-            flow.stun = Some(StunFlow {
+            let stun = flow.stun.get_or_insert_with(|| StunFlow {
                 client: source,
                 server: destination,
                 transaction_id,
                 exchange_told: false,
                 proof_told: false,
+                address_attempts: None,
             });
+            if source != stun.client
+                || destination != stun.server
+                || (view.family == 4
+                    && r2k_core::stun::is_discord_voice_request(payload, destination.port))
+            {
+                return;
+            }
+            let attempts = stun
+                .address_attempts
+                .get_or_insert_with(|| Box::new([None; 4]));
+            if let Some(attempt) = attempts
+                .iter_mut()
+                .flatten()
+                .find(|attempt| attempt.transaction_id == transaction_id)
+            {
+                attempt.repeated = true;
+            } else {
+                let oldest = attempts
+                    .iter_mut()
+                    .min_by_key(|attempt| attempt.map(|entry| entry.started))
+                    .expect("четыре слота STUN");
+                *oldest = Some(StunAttempt {
+                    transaction_id,
+                    started: now,
+                    repeated: false,
+                    finished: false,
+                    fragmented: false,
+                });
+            }
             return;
         }
 
@@ -324,6 +381,19 @@ impl R2oUdpSessions {
         }
         if source != stun.server || destination != stun.client {
             return;
+        }
+
+        if let Some(attempts) = stun.address_attempts.as_mut()
+            && let Some(id) = payload.get(8..20)
+            && let Some(attempt) = attempts
+                .iter_mut()
+                .flatten()
+                .find(|attempt| attempt.transaction_id == id)
+            && (r2k_core::stun::verified_binding_address(payload, &attempt.transaction_id)
+                .is_some()
+                || r2k_core::stun::is_binding_error_for(payload, &attempt.transaction_id))
+        {
+            attempt.finished = true;
         }
 
         let proof_matches = r2k_core::stun::is_binding_response_for(payload, &stun.transaction_id);
@@ -354,6 +424,89 @@ impl R2oUdpSessions {
     /// Забрать накопленные события UDP-обмена и STUN-подтверждения.
     pub fn r2o_take_udp_exchange_events(&mut self) -> Vec<R2oUdpExchangeEvent> {
         self.udp_exchange_events.drain(..).collect()
+    }
+
+    fn address_stun_attempt(&self, packet: &[u8]) -> Option<&StunAttempt> {
+        let (key, txid) = stun_packet_transaction(packet)?;
+        self.flows
+            .get(&key)?
+            .stun
+            .as_ref()?
+            .address_attempts
+            .as_ref()?
+            .iter()
+            .flatten()
+            .find(|attempt| attempt.transaction_id == *txid)
+    }
+
+    pub fn address_stun_can_fragment(&self, packet: &[u8]) -> bool {
+        self.r2o_client_flow(packet)
+            .is_some_and(|flow| !flow.damaged)
+            && self
+                .address_stun_attempt(packet)
+                .is_some_and(|attempt| !attempt.fragmented)
+    }
+
+    pub fn address_stun_provable(&self, packet: &[u8]) -> bool {
+        self.address_stun_attempt(packet)
+            .is_some_and(|attempt| attempt.fragmented && !attempt.repeated)
+    }
+
+    pub fn note_address_stun_fragmented(&mut self, packet: &[u8]) {
+        let Some((key, txid)) = stun_packet_transaction(packet) else {
+            return;
+        };
+        if let Some(attempt) = self
+            .flows
+            .get_mut(&key)
+            .and_then(|flow| flow.stun.as_mut())
+            .and_then(|stun| stun.address_attempts.as_mut())
+            .and_then(|attempts| {
+                attempts
+                    .iter_mut()
+                    .flatten()
+                    .find(|attempt| attempt.transaction_id == *txid)
+            })
+        {
+            attempt.fragmented = true;
+        }
+    }
+
+    /// Сообщить повтор Binding Request в тишину только при видимой обратной очереди.
+    pub fn sweep_stun_suspects(
+        &mut self,
+        now: Instant,
+        mut send: impl FnMut(&R2oUdpSuspectEvent) -> bool,
+    ) {
+        for (key, flow) in &mut self.flows {
+            if flow.controller_probe || flow.damaged {
+                continue;
+            }
+            let Some(stun) = flow.stun.as_mut() else {
+                continue;
+            };
+            let Some(attempts) = stun.address_attempts.as_mut() else {
+                continue;
+            };
+            if attempts
+                .iter()
+                .flatten()
+                .any(|attempt| attempt.needs_measurement(now))
+                && send(&R2oUdpSuspectEvent {
+                    key: key.wire_key(),
+                    client_is_low: stun.client == key.low,
+                    planned: flow.plan_applied,
+                })
+            {
+                for attempt in attempts
+                    .iter_mut()
+                    .flatten()
+                    .filter(|attempt| attempt.needs_measurement(now))
+                {
+                    attempt.finished = true;
+                }
+            }
+        }
     }
 
     /// C `d2k_session_applied`: применения плана к UDP-потоку.
@@ -1810,6 +1963,50 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].code, 2, "STUN Binding proof");
         assert_eq!(sessions.session_exchanges(), 1);
+    }
+
+    #[test]
+    fn адресное_молчание_stun_требует_повтора_одной_транзакции() {
+        use crate::netlink::R2O_NF_INET_LOCAL_IN;
+
+        let client = ([192, 0, 2, 10], 53_123);
+        let server = ([198, 51, 100, 20], 3478);
+        let first = r2o_stun_packet(client, server, &binding_request([1; 12]));
+        let second = r2o_stun_packet(client, server, &binding_request([2; 12]));
+        let start = Instant::now();
+        let after_silence = start + Duration::from_secs(3);
+        let mut sessions = R2oUdpSessions::new().unwrap();
+        let forward = Some(R2O_NF_INET_POST_ROUTING);
+        assert!(sessions.r2o_observe_packet_at_hook(&first, start, forward));
+        sessions.r2o_observe_stun_packet_at_hook(&first, start, forward);
+        sessions.r2o_observe_stun_packet_at_hook(&second, start, forward);
+        sessions.sweep_stun_suspects(after_silence, |_| panic!("было два разных запроса"));
+
+        let mut reply = r2o_stun_response([2; 12]).to_vec();
+        reply[2..4].copy_from_slice(&12_u16.to_be_bytes());
+        reply.extend_from_slice(&[0, 0x20, 0, 8, 0, 1, 0xe6, 0x95, 0xe1, 0x12, 0xa6, 0x48]);
+        sessions.r2o_observe_stun_packet_at_hook(&second, start, forward);
+        sessions.r2o_observe_stun_packet_at_hook(
+            &r2o_stun_packet(server, client, &reply),
+            start + Duration::from_secs(1),
+            Some(R2O_NF_INET_LOCAL_IN),
+        );
+        sessions.sweep_stun_suspects(after_silence, |_| panic!("повтор получил Binding Response"));
+
+        sessions.r2o_observe_stun_packet_at_hook(&first, after_silence, forward);
+        let key = super::flow_key_from_packet(&first).unwrap().wire_key();
+        let mut emitted = 0;
+        for accepted in [false, true] {
+            sessions.sweep_stun_suspects(after_silence, |event| {
+                assert_eq!(event.key, key);
+                assert!(event.client_is_low);
+                assert!(!event.planned);
+                emitted += 1;
+                accepted
+            });
+        }
+        assert_eq!(emitted, 2);
+        sessions.sweep_stun_suspects(after_silence, |_| panic!("событие уже передано"));
     }
 
     #[test]

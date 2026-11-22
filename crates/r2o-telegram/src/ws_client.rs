@@ -20,7 +20,7 @@ use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::Hash;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -260,6 +260,7 @@ impl<K: Eq + Hash> Drop for ProbeGuard<'_, K> {
 type CfEdgeRouteKey = (IpAddr, String, String);
 
 static CF_EDGE_TLS_FAIL: CooldownMap<CfEdgeRouteKey> = CooldownMap::new();
+static CF_EDGE_MTPROTO_FAIL: CooldownMap<CfEdgeRouteKey> = CooldownMap::new();
 static CF_EDGE_PREFERRED: OnceLock<StdMutex<HashMap<String, (IpAddr, Instant)>>> = OnceLock::new();
 const CF_EDGE_PREFERENCE_TTL: Duration = Duration::from_secs(120);
 const CF_EDGE_HEDGE_DELAY: Duration = Duration::from_millis(125);
@@ -269,7 +270,7 @@ const CF_EDGE_HEDGE_DELAY: Duration = Duration::from_millis(125);
 pub struct CfDialOpts<'a> {
     pub cf_ips: &'a [IpAddr],
     pub fail_cooldown: Duration,
-    /// Транспорт CF proxy: auto/plain/tls. Worker всегда использует TLS.
+    /// Транспорт CF Proxy и Worker: auto/plain/tls.
     pub transport: CfTransportMode,
     /// `TG_CA_BUNDLE` для проверки сертификатов DoH, как C `tg_tls_client_context`.
     pub ca_bundle: Option<&'a std::path::Path>,
@@ -304,7 +305,7 @@ fn cf_ip_attempts(
     let mut ordered = (0..ips.len())
         .map(move |offset| ips[(first + offset) % ips.len()])
         .collect::<Vec<_>>();
-    if let Some(preferred) = preferred_cf_edge(domain)
+    if let Some(preferred) = preferred_cf_edge(&format!("{domain};{route_scope}"))
         && let Some(position) = ordered.iter().position(|ip| *ip == preferred)
     {
         ordered.swap(0, position);
@@ -347,6 +348,43 @@ fn remember_cf_edge(domain: &str, ip: IpAddr) {
         entries.remove(&oldest);
     }
     entries.insert(domain.to_string(), (ip, now));
+}
+
+pub(crate) fn ws_peer(ws: &TgWsStream) -> Option<SocketAddr> {
+    match ws.get_ref() {
+        MaybeTlsStream::Plain(tcp) => tcp.peer_addr().ok(),
+        MaybeTlsStream::Rustls(tls) => tls.get_ref().0.peer_addr().ok(),
+        _ => None,
+    }
+}
+
+pub(crate) fn cf_proxy_scope(dc: u32, is_media: bool) -> String {
+    format!("dc={dc};media={is_media};transport=cf-proxy")
+}
+
+pub(crate) fn cf_worker_scope(dc: u32, is_media: bool, dst: &str) -> String {
+    format!("dc={dc};media={is_media};dst={dst};transport=cf-worker")
+}
+
+pub(crate) fn confirm_cf_ws(host: &str, scope: &str, peer: SocketAddr) {
+    let scope = format!("{scope};tls={}", u8::from(peer.port() == 443));
+    CF_EDGE_MTPROTO_FAIL.clear(&(peer.ip(), host.to_owned(), scope.clone()));
+    remember_cf_edge(&format!("{host};{scope}"), peer.ip());
+}
+
+pub(crate) fn fail_cf_ws(host: &str, scope: &str, peer: SocketAddr, cooldown: Duration) {
+    let scope = format!("{scope};tls={}", u8::from(peer.port() == 443));
+    if let Some(entries) = CF_EDGE_PREFERRED.get() {
+        let mut entries = entries.lock().unwrap();
+        let key = format!("{host};{scope}");
+        if entries
+            .get(&key)
+            .is_some_and(|(preferred, _)| *preferred == peer.ip())
+        {
+            entries.remove(&key);
+        }
+    }
+    CF_EDGE_MTPROTO_FAIL.set((peer.ip(), host.to_owned(), scope), cooldown);
 }
 
 /// Домены WebSocket для заданного DC.
@@ -444,7 +482,10 @@ impl WsAttempt {
 /// массово фильтруется в открытом TLS ClientHello с 16.11.2026.
 pub(crate) fn cf_pool_tls_name(host: &str) -> Option<&str> {
     let (label, zone) = host.split_once('.')?;
-    (label.starts_with("kws") && !zone.is_empty()).then_some(zone)
+    let label = label.strip_prefix("kws")?;
+    let dc = label.strip_suffix("-1").unwrap_or(label);
+    (!dc.is_empty() && dc.bytes().all(|byte| byte.is_ascii_digit()) && !zone.is_empty())
+        .then_some(zone)
 }
 
 /// Открыть TLS/WSS-соединение к заданному DC IP и домену.
@@ -583,6 +624,11 @@ pub(crate) async fn connect_probe_ws(
         domain,
         path,
         request_binary_subprotocol,
+        if request_binary_subprotocol && !domain.ends_with(".web.telegram.org") {
+            cf_pool_tls_name(domain).unwrap_or(domain)
+        } else {
+            domain
+        },
         443,
         timeout,
         outbound,
@@ -690,6 +736,7 @@ async fn connect_probe_ws_with_config(
     domain: &str,
     path: &str,
     request_binary_subprotocol: bool,
+    server_name: &str,
     target_port: u16,
     timeout: Duration,
     outbound: &OutboundConnector,
@@ -720,7 +767,6 @@ async fn connect_probe_ws_with_config(
     timing.tcp_ms = Some(elapsed_ms(started));
     let _ = tcp.set_nodelay(true);
 
-    let server_name = cf_pool_tls_name(domain).unwrap_or(domain);
     let server_name =
         ServerName::try_from(server_name.to_string()).map_err(|error| WsProbeError {
             phase: "tls",
@@ -852,6 +898,13 @@ async fn connect_cf_with_path_mode(
         return WsConnectResult::DnsFailed(format!("DNS CF-хоста {domain} не вернул адресов"));
     }
 
+    let ips = ips
+        .into_iter()
+        .filter(|ip| !CF_EDGE_MTPROTO_FAIL.active(&(*ip, domain.to_owned(), route_scope.clone())))
+        .collect::<Vec<_>>();
+    if ips.is_empty() {
+        return WsConnectResult::Failed("Edge на паузе после ошибки MTProto".into());
+    }
     let first = cf_ip_start(&ips);
     let cooldowns = &CF_EDGE_TLS_FAIL;
     let route_ips = cf_ip_attempts(&ips, first, domain, &route_scope, cooldowns);
@@ -862,7 +915,7 @@ async fn connect_cf_with_path_mode(
     let domain_owned = domain.to_string();
     let path_owned = path.to_string();
     let route_scope_owned = route_scope.to_string();
-    let tls_server_name = if use_tls {
+    let tls_server_name = if use_tls && request_binary_subprotocol {
         cf_pool_tls_name(domain).map(str::to_owned)
     } else {
         None
@@ -905,7 +958,6 @@ async fn connect_cf_with_path_mode(
         && let Ok(ip) = target.parse::<IpAddr>()
     {
         cooldowns.clear(&(ip, domain.to_string(), route_scope.to_string()));
-        remember_cf_edge(domain, ip);
         return WsConnectResult::Connected(ws);
     }
 
@@ -1007,36 +1059,59 @@ async fn connect_cf_with_path(
                 outbound,
                 opts,
             );
-            tokio::pin!(plain);
-            let tls = async {
-                tokio::time::sleep(CF_PLAIN_TLS_HEDGE_DELAY).await;
-                connect_cf_with_path_mode(
-                    domain,
-                    path,
-                    route_scope,
-                    request_binary_subprotocol,
-                    true,
-                    timeout,
-                    outbound,
-                    opts,
-                )
-                .await
-            };
-            tokio::pin!(tls);
-            tokio::select! {
-                result = &mut plain => {
-                    if matches!(
-                        result,
-                        WsConnectResult::Connected(_) | WsConnectResult::HttpStatus(429)
-                    ) {
-                        result
-                    } else {
-                        tls.await
-                    }
-                }
-                result = &mut tls => result,
+            let tls = connect_cf_with_path_mode(
+                domain,
+                path,
+                route_scope,
+                request_binary_subprotocol,
+                true,
+                timeout,
+                outbound,
+                opts,
+            );
+            let tls_proven = preferred_cf_edge(&format!("{domain};{route_scope};tls=1")).is_some();
+            let plain_proven =
+                preferred_cf_edge(&format!("{domain};{route_scope};tls=0")).is_some();
+            if !plain_proven && (tls_proven || !request_binary_subprotocol) {
+                race_cf_transports(tls, plain, CF_PLAIN_TLS_HEDGE_DELAY).await
+            } else {
+                race_cf_transports(plain, tls, CF_PLAIN_TLS_HEDGE_DELAY).await
             }
         }
+    }
+}
+
+async fn race_cf_transports(
+    preferred: impl Future<Output = WsConnectResult>,
+    backup: impl Future<Output = WsConnectResult>,
+    delay: Duration,
+) -> WsConnectResult {
+    tokio::pin!(preferred, backup);
+    tokio::select! {
+        first = &mut preferred => return cf_transport_result(first, backup).await,
+        _ = tokio::time::sleep(delay) => {}
+    }
+    tokio::select! {
+        first = &mut preferred => cf_transport_result(first, backup).await,
+        first = &mut backup => cf_transport_result(first, preferred).await,
+    }
+}
+
+async fn cf_transport_result(
+    first: WsConnectResult,
+    other: impl Future<Output = WsConnectResult>,
+) -> WsConnectResult {
+    if matches!(first, WsConnectResult::Connected(_)) {
+        return first;
+    }
+    let second = other.await;
+    match (&first, &second) {
+        (_, WsConnectResult::Connected(_) | WsConnectResult::HttpStatus(429)) => second,
+        (WsConnectResult::HttpStatus(429), _) => first,
+        (_, WsConnectResult::Redirect(_)) if !matches!(first, WsConnectResult::Redirect(_)) => {
+            first
+        }
+        _ => second,
     }
 }
 
@@ -1063,7 +1138,12 @@ async fn plain_handshake_and_upgrade<R>(
 where
     R: IntoClientRequest + Unpin,
 {
-    tokio_tungstenite::client_async(request, tokio_tungstenite::MaybeTlsStream::Plain(tcp)).await
+    tokio_tungstenite::client_async_with_config(
+        request,
+        MaybeTlsStream::Plain(tcp),
+        Some(ws_config()),
+    )
+    .await
 }
 
 /// Ошибка TLS/WebSocket-upgrade: слой TLS отделён от HTTP-ответа и прочих сбоев.
@@ -1282,9 +1362,9 @@ pub(crate) async fn connect_cf_domain_with_outbound_opts(
     timeout: Duration,
     outbound: &OutboundConnector,
     opts: CfDialOpts<'_>,
-) -> WsConnectResult {
+) -> (WsConnectResult, String) {
     let hosts = cf_ws_domains(dc, &[cf_domain.to_string()], is_media);
-    let route_scope = format!("dc={dc};media={is_media};transport=cf-proxy");
+    let route_scope = cf_proxy_scope(dc, is_media);
     let mut last_result = WsConnectResult::Failed("список CF-хостов пуст".to_string());
     for host in hosts {
         let result =
@@ -1307,11 +1387,11 @@ pub(crate) async fn connect_cf_domain_with_outbound_opts(
             result,
             WsConnectResult::Connected(_) | WsConnectResult::HttpStatus(429)
         ) {
-            return result;
+            return (result, host);
         }
         last_result = result;
     }
-    last_result
+    (last_result, String::new())
 }
 
 /// Порядок попыток в цикле соединения Cloudflare.
@@ -1420,7 +1500,7 @@ pub(crate) async fn connect_cf_ws_for_dc_with_outbound_ordered(
 
     while let Some(domain) = attempts.next_domain() {
         debug!("DC{}{}: проверка WS через CF-домен {}", dc, media, domain);
-        let route_scope = format!("dc={dc};media={is_media};transport=cf-proxy");
+        let route_scope = cf_proxy_scope(dc, is_media);
         match connect_cf_with_path(
             &domain,
             "/apiws",
@@ -1486,7 +1566,7 @@ pub(crate) async fn connect_cf_worker_ws_for_dc_with_outbound_opts(
 ) -> Option<TgWsStream> {
     let path = cf_worker_path(dst, dc, is_media);
     let media = media_tag(is_media);
-    let route_scope = format!("dc={dc};media={is_media};dst={dst};transport=cf-worker");
+    let route_scope = cf_worker_scope(dc, is_media, dst);
     debug!(
         "DC{}{}: проверка CF Worker {} через {}",
         dc, media, dst, worker_domain
@@ -1601,7 +1681,7 @@ static VERIFYING_CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
 const TLS_SESSION_CACHE_SIZE: usize = 256;
 
 /// Общая конфигурация TLS-клиента со встроенными корнями WebPKI.
-fn verifying_rustls_config() -> Arc<rustls::ClientConfig> {
+pub(crate) fn verifying_rustls_config() -> Arc<rustls::ClientConfig> {
     VERIFYING_CONFIG
         .get_or_init(|| {
             let mut root_store = rustls::RootCertStore::empty();

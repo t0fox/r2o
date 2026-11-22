@@ -9,7 +9,8 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::cf_domain_pool::CfDomainPool;
-use crate::config::{CfTransportMode, Config, WsRoutingPolicy};
+use crate::config::CfTransportMode;
+use crate::config::{Config, WsRoutingPolicy};
 use crate::runtime::Runtime;
 use crate::stats::{ConnectionTelemetry, RouteAttemptGuard};
 use crate::ws_client::{
@@ -104,6 +105,7 @@ fn update_route_latency(
 pub(crate) struct RouteFeedback {
     direct_key: DirectRouteKey,
     kind: RouteFeedbackKind,
+    edge: Option<(String, SocketAddr)>,
 }
 
 #[derive(Clone)]
@@ -129,10 +131,11 @@ impl RouteFeedback {
         Self {
             direct_key: direct_route_key(dc, is_media, target_ip),
             kind: RouteFeedbackKind::Direct { cooldown },
+            edge: None,
         }
     }
 
-    fn cf_worker(
+    pub(crate) fn cf_worker(
         dc: u32,
         is_media: bool,
         target_ip: &str,
@@ -141,6 +144,7 @@ impl RouteFeedback {
     ) -> Self {
         Self {
             direct_key: direct_route_key(dc, is_media, target_ip),
+            edge: None,
             kind: RouteFeedbackKind::CfWorker {
                 route_key: (
                     dc,
@@ -153,7 +157,7 @@ impl RouteFeedback {
         }
     }
 
-    fn cf_proxy(
+    pub(crate) fn cf_proxy(
         dc: u32,
         is_media: bool,
         target_ip: String,
@@ -163,6 +167,7 @@ impl RouteFeedback {
     ) -> Self {
         Self {
             direct_key: direct_route_key(dc, is_media, &target_ip),
+            edge: None,
             kind: RouteFeedbackKind::CfProxy {
                 route_key: (dc, is_media, target_ip, domain.clone()),
                 dc,
@@ -171,6 +176,34 @@ impl RouteFeedback {
                 cooldown,
             },
         }
+    }
+
+    pub(crate) fn with_edge(mut self, host: String, ws: &TgWsStream) -> Self {
+        if let Some(peer) = crate::ws_client::ws_peer(ws) {
+            self.edge = Some((host, peer));
+        }
+        self
+    }
+
+    pub(crate) fn with_peer(mut self, host: String, peer: SocketAddr) -> Self {
+        self.edge = Some((host, peer));
+        self
+    }
+
+    fn edge_scope(&self) -> String {
+        let (dc, media, dst) = &self.direct_key;
+        match self.kind {
+            RouteFeedbackKind::CfWorker { .. } => {
+                crate::ws_client::cf_worker_scope(*dc, *media, dst)
+            }
+            _ => crate::ws_client::cf_proxy_scope(*dc, *media),
+        }
+    }
+
+    pub(crate) fn edge(&self) -> Option<(&str, SocketAddr)> {
+        self.edge
+            .as_ref()
+            .map(|(host, peer)| (host.as_str(), *peer))
     }
 }
 
@@ -188,17 +221,12 @@ pub(crate) fn record_mtproto_response_with_client_latency(
     latency: Duration,
     client_latency_us: u64,
 ) {
-    let route_class = match &feedback.kind {
-        RouteFeedbackKind::Direct { .. } => RouteClass::Direct,
-        RouteFeedbackKind::CfWorker { .. } | RouteFeedbackKind::CfProxy { .. } => {
-            RouteClass::Cloudflare
-        }
-    };
-    let cf_is_faster = update_route_latency(&feedback.direct_key, route_class, latency);
-    let (transport, worker_domain) = match &feedback.kind {
-        RouteFeedbackKind::Direct { .. } => ("direct-wss", None),
-        RouteFeedbackKind::CfWorker { route_key, .. } => ("cf-worker", Some(route_key.3.as_str())),
-        RouteFeedbackKind::CfProxy { route_key, .. } => ("cf-proxy", Some(route_key.3.as_str())),
+    confirm_route(feedback, latency);
+
+    let transport = match &feedback.kind {
+        RouteFeedbackKind::Direct { .. } => "direct-wss",
+        RouteFeedbackKind::CfWorker { .. } => "cf-worker",
+        RouteFeedbackKind::CfProxy { .. } => "cf-proxy",
     };
     crate::stats::global().record_mtproto_response_with_client_latency(
         feedback.direct_key.0,
@@ -206,10 +234,19 @@ pub(crate) fn record_mtproto_response_with_client_latency(
         latency,
         client_latency_us,
     );
-    if let Some(domain) = worker_domain {
-        crate::stats::global().record_worker_success(domain);
-    }
+}
 
+pub(crate) fn confirm_route(feedback: &RouteFeedback, latency: Duration) {
+    let route_class = match &feedback.kind {
+        RouteFeedbackKind::Direct { .. } => RouteClass::Direct,
+        RouteFeedbackKind::CfWorker { .. } | RouteFeedbackKind::CfProxy { .. } => {
+            RouteClass::Cloudflare
+        }
+    };
+    let cf_is_faster = update_route_latency(&feedback.direct_key, route_class, latency);
+    if let Some((host, peer)) = feedback.edge() {
+        crate::ws_client::confirm_cf_ws(host, &feedback.edge_scope(), peer);
+    }
     match &feedback.kind {
         RouteFeedbackKind::Direct { .. } => {
             WS_FAIL.clear(&feedback.direct_key);
@@ -217,6 +254,7 @@ pub(crate) fn record_mtproto_response_with_client_latency(
         }
         RouteFeedbackKind::CfWorker { route_key, .. } => {
             CF_WORKER_FAIL.clear(route_key);
+            crate::stats::global().record_worker_success(&route_key.3);
         }
         RouteFeedbackKind::CfProxy {
             route_key,
@@ -227,13 +265,14 @@ pub(crate) fn record_mtproto_response_with_client_latency(
         } => {
             CF_PROXY_FAIL.clear(route_key);
             CF_PROXY_503_FAIL.clear(route_key);
+            CF_PROXY_ROUTE_FAIL.clear(&feedback.direct_key);
             pool.mark_available(domain);
             let domains = pool.snapshot();
-            remember_cf_proxy_success(*dc, &domains.domains, domain);
+            remember_cf_proxy_success((*dc, feedback.direct_key.1), &domains.domains, domain);
         }
     }
 
-    if matches!(route_class, RouteClass::Cloudflare) && cf_is_faster != Some(false) {
+    if cf_is_faster.unwrap_or(matches!(route_class, RouteClass::Cloudflare)) {
         PREFERRED_CF.set(feedback.direct_key.clone(), CF_PREFERENCE_TTL);
     } else {
         PREFERRED_CF.clear(&feedback.direct_key);
@@ -259,6 +298,22 @@ pub(crate) fn record_mtproto_failure(feedback: &RouteFeedback) {
     );
     if let Some(domain) = worker_domain {
         crate::stats::global().record_worker_failure(domain, "не получен MTProto-ответ");
+    }
+    reject_route(feedback);
+}
+
+pub(crate) fn reject_route(feedback: &RouteFeedback) {
+    if let Some((host, peer)) = feedback.edge() {
+        let cooldown = match &feedback.kind {
+            RouteFeedbackKind::CfWorker { cooldown, .. }
+            | RouteFeedbackKind::CfProxy { cooldown, .. } => *cooldown,
+            RouteFeedbackKind::Direct { .. } => {
+                unreachable!("Edge используется только для Cloudflare")
+            }
+        };
+        crate::ws_client::fail_cf_ws(host, &feedback.edge_scope(), peer, cooldown);
+        PREFERRED_CF.clear(&feedback.direct_key);
+        return;
     }
     match &feedback.kind {
         RouteFeedbackKind::Direct { cooldown } => {
@@ -371,9 +426,9 @@ impl Drop for HedgePermit {
 static CF_BALANCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 /// Счётчик циклического выбора домена CF Worker (`--cf-balance`).
 static CF_WORKER_BALANCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static CF_PROXY_STICKY: LazyLock<Mutex<HashMap<u32, String>>> =
+static CF_PROXY_STICKY: LazyLock<Mutex<HashMap<(u32, bool), String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static CF_PROXY_OFFSET: LazyLock<Mutex<HashMap<u32, usize>>> =
+static CF_PROXY_OFFSET: LazyLock<Mutex<HashMap<(u32, bool), usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static CF_PROXY_DIALS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 const CF_PROXY_HEDGE_DELAY: Duration = Duration::from_millis(125);
@@ -420,14 +475,14 @@ fn should_stop_cf_proxy_race(failures: &[(String, CfCandidateFailure)]) -> bool 
         == 2
 }
 
-fn cf_proxy_domain_order(domains: &[String], dc: u32, balance: bool) -> Vec<String> {
+fn cf_proxy_domain_order(domains: &[String], route: (u32, bool), balance: bool) -> Vec<String> {
     if domains.is_empty() {
         return Vec::new();
     }
     let sticky = CF_PROXY_STICKY
         .lock()
         .expect("повреждена блокировка закреплённых доменов Cloudflare")
-        .get(&dc)
+        .get(&route)
         .cloned();
     let first = if let Some(sticky) = sticky.as_ref()
         && let Some(index) = domains.iter().position(|domain| domain == sticky)
@@ -439,38 +494,38 @@ fn cf_proxy_domain_order(domains: &[String], dc: u32, balance: bool) -> Vec<Stri
         *CF_PROXY_OFFSET
             .lock()
             .expect("повреждена блокировка смещения доменов Cloudflare")
-            .entry(dc)
+            .entry(route)
             .or_insert(0)
             % domains.len()
     };
     domain_order(domains, first).map(str::to_owned).collect()
 }
 
-fn remember_cf_proxy_success(dc: u32, domains: &[String], domain: &str) {
+fn remember_cf_proxy_success(route: (u32, bool), domains: &[String], domain: &str) {
     CF_PROXY_STICKY
         .lock()
         .expect("повреждена блокировка закреплённых доменов Cloudflare")
-        .insert(dc, domain.to_string());
+        .insert(route, domain.to_string());
     if let Some(index) = domains.iter().position(|candidate| candidate == domain) {
         CF_PROXY_OFFSET
             .lock()
             .expect("повреждена блокировка смещения доменов Cloudflare")
-            .insert(dc, index);
+            .insert(route, index);
     }
 }
 
-fn advance_cf_proxy_domain(dc: u32, domains: &[String], failed: usize) {
+fn advance_cf_proxy_domain(route: (u32, bool), domains: &[String], failed: usize) {
     if domains.is_empty() {
         return;
     }
     CF_PROXY_STICKY
         .lock()
         .expect("повреждена блокировка закреплённых доменов Cloudflare")
-        .remove(&dc);
+        .remove(&route);
     let mut offsets = CF_PROXY_OFFSET
         .lock()
         .expect("повреждена блокировка смещения доменов Cloudflare");
-    let offset = offsets.entry(dc).or_insert(0);
+    let offset = offsets.entry(route).or_insert(0);
     let step = if failed >= domains.len() {
         1
     } else {
@@ -554,6 +609,10 @@ pub(crate) enum Upstream {
         framing: WsFraming,
         route_type: &'static str,
         feedback: RouteFeedback,
+    },
+    H2 {
+        client: Box<crate::cf_h2::MediaClient>,
+        zone: String,
     },
     Tcp(String),
 }
@@ -822,8 +881,13 @@ impl Route<'_> {
     }
 
     /// Перебрать Cloudflare Worker и Cloudflare proxy.
-    async fn fallback_chain(&self, dst: &str, reason: &str) -> Option<Upstream> {
-        self.cf_tiers(dst, reason).await
+    fn fallback_chain<'a>(
+        &'a self,
+        dst: &'a str,
+        reason: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Upstream>> + Send + 'a>> {
+        // Один экземпляр цепочки на попытку: select_upstream вызывает её из нескольких ветвей.
+        Box::pin(self.cf_tiers(dst, reason))
     }
 
     /// Оба уровня Cloudflare в порядке удалённого списка: сначала туннель Worker,
@@ -834,36 +898,82 @@ impl Route<'_> {
     /// `--cf-priority` и на каждом соединении ждала полный тайм-аут прямого WS,
     /// прежде чем перейти к единственному рабочему маршруту.
     async fn cf_tiers(&self, dst: &str, reason: &str) -> Option<Upstream> {
+        if let Some(upstream) = self.cf_media().await {
+            return Some(upstream);
+        }
         if let Some((ws, worker_domain)) = self.cf_worker(dst, reason).await {
+            let feedback = RouteFeedback::cf_worker(
+                self.dc,
+                self.is_media,
+                dst,
+                &worker_domain,
+                self.timeouts.cf_fail_cooldown,
+            )
+            .with_edge(worker_domain, &ws);
             return Some(Upstream::Ws {
                 ws: Box::new(ws),
                 framing: WsFraming::Tunnel,
                 route_type: "WSS через Cloudflare Worker",
-                feedback: RouteFeedback::cf_worker(
-                    self.dc,
-                    self.is_media,
-                    dst,
-                    &worker_domain,
-                    self.timeouts.cf_fail_cooldown,
-                ),
+                feedback,
             });
         }
 
-        self.cf_proxy(dst, reason)
-            .await
-            .map(|(ws, domain)| Upstream::Ws {
+        self.cf_proxy(dst, reason).await.map(|(ws, domain, host)| {
+            let feedback = RouteFeedback::cf_proxy(
+                self.dc,
+                self.is_media,
+                dst.to_string(),
+                domain,
+                Arc::clone(self.runtime.cf_domain_pool()),
+                self.timeouts.cf_fail_cooldown,
+            )
+            .with_edge(host, &ws);
+            Upstream::Ws {
                 ws: Box::new(ws),
                 framing: WsFraming::Packets,
                 route_type: "WSS через Cloudflare proxy",
-                feedback: RouteFeedback::cf_proxy(
-                    self.dc,
-                    self.is_media,
-                    dst.to_string(),
-                    domain,
-                    Arc::clone(self.runtime.cf_domain_pool()),
-                    self.timeouts.cf_fail_cooldown,
-                ),
-            })
+                feedback,
+            }
+        })
+    }
+
+    async fn cf_media(&self) -> Option<Upstream> {
+        if !self.is_media
+            || !(1..=5).contains(&self.dc)
+            || self.config.cf_transport == CfTransportMode::Plain
+            || crate::cf_h2::falling_back(self.dc)
+        {
+            return None;
+        }
+        let pool = self.runtime.cf_domains();
+        let zone = pool.domains.iter().find(|zone| {
+            !self.runtime.cf_domain_pool().is_rate_limited(zone)
+                && !crate::cf_h2::cooling(self.dc, zone)
+        })?;
+        let attempt = self.attempt("fallback", "cloudflare_h2");
+        match crate::cf_h2::connect(self.runtime, self.dc, zone).await {
+            Ok(Some((client, _))) => {
+                if let Some(attempt) = attempt {
+                    attempt.finish("connected");
+                }
+                Some(Upstream::H2 {
+                    client: Box::new(client),
+                    zone: zone.clone(),
+                })
+            }
+            Ok(None) => None,
+            Err(error) => {
+                if let Some(attempt) = attempt {
+                    attempt.finish("failed");
+                }
+                crate::cf_h2::use_ws_fallback(self.dc, zone);
+                debug!(
+                    "[{}] DC{}m: HTTP/2 /api через {}: {}: {}; пробую WebSocket",
+                    self.label, self.dc, zone, error.stage, error.reason
+                );
+                None
+            }
+        }
     }
 
     /// Настроен ли какой-либо маршрут помимо прямого WebSocket.
@@ -926,7 +1036,7 @@ impl Route<'_> {
                 CfDialOpts {
                     cf_ips: self.runtime.cf_ips(),
                     fail_cooldown: self.timeouts.cf_fail_cooldown,
-                    transport: CfTransportMode::Tls,
+                    transport: self.runtime.cf_transport(),
                     ca_bundle: self.runtime.ca_bundle(),
                 },
             )
@@ -970,7 +1080,7 @@ impl Route<'_> {
 
     /// Перебрать CF proxy-домены в порядке `--cf-balance`, помня сбой отдельно
     /// для DC, media hint, проверенного адреса и домена.
-    async fn cf_proxy(&self, dst: &str, reason: &str) -> Option<(TgWsStream, String)> {
+    async fn cf_proxy(&self, dst: &str, reason: &str) -> Option<(TgWsStream, String, String)> {
         let route_key = direct_route_key(self.dc, self.is_media, dst);
         if CF_PROXY_ROUTE_FAIL.active(&route_key) {
             self.mark_cooldown("fallback", "cloudflare_proxy");
@@ -994,7 +1104,11 @@ impl Route<'_> {
             return None;
         }
 
-        let ordered = cf_proxy_domain_order(&pool.domains, self.dc, self.config.cf_balance);
+        let ordered = cf_proxy_domain_order(
+            &pool.domains,
+            (self.dc, self.is_media),
+            self.config.cf_balance,
+        );
 
         debug!(
             "[{}] DC{}{}: {} — проверка CF-прокси через {:?}",
@@ -1074,8 +1188,8 @@ impl Route<'_> {
                     )
                     .await
                     {
-                        WsConnectResult::Connected(ws) => Ok(ws),
-                        result => Err(CfCandidateFailure::Connect(Box::new(result))),
+                        (WsConnectResult::Connected(ws), host) => Ok((ws, host)),
+                        (result, _) => Err(CfCandidateFailure::Connect(Box::new(result))),
                     }
                 }
             },
@@ -1131,7 +1245,7 @@ impl Route<'_> {
             }
         }
 
-        if let Some((domain, ws)) = winner {
+        if let Some((domain, (ws, host))) = winner {
             if let Some(attempt) = attempt {
                 attempt.finish("connected");
             }
@@ -1140,7 +1254,7 @@ impl Route<'_> {
                 "[{}] DC{}{}: {} — подключение CF-прокси установлено ({})",
                 self.label, self.dc, self.media, reason, domain
             );
-            return Some((ws, domain));
+            return Some((ws, domain, host));
         }
 
         if route_unavailable {
@@ -1160,7 +1274,7 @@ impl Route<'_> {
             attempt.finish("failed");
         }
 
-        advance_cf_proxy_domain(self.dc, &pool.domains, domains.len());
+        advance_cf_proxy_domain((self.dc, self.is_media), &pool.domains, domains.len());
         None
     }
 
@@ -1642,9 +1756,9 @@ mod tests {
             "beta.example".to_string(),
             "gamma.example".to_string(),
         ];
-        remember_cf_proxy_success(dc, &domains, "beta.example");
+        remember_cf_proxy_success((dc, false), &domains, "beta.example");
         assert_eq!(
-            cf_proxy_domain_order(&domains, dc, false)[0],
+            cf_proxy_domain_order(&domains, (dc, false), false)[0],
             "beta.example"
         );
 
@@ -1654,17 +1768,17 @@ mod tests {
             "delta.example".to_string(),
         ];
         assert_eq!(
-            cf_proxy_domain_order(&refreshed, dc, false)[0],
+            cf_proxy_domain_order(&refreshed, (dc, false), false)[0],
             "beta.example"
         );
-        advance_cf_proxy_domain(dc, &refreshed, 1);
+        advance_cf_proxy_domain((dc, false), &refreshed, 1);
         assert_eq!(
-            cf_proxy_domain_order(&refreshed, dc, false)[0],
+            cf_proxy_domain_order(&refreshed, (dc, false), false)[0],
             "delta.example"
         );
 
-        CF_PROXY_STICKY.lock().unwrap().remove(&dc);
-        CF_PROXY_OFFSET.lock().unwrap().remove(&dc);
+        CF_PROXY_STICKY.lock().unwrap().remove(&(dc, false));
+        CF_PROXY_OFFSET.lock().unwrap().remove(&(dc, false));
     }
 
     #[test]
@@ -1675,16 +1789,16 @@ mod tests {
             "beta.example".to_string(),
             "gamma.example".to_string(),
         ];
-        remember_cf_proxy_success(dc, &domains, "beta.example");
+        remember_cf_proxy_success((dc, false), &domains, "beta.example");
 
-        advance_cf_proxy_domain(dc, &domains, domains.len());
+        advance_cf_proxy_domain((dc, false), &domains, domains.len());
 
         assert_eq!(
-            cf_proxy_domain_order(&domains, dc, false)[0],
+            cf_proxy_domain_order(&domains, (dc, false), false)[0],
             "gamma.example"
         );
-        CF_PROXY_STICKY.lock().unwrap().remove(&dc);
-        CF_PROXY_OFFSET.lock().unwrap().remove(&dc);
+        CF_PROXY_STICKY.lock().unwrap().remove(&(dc, false));
+        CF_PROXY_OFFSET.lock().unwrap().remove(&(dc, false));
     }
 
     #[test]
@@ -1852,10 +1966,13 @@ mod tests {
         assert!(PREFERRED_CF.active(&route));
         assert!(!CF_PROXY_FAIL.active(&cf_route));
         assert!(!pool.is_rate_limited(&domain));
-        assert_eq!(CF_PROXY_STICKY.lock().unwrap().get(&dc), Some(&domain));
+        assert_eq!(
+            CF_PROXY_STICKY.lock().unwrap().get(&(dc, true)),
+            Some(&domain)
+        );
         PREFERRED_CF.clear(&route);
         CF_PROXY_FAIL.clear(&cf_route);
-        CF_PROXY_STICKY.lock().unwrap().remove(&dc);
+        CF_PROXY_STICKY.lock().unwrap().remove(&(dc, true));
         ROUTE_LATENCIES.lock().unwrap().remove(&route);
     }
 
@@ -1878,7 +1995,7 @@ mod tests {
         record_mtproto_response(&feedback, Duration::from_millis(80));
 
         assert!(PREFERRED_CF.active(&route));
-        CF_PROXY_STICKY.lock().unwrap().remove(&dc);
+        CF_PROXY_STICKY.lock().unwrap().remove(&(dc, true));
         PREFERRED_CF.clear(&route);
         ROUTE_LATENCIES.lock().unwrap().remove(&route);
     }
@@ -1908,7 +2025,7 @@ mod tests {
 
         assert!(!PREFERRED_CF.active(&route));
         ROUTE_LATENCIES.lock().unwrap().remove(&route);
-        CF_PROXY_STICKY.lock().unwrap().remove(&dc);
+        CF_PROXY_STICKY.lock().unwrap().remove(&(dc, true));
     }
 
     #[test]
@@ -1995,5 +2112,75 @@ mod tests {
             .expect("освобождённый hedge-слот должен разбудить ожидающий запрос")
             .expect("задача hedge не должна паниковать");
         drop(permit);
+    }
+
+    #[tokio::test]
+    #[ignore = "требуется изолированный сетевой namespace с портом 80"]
+    #[allow(clippy::result_large_err)]
+    async fn отказ_worker_переключает_на_cf_proxy() {
+        use crate::config::Config;
+        use crate::runtime::Runtime;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        let config = Config::try_from_cli_line(
+            "--cf-domain pool.example --cf-worker-domain worker.example --cf-ip 127.0.0.1 --cf-transport plain --ws-routing cf-first",
+        ).unwrap();
+        let runtime = Runtime::new(config.outbound_connector())
+            .with_cf_ips(config.cf_ips.clone())
+            .with_cf_transport(config.cf_transport)
+            .with_cf_domain_pool(config.cf_domains.clone(), false, std::path::PathBuf::new())
+            .with_cf_worker_domains(config.cf_worker_domains.clone());
+        let listener = TcpListener::bind("127.0.0.1:80").await.unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let worker =
+                tokio_tungstenite::accept_hdr_async(tcp, |request: &Request, _: Response| {
+                    assert_eq!(request.headers()["Host"], "worker.example");
+                    assert_eq!(
+                        request.uri().query(),
+                        Some("dst=149.154.167.51&dc=2&media=0")
+                    );
+                    Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                        .status(503)
+                        .body(Some("Worker недоступен".to_owned()))
+                        .unwrap())
+                })
+                .await;
+            assert!(worker.is_err());
+            let (tcp, _) = listener.accept().await.unwrap();
+            let _ws = tokio_tungstenite::accept_hdr_async(
+                tcp,
+                |request: &Request, mut response: Response| {
+                    assert_eq!(request.headers()["Host"], "kws2.pool.example");
+                    response
+                        .headers_mut()
+                        .insert("Sec-WebSocket-Protocol", "binary".parse().unwrap());
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let route = Route::new(
+            "127.0.0.1:32000".parse().unwrap(),
+            &config,
+            &runtime,
+            2,
+            false,
+            None,
+        );
+        let upstream = tokio::time::timeout(
+            Duration::from_secs(4),
+            super::select_upstream(&route, "149.154.167.51"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let super::Upstream::Ws { feedback, .. } = upstream else {
+            panic!("ожидался CF Proxy")
+        };
+        assert_eq!(feedback.edge().unwrap().0, "kws2.pool.example");
+        server.await.unwrap();
     }
 }

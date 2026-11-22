@@ -2049,6 +2049,19 @@ mod app {
                         quic_sessions.mark_suspected(&event.key);
                     }
                 }
+                if reverse_queue_visible && let Some(control) = control.as_mut() {
+                    udp_sessions.sweep_stun_suspects(now, |event| {
+                        event.event_body().is_some_and(|body| {
+                            matches!(
+                                control.try_send_event(
+                                    r2k_core::control::EVENT_R2O_STUN_SUSPECT,
+                                    &body
+                                ),
+                                Ok(true)
+                            )
+                        })
+                    });
+                }
                 udp_sessions.expire(now);
                 next_session_sweep = now + Duration::from_secs(1);
             }
@@ -2272,6 +2285,25 @@ mod app {
                         voice_trial_proofs.acknowledge_proof_event(&proof);
                     }
                 }
+                if let Some(control) = control.as_mut() {
+                    let exchanges: Vec<_> = voice_trial_proofs
+                        .pending_stun_exchanges()
+                        .cloned()
+                        .collect();
+                    for exchange in exchanges {
+                        let Some(body) = exchange.event_body() else {
+                            continue;
+                        };
+                        if !matches!(
+                            control
+                                .try_send_event(r2k_core::control::EVENT_R2O_STUN_EXCHANGE, &body),
+                            Ok(true)
+                        ) {
+                            break;
+                        }
+                        voice_trial_proofs.acknowledge_stun_exchange(&exchange);
+                    }
+                }
             }
             send_pending_tcp_fin_retry(
                 &mut tcp_sessions,
@@ -2475,15 +2507,14 @@ mod app {
                                     // снимает и кольцо не чистит.
                                     prefetched_quic_hello = quic_sessions
                                         .r2o_capture_hello_prefetch_at_hook(bytes, queue_hook);
-                                    // C `handle_udp`: пока ClientHello не
-                                    // собран в имя, `udp_hold_wait` — пачка
-                                    // остаётся удержанной. Пустое имя — не
-                                    // повод выпускать оригинал: план по имени
-                                    // ещё не выбран.
+                                    // Для адресного QUIC достаточно полного ClientHello без SNI.
                                     if !r2o_udp_hold_ready(prefetched_quic_hello.as_ref()) {
                                         continue;
                                     }
-                                    udp_sessions.r2o_mark_hello_seen(bytes, true);
+                                    let named = prefetched_quic_hello
+                                        .as_ref()
+                                        .is_some_and(|hello| !hello.host.is_empty());
+                                    udp_sessions.r2o_mark_hello_seen(bytes, named);
                                     let Some(batch) = udp_holds.r2o_take(bytes) else {
                                         continue;
                                     };
@@ -2565,6 +2596,8 @@ mod app {
                     let mut udp_quic_deny = false;
                     // Для UDP сохраняем именно выбор по собранному Initial, в том числе отсутствие плана.
                     let mut udp_selected_plan = None;
+                    let mut address_stun_replan = false;
+                    let mut owned_dns_probe = false;
                     let decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
                         if options.mode == RuntimeMode::Apply {
                             if !controller_probe {
@@ -2581,8 +2614,10 @@ mod app {
                                     &mut flow_journal,
                                     &journal_origin,
                                 );
-                                if let Some(r2o_proof) =
-                                    voice_trial_proofs.observe_response(bytes, now)
+                                if let Some(r2o_proof) = voice_trial_proofs
+                                    .observe_response_with_stun_evidence(bytes, now, || {
+                                        udp_sessions.address_stun_provable(bytes)
+                                    })
                                 {
                                     if send_voice_proof_event(
                                         &mut control,
@@ -2702,48 +2737,74 @@ mod app {
                         // C на раннем выходе `saw_hello && plan_done` и в
                         // ветке `quic_deny` не доходит ни до выбора плана,
                         // ни до `shape_misses`.
-                        let selected = if quic_second_hello_skip.is_some() || quic_deny_skip {
-                            None
-                        } else {
-                            name_plans.select_with_quic_snapshot_at_hook_probe(
-                                bytes,
-                                quic_hello.as_ref().map(|hello| hello.host.as_slice()),
-                                quic_hook,
-                                controller_probe,
-                                queue_hook == Some(r2o_datapath::netlink::R2O_NF_INET_LOCAL_OUT),
-                                quic_hello
-                                    .as_ref()
-                                    .and_then(|hello| hello.snapshot.as_deref()),
-                                udp_replay.as_ref().map_or_else(
-                                    || {
-                                        packet
-                                            .socket_uid
-                                            .map(r2o_datapath::control::QuicSocketOwner::Packet)
-                                    },
-                                    |batch| {
-                                        Some(r2o_datapath::control::QuicSocketOwner::Batch(batch))
-                                    },
+                        use r2o_datapath::control::DnsProbeSelection;
+                        let dns_probe =
+                            name_plans.select_dns_probe(bytes, queue_hook, controller_probe);
+                        let selected = match dns_probe {
+                            DnsProbeSelection::Matched(plan) => {
+                                owned_dns_probe = true;
+                                Some(plan)
+                            }
+                            DnsProbeSelection::DifferentQuestion => None,
+                            DnsProbeSelection::Unreserved
+                                if quic_second_hello_skip.is_some() || quic_deny_skip =>
+                            {
+                                None
+                            }
+                            DnsProbeSelection::Unreserved => name_plans
+                                .select_with_quic_snapshot_at_hook_probe(
+                                    bytes,
+                                    quic_hello.as_ref().map(|hello| hello.host.as_slice()),
+                                    quic_hook,
+                                    controller_probe,
+                                    queue_hook
+                                        == Some(r2o_datapath::netlink::R2O_NF_INET_LOCAL_OUT),
+                                    quic_hello
+                                        .as_ref()
+                                        .and_then(|hello| hello.snapshot.as_deref()),
+                                    udp_replay.as_ref().map_or_else(
+                                        || {
+                                            packet
+                                                .socket_uid
+                                                .map(r2o_datapath::control::QuicSocketOwner::Packet)
+                                        },
+                                        |batch| {
+                                            Some(r2o_datapath::control::QuicSocketOwner::Batch(
+                                                batch,
+                                            ))
+                                        },
+                                    ),
                                 ),
-                            )
                         };
                         if packet_view.as_ref().is_some_and(|view| view.protocol == 17) {
                             udp_selected_plan = Some(selected);
                         }
-                        let selected_plan = selected.unwrap_or(&plan);
+                        let selected_plan = selected.unwrap_or(
+                            if matches!(dns_probe, DnsProbeSelection::DifferentQuestion) {
+                                &observe_plan
+                            } else {
+                                &plan
+                            },
+                        );
+                        address_stun_replan = selected_plan.transport == 17
+                            && selected_plan.proto == r2k_core::plan::PROTO_VOICE
+                            && selected_plan.ipfrag == 1
+                            && udp_sessions.address_stun_can_fragment(bytes);
                         // Текст C `plan_done` считается по состоянию ДО
                         // отметки текущего приветствия: именованный Initial,
                         // впервые названный этим пакетом, в C ещё не взвёл
                         // `saw_hello` в момент проверки.
-                        let quic_plan_skip_note = if quic_deny_skip {
-                            None
-                        } else {
-                            quic_second_hello_skip.or_else(|| {
-                                udp_sessions.r2o_plan_applied_skip_note(
-                                    bytes,
-                                    selected.is_some() || global_plan_present,
-                                )
-                            })
-                        };
+                        let quic_plan_skip_note =
+                            if quic_deny_skip || address_stun_replan || owned_dns_probe {
+                                None
+                            } else {
+                                quic_second_hello_skip.or_else(|| {
+                                    udp_sessions.r2o_plan_applied_skip_note(
+                                        bytes,
+                                        selected.is_some() || global_plan_present,
+                                    )
+                                })
+                            };
                         let mut first_named_hello = false;
                         if let Some(hello) = quic_hello.as_ref() {
                             let named = !hello.host.is_empty();
@@ -2902,19 +2963,35 @@ mod app {
                                             bytes,
                                             controller_probe,
                                             quic_plan_skip_note,
+                                            address_stun_replan || owned_dns_probe,
                                             || {
-                                                let decision = decide_with_tcp_session_mode(
-                                                    &mut tcp_sessions,
-                                                    selected_plan,
-                                                    bytes,
-                                                    &mut control,
-                                                    &mut flow_journal,
-                                                    &journal_origin,
-                                                    controller_probe,
-                                                    raw.as_ref().map_or(0, |raw| {
-                                                        raw.tls_route_segment_cap(bytes)
-                                                    }),
-                                                );
+                                                let decision = if owned_dns_probe {
+                                                    if selected_plan.transport == 6 {
+                                                        r2o_datapath::engine::decide_with_dns_tcp_probe(
+                                                            &mut tcp_sessions,
+                                                            selected_plan,
+                                                            bytes,
+                                                            raw.as_ref().map_or(0, |raw| raw.tls_route_segment_cap(bytes)),
+                                                        )
+                                                    } else {
+                                                        r2o_datapath::engine::decide_owned_dns_udp_probe(
+                                                            selected_plan, bytes,
+                                                        )
+                                                    }
+                                                } else {
+                                                    decide_with_tcp_session_mode(
+                                                        &mut tcp_sessions,
+                                                        selected_plan,
+                                                        bytes,
+                                                        &mut control,
+                                                        &mut flow_journal,
+                                                        &journal_origin,
+                                                        controller_probe,
+                                                        raw.as_ref().map_or(0, |raw| {
+                                                            raw.tls_route_segment_cap(bytes)
+                                                        }),
+                                                    )
+                                                };
                                                 let tcp_syn_ack_seen =
                                                     tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
                                                 guard_decision(
@@ -3378,10 +3455,15 @@ mod app {
                                     selected?,
                                 );
                             }
-                            name_plans.applied_event_for_packet_at_hook(
+                            name_plans.applied_event_for_packet_at_hook_probe(
                                 bytes,
                                 execution_id,
-                                quic_hook,
+                                if owned_dns_probe {
+                                    queue_hook
+                                } else {
+                                    quic_hook
+                                },
+                                controller_probe,
                             )
                         })
                     });
@@ -3940,7 +4022,12 @@ mod app {
                     }
                     if execution_succeeded && let Some(event) = applied_candidate {
                         if !controller_probe && let Some(packet) = tx_original {
-                            voice_trial_proofs.note_applied(packet, &event, Instant::now());
+                            if address_stun_replan {
+                                udp_sessions.note_address_stun_fragmented(packet);
+                            }
+                            if !address_stun_replan || udp_sessions.address_stun_provable(packet) {
+                                voice_trial_proofs.note_applied(packet, &event, Instant::now());
+                            }
                         }
                         if !controller_probe && let Some(sequence) = tx_sequence {
                             holding.note_http_execution(sequence, &event);
@@ -5362,10 +5449,8 @@ mod app {
         }
     }
 
-    /// C `handle_udp`: удержанная пачка ждёт, пока `named` не станет true.
-    /// Пустой host — это `udp_hold_wait`, а не готовность к replay.
     fn r2o_udp_hold_ready(hello: Option<&r2o_datapath::capture::QuicHello>) -> bool {
-        hello.is_some_and(|hello| !hello.host.is_empty())
+        hello.is_some_and(|hello| !hello.host.is_empty() || hello.snapshot.is_some())
     }
 
     #[cfg(test)]
@@ -5384,6 +5469,7 @@ mod app {
             packet,
             false,
             plan_skip,
+            false,
             decide,
         )
     }
@@ -5395,6 +5481,7 @@ mod app {
         packet: &[u8],
         controller_probe: bool,
         plan_skip: Option<&'static str>,
+        allow_replan: bool,
         decide: impl FnOnce() -> PacketDecision,
     ) -> PacketDecision {
         // C `handle_udp`: `fl->quic_deny` проверяется до разбора содержимого,
@@ -5408,7 +5495,7 @@ mod app {
             r2o_datapath::reason_stats::record_reason(note);
             return PacketDecision::SkippedUdp { note };
         }
-        if sessions.r2o_plan_applied(packet) {
+        if !allow_replan && sessions.r2o_plan_applied(packet) {
             // План уже на потоке, но датаграмма не клиентская: C уходит в
             // ветку обратного направления до выбора/исполнения плана.
             return PacketDecision::SkippedUdp {
@@ -7059,7 +7146,7 @@ mod app {
         }
 
         #[test]
-        fn udp_hold_ready_требует_имя_а_не_пустой_снимок() {
+        fn udp_hold_ready_требует_имя_или_полный_снимок() {
             let key = [0; r2k_core::control::KEY_LEN];
             let empty = r2o_datapath::capture::QuicHello {
                 key,
@@ -7069,6 +7156,13 @@ mod app {
             };
             assert!(!r2o_udp_hold_ready(Some(&empty)));
             assert!(!r2o_udp_hold_ready(None));
+            let address_only = r2o_datapath::capture::QuicHello {
+                snapshot: r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[include_bytes!(
+                    "../../r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin"
+                )]),
+                ..empty
+            };
+            assert!(r2o_udp_hold_ready(Some(&address_only)));
             let named = r2o_datapath::capture::QuicHello {
                 key,
                 host: b"example.test".to_vec(),
@@ -9719,6 +9813,7 @@ mod app {
                 &packet,
                 false,
                 None,
+                false,
                 || decide_with_session(&mut tcp_sessions, selected, &packet),
             );
             assert!(matches!(
@@ -9739,6 +9834,7 @@ mod app {
                 &packet,
                 false,
                 Some(second_skip),
+                false,
                 || panic!("второй Initial не должен доходить до decide"),
             );
             assert_eq!(

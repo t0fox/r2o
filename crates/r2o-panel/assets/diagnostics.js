@@ -809,7 +809,9 @@
         ready: ["Включён", "Последний снимок " + timeLabel(at) + " · шаг " + formatAge(interval)],
         error: ["Ошибка связи", "Не удалось получить отчёт с роутера. Повторите запрос."]
       };
+      var changed = state.textContent !== labels[phase][0];
       setText(doc, "diagnostic-state", labels[phase][0]);
+      if (changed && root.R2oPanelMotion) root.R2oPanelMotion.reveal(state);
       setText(doc, "diagnostic-status", labels[phase][1]);
       state.dataset.enabled = String(enabled === true);
       state.dataset.phase = phase;

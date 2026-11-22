@@ -172,6 +172,12 @@ pub struct Binding {
     pub confirmed: i64,
     pub successes: i32,
     pub enabled: bool,
+    /// Ненулевой порт ограничивает адресную привязку одним endpoint.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub port: u16,
+    /// Измеренное число байтов запроса обычного DNS.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dns_query_bytes: u16,
     pub transport: u8,
     #[serde(default = "default_family", serialize_with = "serialize_family")]
     pub family: u8,
@@ -960,7 +966,9 @@ fn merge_plan(base: Option<&Plan>, local: &Plan, latest: &Plan) -> Plan {
     }
 }
 
-fn binding_merge_key(binding: &Binding) -> (String, String, String, u8, u8, u8, String, String) {
+fn binding_merge_key(
+    binding: &Binding,
+) -> (String, String, String, u8, u8, u8, u16, String, String) {
     (
         binding.kind.clone(),
         binding.target.clone(),
@@ -968,6 +976,7 @@ fn binding_merge_key(binding: &Binding) -> (String, String, String, u8, u8, u8, 
         binding.transport,
         binding.family,
         binding.shape,
+        binding.port,
         binding.probe_path.clone(),
         binding.ech_origin.clone(),
     )
@@ -991,6 +1000,12 @@ fn merge_binding(base: Option<&Binding>, local: &Binding, latest: &Binding) -> B
             &latest.enabled,
         ),
         transport: local.transport,
+        port: local.port,
+        dns_query_bytes: merge_field(
+            base.map(|base| &base.dns_query_bytes),
+            &local.dns_query_bytes,
+            &latest.dns_query_bytes,
+        ),
         family: local.family,
         shape: local.shape,
         tcp_profile: merge_field(

@@ -162,6 +162,10 @@ pub struct Config {
     #[arg(long, env = "TG_CHECK")]
     pub check: bool,
 
+    /// Проверить маршруты в работающем прокси и обновить выбор маршрута.
+    #[arg(long, requires = "check")]
+    pub check_live: bool,
+
     /// Создать или проверить локальную идентичность установки.
     #[arg(long, conflicts_with = "resolve_meta")]
     pub initialize_identity: bool,
@@ -346,7 +350,7 @@ pub struct Config {
     #[arg(long = "cf-balance", env = "TG_CF_BALANCE")]
     pub cf_balance: bool,
 
-    /// Транспорт CF proxy: auto (plain, затем TLS), plain (порт 80) или tls (443).
+    /// Транспорт CF Proxy и Worker: auto, plain (WS/80) или tls (WSS/443).
     #[arg(
         long = "cf-transport",
         env = "TG_CF_TRANSPORT",

@@ -1804,7 +1804,7 @@ pub fn decide_with_session(
     plan: &Plan,
     packet: &[u8],
 ) -> PacketDecision {
-    decide_with_session_mode(sessions, plan, packet, false, 0)
+    decide_with_session_mode(sessions, plan, packet, false, 0, false)
 }
 
 /// Применить план в потоке зонда, не выдавая его за пользовательское наблюдение.
@@ -1813,7 +1813,7 @@ pub fn decide_with_session_probe(
     plan: &Plan,
     packet: &[u8],
 ) -> PacketDecision {
-    decide_with_session_mode(sessions, plan, packet, true, 0)
+    decide_with_session_mode(sessions, plan, packet, true, 0, false)
 }
 
 /// Применить план с пределом TCP-посылки, вычисленным по MTU маршрута.
@@ -1823,7 +1823,7 @@ pub fn decide_with_session_mtu(
     packet: &[u8],
     tcp_segment_cap: usize,
 ) -> PacketDecision {
-    decide_with_session_mode(sessions, plan, packet, false, tcp_segment_cap)
+    decide_with_session_mode(sessions, plan, packet, false, tcp_segment_cap, false)
 }
 
 /// Применить план зонда с пределом TCP-посылки по MTU маршрута.
@@ -1833,7 +1833,16 @@ pub fn decide_with_session_probe_mtu(
     packet: &[u8],
     tcp_segment_cap: usize,
 ) -> PacketDecision {
-    decide_with_session_mode(sessions, plan, packet, true, tcp_segment_cap)
+    decide_with_session_mode(sessions, plan, packet, true, tcp_segment_cap, false)
+}
+
+pub fn decide_with_dns_tcp_probe(
+    sessions: &mut TcpSessions,
+    plan: &Plan,
+    packet: &[u8],
+    tcp_segment_cap: usize,
+) -> PacketDecision {
+    decide_with_session_mode(sessions, plan, packet, true, tcp_segment_cap, true)
 }
 
 fn decide_with_session_mode(
@@ -1842,9 +1851,13 @@ fn decide_with_session_mode(
     packet: &[u8],
     controller_probe: bool,
     tcp_segment_cap: usize,
+    dns_tcp: bool,
 ) -> PacketDecision {
     let now = Instant::now();
     let Some(tracked) = sessions.track_packet_mode(packet, now, controller_probe) else {
+        if dns_tcp {
+            return PacketDecision::Accept;
+        }
         let is_tcp = PacketView::parse(packet).is_some_and(|view| view.protocol == 6);
         // C `session_packet`: отказ таблицы — окончательный ответ «пропустить
         // без плана», а не повод исполнить план вне состояния потока.
@@ -1857,7 +1870,7 @@ fn decide_with_session_mode(
         return if is_tcp && plan.guards & GUARD_RST_ALIEN != 0 {
             PacketDecision::Accept
         } else {
-            decide_packet_with_segment_cap(plan, packet, tcp_segment_cap, 0)
+            decide_packet_with_segment_cap(plan, packet, tcp_segment_cap, 0, false)
         };
     };
     let key = tracked.key;
@@ -1969,6 +1982,18 @@ fn decide_with_session_mode(
     }) {
         return PacketDecision::Accept;
     }
+    if dns_tcp
+        && (reverse
+            || !execution_state.is_some_and(|session| {
+                session.controller_probe
+                    && session.reverse_syn_ack_seen
+                    && view.tcp_segment(packet).is_some_and(|tcp| {
+                        tcp.flags & 0x17 == 0x10 && session.capture_anchor == Some(tcp.sequence)
+                    })
+            }))
+    {
+        return PacketDecision::Accept;
+    }
     let r2o_http_plan = plan.transport == 6 && plan.proto == PROTO_HTTP;
     let r2o_http_plan_allowed = !r2o_http_plan || http_request;
     let decision = if !r2o_http_plan_allowed {
@@ -1981,6 +2006,7 @@ fn decide_with_session_mode(
             execution_state
                 .and_then(|session| session.reverse_ttl)
                 .unwrap_or(0),
+            dns_tcp,
         )
     };
     let applied = matches!(
@@ -2020,7 +2046,7 @@ fn guard_plan_applies_without_emissions(
     let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 6) else {
         return false;
     };
-    let Some(input) = tcp_plan_input(plan, packet, &view, tcp_segment_cap, 0) else {
+    let Some(input) = tcp_plan_input(plan, packet, &view, tcp_segment_cap, 0, false) else {
         return false;
     };
     plan.apply(&input)
@@ -2039,6 +2065,7 @@ fn tcp_plan_input<'a>(
     view: &PacketView,
     tcp_segment_cap: usize,
     reference_ttl: u8,
+    dns_tcp: bool,
 ) -> Option<PacketInput<'a>> {
     if !plan_fits_transport(Some(plan), 6) || !matches!(plan.proto, 1 | PROTO_HTTP) {
         return None;
@@ -2047,6 +2074,17 @@ fn tcp_plan_input<'a>(
     let payload = packet
         .get(tcp.payload.clone())
         .filter(|bytes| !bytes.is_empty())?;
+    if dns_tcp {
+        if !r2k_core::dns_probe::is_dns_tcp_probe_frame(payload)
+            || !is_dns_tcp_split_plan(plan, payload.len())
+        {
+            return None;
+        }
+        let mut input = PacketInput::new(payload, tcp.sequence);
+        input.segment_cap = tcp_segment_cap;
+        input.tcp_flags = Some(tcp.wire_flags);
+        return Some(input);
+    }
 
     let tls = r2k_core::tls::parse(payload);
     if let Some(flags) = plan.input_tcp_flags
@@ -2183,7 +2221,43 @@ pub fn decide(plan: &Plan, packet: &[u8]) -> PacketDecision {
     if plan.guards & GUARD_RST_ALIEN != 0 {
         return PacketDecision::Accept;
     }
-    decide_packet_with_segment_cap(plan, packet, 0, 0)
+    decide_packet_with_segment_cap(plan, packet, 0, 0, false)
+}
+
+pub fn is_dns_udp_fragment_plan(plan: &Plan) -> bool {
+    *plan
+        == Plan {
+            schema: plan.schema,
+            minexec: plan.minexec,
+            id: plan.id,
+            transport: 17,
+            proto: r2k_core::plan::PROTO_QUIC,
+            ipfrag: 1,
+            ..Plan::default()
+        }
+}
+
+pub fn is_dns_tcp_split_plan(plan: &Plan, wire_length: usize) -> bool {
+    let Ok(offset) = i16::try_from(wire_length / 2) else {
+        return false;
+    };
+    *plan
+        == Plan {
+            schema: plan.schema,
+            minexec: plan.minexec,
+            id: plan.id,
+            transport: 6,
+            proto: 1,
+            splits: vec![r2k_core::plan::Split { anchor: 0, offset }],
+            ..Plan::default()
+        }
+}
+
+pub fn decide_owned_dns_udp_probe(plan: &Plan, packet: &[u8]) -> PacketDecision {
+    if !is_dns_udp_fragment_plan(plan) {
+        return PacketDecision::Accept;
+    }
+    decide_packet_with_segment_cap(plan, packet, 0, 0, true)
 }
 
 fn decide_packet_with_segment_cap(
@@ -2191,12 +2265,20 @@ fn decide_packet_with_segment_cap(
     packet: &[u8],
     tcp_segment_cap: usize,
     reference_ttl: u8,
+    owned_dns_probe: bool,
 ) -> PacketDecision {
     let Some(view) = PacketView::parse(packet) else {
         return PacketDecision::Accept;
     };
     if view.protocol == 6 {
-        return decide_tcp(plan, packet, &view, tcp_segment_cap, reference_ttl);
+        return decide_tcp(
+            plan,
+            packet,
+            &view,
+            tcp_segment_cap,
+            reference_ttl,
+            owned_dns_probe,
+        );
     }
     if view.protocol != 17 {
         return PacketDecision::Accept;
@@ -2244,7 +2326,13 @@ fn decide_packet_with_segment_cap(
     // payload C исполняет на любой датаграмме выбранного плана, поэтому
     // split-план нельзя молча пропускать вне Initial: именно там
     // `payload_emits>1` и обязан дать отказ.
-    if quic_probe && (payload.len() > D2O_QUIC_MAX_DGRAM || !r2k_quic_is_initial(payload)) {
+    if owned_dns_probe && !r2k_core::dns_probe::is_dns_probe_query(payload) {
+        return PacketDecision::Accept;
+    }
+    if !owned_dns_probe
+        && quic_probe
+        && (payload.len() > D2O_QUIC_MAX_DGRAM || !r2k_quic_is_initial(payload))
+    {
         return PacketDecision::Accept;
     }
 
@@ -2442,8 +2530,10 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     else {
         return PacketDecision::Accept;
     };
-    if !r2k_core::stun::is_discord_voice_request(payload, destination_port)
-        && !r2k_core::stun::is_binding_request(payload)
+    let stun = r2k_core::stun::is_binding_request(payload);
+    if !stun
+        && (plan.ipfrag != 0
+            || !r2k_core::stun::is_discord_voice_request(payload, destination_port))
     {
         return PacketDecision::Accept;
     }
@@ -2460,6 +2550,22 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
         }
         Err(_) => return PacketDecision::Refused { plan_id: plan.id },
     };
+    if plan.ipfrag == 1 {
+        let Some(payload_range) = view.udp_payload_range(packet) else {
+            return PacketDecision::Accept;
+        };
+        return decide_udp_after_apply(
+            plan,
+            packet,
+            view,
+            &payload_range,
+            actions,
+            false,
+            false,
+            false,
+            true,
+        );
+    }
     // C `handle_udp` режет по этому признаку и голосовой путь: датаграмма
     // Voice/STUN атомарна так же, как QUIC Initial.
     if actions
@@ -2522,6 +2628,7 @@ fn decide_tcp(
     view: &PacketView,
     tcp_segment_cap: usize,
     reference_ttl: u8,
+    dns_tcp: bool,
 ) -> PacketDecision {
     // C `session_packet` (`session.c:2380-2385`): план другого транспорта
     // не применяется; оригинал проходит, вызывающему названа причина.
@@ -2530,7 +2637,8 @@ fn decide_tcp(
             note: "план объявлен для другого транспорта",
         };
     }
-    let Some(input) = tcp_plan_input(plan, packet, view, tcp_segment_cap, reference_ttl) else {
+    let Some(input) = tcp_plan_input(plan, packet, view, tcp_segment_cap, reference_ttl, dns_tcp)
+    else {
         return PacketDecision::Accept;
     };
 
@@ -2707,7 +2815,9 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
     if plan.transport == 17 && plan.proto == PROTO_VOICE {
         if plan.qsplit != 0
             || plan.qdeny != 0
-            || plan.ipfrag != 0
+            || plan.ipfrag > 1
+            || (plan.ipfrag == 1
+                && (!plan.fakes.is_empty() || plan.pace_us != 0 || plan.delay_us != 0))
             || plan.udplen != 0
             || !plan.splits.is_empty()
             || !plan.seq_overlays.is_empty()
@@ -2727,9 +2837,7 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
                 .iter()
                 .any(|fake| fake.placement != 0 || fake.tls_mod != 0)
         {
-            return Err(
-                "runtime исполняет только UDP voice fake-before планы без неподдерживаемых операций",
-            );
+            return Err("runtime поддерживает UDP voice fake-before и STUN с ipfrag 1");
         }
         return Ok(());
     }
@@ -3551,7 +3659,7 @@ mod tests {
         let http_packet = ipv4_tcp_packet(client, server, 0x18, 64, 3001, http);
         let http_view = PacketView::parse(&http_packet).unwrap();
         assert!(
-            tcp_plan_input(&http_plan, &http_packet, &http_view, 0, 0)
+            tcp_plan_input(&http_plan, &http_packet, &http_view, 0, 0, false)
                 .is_some_and(|input| input.is_http)
         );
         assert!(!matches!(

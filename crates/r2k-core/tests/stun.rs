@@ -46,6 +46,47 @@ fn parses_rfc5769_xor_mapped_v4_and_v6_addresses() {
 }
 
 #[test]
+fn проверка_stun_binding_совпадает_с_d2k() {
+    let mut unrelated = RESPONSE_V4.to_vec();
+    unrelated[8] ^= 1;
+    let mut bare = RESPONSE_V4[..20].to_vec();
+    bare[2..4].fill(0);
+    let mut corrupt_tail = RESPONSE_V4.to_vec();
+    let last_attribute = corrupt_tail.len() - 8;
+    corrupt_tail[last_attribute + 2..last_attribute + 4].copy_from_slice(&16_u16.to_be_bytes());
+    for (message, expected) in [
+        (RESPONSE_V4, 4),
+        (RESPONSE_V6, 6),
+        (&unrelated, 0),
+        (&bare, 0),
+        (&corrupt_tail, 0),
+        (&RESPONSE_V4[..38], 0),
+        (b"ordinary UDP", 0),
+    ] {
+        let actual = match r2k_core::stun::verified_binding_address(message, &TXID) {
+            Some(MappedAddress::V4 { .. }) => 4,
+            Some(MappedAddress::V6 { .. }) => 6,
+            None => 0,
+        };
+        assert_eq!(actual, expected);
+        if let Some(oracle) = std::env::var_os("R2O_D2K_STUN_BINDING_ORACLE") {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+
+            let mut child = Command::new(oracle)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(message).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, format!("{actual}\n").as_bytes());
+        }
+    }
+}
+
+#[test]
 fn rejects_foreign_and_malformed_binding_responses() {
     let mut foreign = TXID;
     foreign[0] ^= 0xff;

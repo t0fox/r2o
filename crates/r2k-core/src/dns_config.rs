@@ -5,7 +5,61 @@
 //! поэтому они вынесены в `r2k-core`; чтение UCI/doqd/Keenetic и
 //! планировщик подключаются на уровне контроллера.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+/// Числовые unicast-резолверы для адресной проверки обычного DNS.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PlainDnsEndpoint {
+    pub address: SocketAddr,
+    pub transport: u8,
+}
+
+impl std::fmt::Display for PlainDnsEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let protocol = if self.transport == 6 { "TCP" } else { "UDP" };
+        write!(f, "DNS/{protocol} {}", self.address)
+    }
+}
+
+pub fn parse_plain_dns_endpoints(
+    config: &str,
+    ipv6: Option<bool>,
+) -> Result<Vec<PlainDnsEndpoint>, &'static str> {
+    let mut targets = Vec::new();
+    if config.len() > 2048 || config.split_ascii_whitespace().count() > 16 {
+        return Err("DNS_DISCOVERY_ENDPOINTS допускает до 16 адресов резолверов");
+    }
+    for value in config.split_ascii_whitespace() {
+        let (value, transport) = if let Some(address) = value.strip_prefix("tcp://") {
+            (address, 6)
+        } else {
+            (value, 17)
+        };
+        let endpoint: SocketAddr = value
+            .parse()
+            .map_err(|_| "ожидается числовой IP:порт DNS")?;
+        let ip = endpoint.ip();
+        if endpoint.port() == 0
+            || ip.is_unspecified()
+            || ip.is_multicast()
+            || ip.is_loopback()
+            || matches!(endpoint, SocketAddr::V4(address) if address.ip().is_broadcast()
+                || address.ip().octets()[0] == 0)
+            || matches!(endpoint, SocketAddr::V6(address) if address.scope_id() != 0
+                || address.ip().to_ipv4_mapped().is_some() || address.ip().is_unicast_link_local())
+        {
+            return Err("DNS Discovery требует однозначный unicast endpoint без зоны");
+        }
+        let target = PlainDnsEndpoint {
+            address: endpoint,
+            transport,
+        };
+        if ipv6.is_none_or(|ipv6| endpoint.is_ipv6() == ipv6) && !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    Ok(targets)
+}
 
 pub const DNS_SERVICE_MAX: usize = 64;
 pub const DNS_HOST_MAX: usize = 256;

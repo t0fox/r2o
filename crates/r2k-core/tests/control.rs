@@ -1476,3 +1476,131 @@ fn http_portal_and_response_bodies_match_donor_shapes() {
     assert_eq!(&tail[2..10], &4_u64.to_be_bytes());
     assert_eq!(&tail[10..18], &1_u64.to_be_bytes());
 }
+
+#[test]
+#[ignore = "запускается с C-оракулом через test-ip-udp-endpoint-differential.sh"]
+fn d2k_udp_endpoint_совпадает_по_ipv4_и_ipv6() {
+    use r2k_core::control::{
+        COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_ENDPOINT, COMMAND_SET_DNS_ENDPOINT,
+        COMMAND_SET_DNS_PROBE, COMMAND_SET_ENDPOINT, COMMAND_SET_ENDPOINT_BOUND, ENDPOINT_KEY_LEN,
+        SHAPE_DNS_PROBE, SHAPE_DNS_TCP, SHAPE_QUIC, SHAPE_VOICE, decode_endpoint_key,
+        encode_delete_dns_tcp_probe, encode_delete_endpoint, encode_set_dns_endpoint,
+        encode_set_dns_endpoint_for_transport, encode_set_dns_probe, encode_set_dns_tcp_probe,
+        encode_set_endpoint, encode_set_endpoint_bound, read_frame,
+    };
+
+    let mut actual = String::new();
+    for endpoint in ["192.0.2.7:853", "[2001:db8::7]:854"] {
+        let endpoint: std::net::SocketAddr = endpoint.parse().unwrap();
+        let set = encode_set_endpoint(endpoint, SHAPE_QUIC, &[0xaa, 0xbb]).unwrap();
+        let del = encode_delete_endpoint(endpoint, SHAPE_VOICE).unwrap();
+        let set_bound =
+            encode_set_endpoint_bound(endpoint, SHAPE_VOICE, &[0xaa, 0xbb], [0x5a; 16]).unwrap();
+        for (wire, command, shape) in [
+            (set, COMMAND_SET_ENDPOINT, SHAPE_QUIC),
+            (del, COMMAND_DEL_ENDPOINT, SHAPE_VOICE),
+            (set_bound, COMMAND_SET_ENDPOINT_BOUND, SHAPE_VOICE),
+        ] {
+            let frame = read_frame(&mut wire.as_slice()).unwrap();
+            assert_eq!(frame.kind, command);
+            assert_eq!(
+                decode_endpoint_key(&frame.body[..ENDPOINT_KEY_LEN]),
+                Some((endpoint, shape))
+            );
+            for byte in frame.body {
+                use std::fmt::Write;
+                write!(actual, "{byte:02x}").unwrap();
+            }
+            actual.push('\n');
+        }
+        let question = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\0\x07example\x03com\0\0\x01\0\x01";
+        let source = std::net::SocketAddr::new(endpoint.ip(), 52001);
+        let wire =
+            encode_set_dns_probe(source, endpoint, 1000, &[0xaa, 0xbb], [0x5a; 16], question)
+                .unwrap();
+        let frame = read_frame(&mut wire.as_slice()).unwrap();
+        assert_eq!(frame.kind, COMMAND_SET_DNS_PROBE);
+        for byte in frame.body {
+            use std::fmt::Write;
+            write!(actual, "{byte:02x}").unwrap();
+        }
+        actual.push('\n');
+        let wire =
+            encode_set_dns_endpoint(endpoint, question.len() as u16, &[0xaa, 0xbb], [0x5a; 16])
+                .unwrap();
+        let mut frame = read_frame(&mut wire.as_slice()).unwrap();
+        assert_eq!(frame.kind, COMMAND_SET_DNS_ENDPOINT);
+        assert_eq!(
+            decode_endpoint_key(&frame.body[..ENDPOINT_KEY_LEN]),
+            Some((endpoint, SHAPE_DNS_PROBE))
+        );
+        // У D2K форма DNS — 9; этот код в R2O занят TLS 1.2 без TS.
+        frame.body[17] = 9;
+        for byte in frame.body {
+            use std::fmt::Write;
+            write!(actual, "{byte:02x}").unwrap();
+        }
+        actual.push('\n');
+        let mut tcp = (question.len() as u16).to_be_bytes().to_vec();
+        tcp.extend_from_slice(question);
+        let set = encode_set_dns_tcp_probe(source, endpoint, 1000, &[0xaa, 0xbb], [0x5a; 16], &tcp)
+            .unwrap();
+        let del = encode_delete_dns_tcp_probe(source, endpoint, [0x5a; 16]).unwrap();
+        for (wire, kind) in [(set, COMMAND_SET_DNS_PROBE), (del, COMMAND_DEL_ADDR_PROBE)] {
+            let frame = read_frame(&mut wire.as_slice()).unwrap();
+            assert_eq!(frame.kind, kind);
+            for byte in frame.body {
+                use std::fmt::Write;
+                write!(actual, "{byte:02x}").unwrap();
+            }
+            actual.push('\n');
+        }
+        let wire = encode_set_dns_endpoint_for_transport(
+            endpoint,
+            6,
+            tcp.len() as u16,
+            &[0xaa, 0xbb],
+            [0x5a; 16],
+        )
+        .unwrap();
+        let mut frame = read_frame(&mut wire.as_slice()).unwrap();
+        assert_eq!(frame.kind, COMMAND_SET_DNS_ENDPOINT);
+        assert_eq!(
+            decode_endpoint_key(&frame.body[..ENDPOINT_KEY_LEN]),
+            Some((endpoint, SHAPE_DNS_TCP))
+        );
+        // У D2K код формы общий для UDP и TCP.
+        frame.body[17] = 9;
+        for byte in frame.body {
+            use std::fmt::Write;
+            write!(actual, "{byte:02x}").unwrap();
+        }
+        actual.push('\n');
+        let mut invalid = endpoint;
+        invalid.set_port(0);
+        assert!(encode_set_endpoint(invalid, SHAPE_QUIC, &[0xaa, 0xbb]).is_err());
+    }
+    let oracle =
+        std::fs::read_to_string(std::env::var_os("R2O_D2K_UDP_ENDPOINT_TRACE").unwrap()).unwrap();
+    assert_eq!(actual, oracle);
+}
+
+#[test]
+fn адресный_dns_зонд_отклоняет_неточный_кортеж() {
+    use r2k_core::control::encode_set_dns_probe;
+    use std::net::SocketAddr;
+
+    let question = b"\x12\x34\x01\0\0\x01\0\0\0\0\0\0\x07example\x03com\0\0\x01\0\x01";
+    let destination: SocketAddr = "[2001:db8::7]:53".parse().unwrap();
+    for invalid in [
+        "192.0.2.7:52001",
+        "[2001:db8::3]:0",
+        "[fe80::1%2]:52001",
+        "[::ffff:192.0.2.7]:52001",
+    ] {
+        let invalid = invalid.parse().unwrap();
+        assert!(
+            encode_set_dns_probe(invalid, destination, 1000, b"plan", [1; 16], question).is_err()
+        );
+    }
+}

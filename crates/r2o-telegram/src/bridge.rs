@@ -10,7 +10,7 @@ use cipher::StreamCipher;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tracing::{info, warn};
 use tungstenite::Message;
 
@@ -25,7 +25,8 @@ use crate::ws_client::{TgWsStream, media_tag};
 
 const RELAY_BUF_SIZE: usize = 16 * 1024;
 const RELAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+const FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 enum MtprotoResponseState {
     NotSent,
@@ -38,6 +39,7 @@ async fn send_application_frame<S>(
     ws_write: &Arc<AsyncMutex<S>>,
     response_state: &Arc<AsyncMutex<MtprotoResponseState>>,
     feedback: &RouteFeedback,
+    first_request: &Notify,
     frame: Vec<u8>,
 ) -> Result<(), String>
 where
@@ -48,25 +50,15 @@ where
     let first_application_frame = matches!(&*state, MtprotoResponseState::NotSent);
     if first_application_frame {
         *state = MtprotoResponseState::Awaiting(tokio::time::Instant::now());
+        first_request.notify_one();
     }
 
-    if first_application_frame {
-        match ws_write.lock().await.send(Message::Binary(frame)).await {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                *state = MtprotoResponseState::Failed;
-                crate::routing::record_mtproto_failure(feedback);
-                Err(format!("ошибка отправки кадра WSS: {error}"))
-            }
-        }
-    } else {
-        drop(state);
-        match ws_write.lock().await.send(Message::Binary(frame)).await {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                record_mtproto_failure_if_pending(response_state, feedback).await;
-                Err(format!("ошибка отправки кадра WSS: {error}"))
-            }
+    drop(state);
+    match ws_write.lock().await.send(Message::Binary(frame)).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            record_mtproto_failure_if_pending(response_state, feedback).await;
+            Err(format!("ошибка отправки кадра WSS: {error}"))
         }
     }
 }
@@ -108,27 +100,27 @@ async fn record_mtproto_failure_if_pending(
 }
 
 #[derive(Clone)]
-struct PayloadActivity {
+pub(crate) struct PayloadActivity {
     started: tokio::time::Instant,
     last_payload_ms: Arc<AtomicUsize>,
 }
 
 impl PayloadActivity {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             started: tokio::time::Instant::now(),
             last_payload_ms: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    fn touch(&self) {
+    pub(crate) fn touch(&self) {
         self.last_payload_ms.store(
             self.started.elapsed().as_millis() as usize,
             Ordering::Relaxed,
         );
     }
 
-    async fn idle_reached(&self, idle_timeout: Duration) {
+    pub(crate) async fn idle_reached(&self, idle_timeout: Duration) {
         let idle_ms = idle_timeout.as_millis().min(usize::MAX as u128) as usize;
         loop {
             let elapsed_ms = self.started.elapsed().as_millis() as usize;
@@ -251,6 +243,8 @@ pub(crate) async fn bridge_transparent_ws(
     let activity = PayloadActivity::new();
     let response_state = Arc::new(AsyncMutex::new(MtprotoResponseState::NotSent));
     let response_observer = MtprotoResponseObserver::new(&init, proto);
+    let first_request = Notify::new();
+    let first_request_signal = &first_request;
 
     let upload = {
         let ws_write = Arc::clone(&ws_write);
@@ -310,9 +304,14 @@ pub(crate) async fn bridge_transparent_ws(
                             },
                             None => None,
                         };
-                        if let Err(error) =
-                            send_application_frame(&ws_write, &response_state, &feedback, frame)
-                                .await
+                        if let Err(error) = send_application_frame(
+                            &ws_write,
+                            &response_state,
+                            &feedback,
+                            first_request_signal,
+                            frame,
+                        )
+                        .await
                         {
                             return error;
                         }
@@ -333,6 +332,7 @@ pub(crate) async fn bridge_transparent_ws(
                         &ws_write,
                         &response_state,
                         &feedback,
+                        first_request_signal,
                         buffer[..length].to_vec(),
                     )
                     .await
@@ -363,8 +363,14 @@ pub(crate) async fn bridge_transparent_ws(
                         },
                         None => None,
                     };
-                    if let Err(error) =
-                        send_application_frame(&ws_write, &response_state, &feedback, frame).await
+                    if let Err(error) = send_application_frame(
+                        &ws_write,
+                        &response_state,
+                        &feedback,
+                        first_request_signal,
+                        frame,
+                    )
+                    .await
                     {
                         return error;
                     }
@@ -414,7 +420,7 @@ pub(crate) async fn bridge_transparent_ws(
                             .await
                             {
                                 Ok(Some(latency)) => {
-                                    telemetry.mark_first_wss_binary();
+                                    telemetry.mark_mtproto_response(latency);
                                     info!(
                                         "[{}] первый MTProto ответ DC{}{} через {} получен за {} мс",
                                         label,
@@ -493,19 +499,40 @@ pub(crate) async fn bridge_transparent_ws(
         }
     };
 
-    let (closed_by, reason) = match supervise_directions(
+    let relay = supervise_directions(
         upload,
         download,
         &activity,
         SESSION_IDLE_TIMEOUT,
         RELAY_DRAIN_TIMEOUT,
-    )
-    .await
-    {
-        RelayCompletion::Ended {
+    );
+    let first_response_timeout = async {
+        first_request.notified().await;
+        tokio::time::sleep(FIRST_RESPONSE_TIMEOUT).await;
+        if matches!(
+            *response_state.lock().await,
+            MtprotoResponseState::Confirmed
+        ) {
+            std::future::pending::<()>().await;
+        }
+    };
+    let completion = tokio::select! {
+        result = relay => Some(result),
+        _ = first_response_timeout => None,
+    };
+    let (closed_by, reason) = match completion {
+        None => {
+            record_mtproto_failure_if_pending(&response_state, &feedback).await;
+            telemetry.set_stage("mtproto_timeout");
+            (
+                "таймер MTProto",
+                "не получен первый полный ответ MTProto".to_owned(),
+            )
+        }
+        Some(RelayCompletion::Ended {
             direction: RelayDirection::Upload(reason),
             drained,
-        } => {
+        }) => {
             if !drained {
                 warn!(
                     "[{}] вторая сторона не завершилась за {:?}; завершаю WSS",
@@ -514,10 +541,10 @@ pub(crate) async fn bridge_transparent_ws(
             }
             ("клиент", reason)
         }
-        RelayCompletion::Ended {
+        Some(RelayCompletion::Ended {
             direction: RelayDirection::Download(reason),
             drained,
-        } => {
+        }) => {
             if !drained {
                 warn!(
                     "[{}] вторая сторона не завершилась за {:?}; завершаю WSS",
@@ -526,12 +553,16 @@ pub(crate) async fn bridge_transparent_ws(
             }
             ("upstream", reason)
         }
-        RelayCompletion::Idle => (
+        Some(RelayCompletion::Idle) => (
             "таймер простоя",
             format!("нет MTProto-данных {:?}", SESSION_IDLE_TIMEOUT),
         ),
     };
-    if let Err(error) = ws_write.lock().await.close().await {
+    if let Ok(Err(error)) = tokio::time::timeout(RELAY_DRAIN_TIMEOUT, async {
+        ws_write.lock().await.close().await
+    })
+    .await
+    {
         warn!("[{}] ошибка закрытия WSS: {}", label, error);
     }
     info!(
@@ -616,9 +647,15 @@ mod tests {
                 .await
                 .is_none()
         );
-        send_application_frame(&sink, &response_state, &feedback, vec![1, 2, 3])
-            .await
-            .unwrap();
+        send_application_frame(
+            &sink,
+            &response_state,
+            &feedback,
+            &tokio::sync::Notify::new(),
+            vec![1, 2, 3],
+        )
+        .await
+        .unwrap();
         assert!(
             record_first_mtproto_response(&response_state)
                 .await
@@ -638,9 +675,15 @@ mod tests {
         let feedback = RouteFeedback::direct(998, false, "149.154.167.51", Duration::from_secs(1));
 
         assert!(
-            send_application_frame(&sink, &response_state, &feedback, vec![1, 2, 3])
-                .await
-                .is_err()
+            send_application_frame(
+                &sink,
+                &response_state,
+                &feedback,
+                &tokio::sync::Notify::new(),
+                vec![1, 2, 3]
+            )
+            .await
+            .is_err()
         );
         assert!(
             record_first_mtproto_response(&response_state)
@@ -654,9 +697,15 @@ mod tests {
         let response_state = Arc::new(tokio::sync::Mutex::new(MtprotoResponseState::NotSent));
         let sink = Arc::new(tokio::sync::Mutex::new(TestSink { fail_send: false }));
         let feedback = RouteFeedback::direct(996, false, "149.154.167.52", Duration::from_secs(1));
-        send_application_frame(&sink, &response_state, &feedback, vec![1, 2, 3])
-            .await
-            .unwrap();
+        send_application_frame(
+            &sink,
+            &response_state,
+            &feedback,
+            &tokio::sync::Notify::new(),
+            vec![1, 2, 3],
+        )
+        .await
+        .unwrap();
 
         let init = [0_u8; HANDSHAKE_LEN];
         let mut encrypt = direct_server_stream_cipher(&init);
@@ -687,9 +736,15 @@ mod tests {
         let response_state = Arc::new(tokio::sync::Mutex::new(MtprotoResponseState::NotSent));
         let sink = Arc::new(tokio::sync::Mutex::new(TestSink { fail_send: false }));
         let feedback = RouteFeedback::direct(995, false, "149.154.167.53", Duration::from_secs(1));
-        send_application_frame(&sink, &response_state, &feedback, vec![1, 2, 3])
-            .await
-            .unwrap();
+        send_application_frame(
+            &sink,
+            &response_state,
+            &feedback,
+            &tokio::sync::Notify::new(),
+            vec![1, 2, 3],
+        )
+        .await
+        .unwrap();
 
         let init = [0_u8; HANDSHAKE_LEN];
         let mut encrypt = direct_server_stream_cipher(&init);

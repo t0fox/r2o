@@ -1,7 +1,7 @@
 #!/bin/sh
 # TG23: donor differential diagnostics `--check` (z2kOW 42c8111).
-# Сравниваются исходная реализация (кроме ca_bundle-интеграции), JSON-схема
-# отчёта, состояния DC/маршрутов и donor-тесты.
+# Сравниваются сохранённые функции донора, совместимая JSON-схема и состояния.
+# Сетевые расширения R2O проверяют тесты diagnostics на локальных сокетах.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -32,7 +32,8 @@ cp -a "$DONOR_CRATE" "$TEMP/donor"
 printf '\n[patch.crates-io]\nrustls = { path = "%s" }\n' "$ROOT/vendor/rustls" \
     >> "$TEMP/donor/Cargo.toml"
 mkdir -p "$TEMP/donor/examples"
-sed 's/r2o_telegram/z2kow_tg_transparent/g' \
+sed -e 's/r2o_telegram/z2kow_tg_transparent/g' \
+    -e '/^        is_media: None,$/d' -e '/^        wire: None,$/d' -e '/^        sni: None,$/d' \
     "$ROOT/crates/r2o-telegram/examples/tg23_diagnostics_trace.rs" \
     > "$TEMP/donor/examples/tg23_diagnostics_trace.rs"
 CARGO_TARGET_DIR="$TEMP/target-donor" \

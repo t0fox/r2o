@@ -133,7 +133,7 @@ CATALOG=$STATE/catalog.json
 export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$PPE_ADAPTER" \
     R2O_RUNTIME_DIR="$RUNTIME" R2O_FIREWALL="$FIREWALL" R2O_DNS_MODE="$MODE" \
     R2O_MEASUREMENT_LIMIT \
-    R2O_META_RANGES R2O_INSTAGRAM_SCHED_ATTEMPT
+    R2O_META_RANGES R2O_INSTAGRAM_SCHED_ATTEMPT DNS_DISCOVERY_ENDPOINTS
 
 if [ "${ACTION:-}" = includes ]; then
     [ "${R2O_FLOWOFFLOAD_RESTORING:-0}" != 1 ] || exit 0
@@ -481,10 +481,10 @@ start_engine_split() {
         wait_queue "$QUEUE6" "$SOCK6" || return 1
     fi
     engine_firewall_up || return 1
-    R2O_CONTROLLER_DNS_FAMILY=4 spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
+    R2O_CONTROLLER_DNS_FAMILY=4 R2O_DNS_DISCOVERY_FAMILY=4 spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
         --serve "$SOCK4" "$CATALOG" --discover --mark "$r2o_split_mark" --measure-mark "$MEASURE_MARK" --live "$RUNTIME/live4.json" || return 1
     if [ "$IPV6_ENABLED" = 1 ]; then
-        R2O_CONTROLLER_DNS_FAMILY=6 spawn_component r2o-controller "$CT6_PID" "$LOG/r2o-controller6.log" \
+        R2O_CONTROLLER_DNS_FAMILY=6 R2O_DNS_DISCOVERY_FAMILY=6 spawn_component r2o-controller "$CT6_PID" "$LOG/r2o-controller6.log" \
             --serve "$SOCK6" "$CATALOG" --discover --mark "$r2o_split_mark" --measure-mark "$MEASURE_MARK" --live "$RUNTIME/live6.json" || return 1
     fi
 }
@@ -1326,8 +1326,12 @@ telegram_check() {
     tg_check_report=$STATE/telegram-diagnostics.json
     tg_check_temporary=$tg_check_report.new.$$
     rm -f "$tg_check_temporary"
+    set -- --check
+    if component_running r2o-telegram "$TG_PID" && [ -S "$TG_STATS_SOCKET" ]; then
+        set -- "$@" --check-live --stats-socket-path "$TG_STATS_SOCKET"
+    fi
     if "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- \
-        --check --dc-map-path "$STATE/telegram-dc-map.json" \
+        "$@" --dc-map-path "$STATE/telegram-dc-map.json" \
         --dc-map-endpoints-path "$STATE/telegram-dc-endpoints.tsv" --default-domains \
         >"$tg_check_temporary" 2>>"$LOG/telegram.log"; then
         tg_check_result=0

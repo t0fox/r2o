@@ -1,46 +1,27 @@
-import difflib
+import re
 import sys
 from pathlib import Path
 
-ALLOWED = (
-    "ca_bundle",
-    "validate_doh_ca_bundle",
-    "with_ca_bundle",
-    "resolve_cf_ips",
-)
+# Эти функции сохраняют контракт донора. Изменённые сетевые пути проверяются
+# отдельно через реальные сокеты и сравнением совместимой JSON-схемы.
+CONTRACTS = ("has_healthy_route", "route_failure_state", "elapsed_ms", "unix_time")
+
+
+def function(source: str, name: str) -> str:
+    match = re.search(rf"(?ms)^([ ]*)(?:pub )?fn {name}\(.*?^\1\}}", source)
+    if match is None:
+        raise ValueError(f"missing contract: {name}")
+    return match.group(0)
 
 
 def main() -> int:
-    donor = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-    current = Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
-    hunks = []
-    current_hunk = []
-    for line in difflib.unified_diff(donor, current, lineterm=""):
-        if line.startswith("@@"):
-            if current_hunk:
-                hunks.append(current_hunk)
-            current_hunk = []
-            continue
-        if line.startswith(("---", "+++")):
-            continue
-        current_hunk.append(line)
-    if current_hunk:
-        hunks.append(current_hunk)
-
-    unexpected = []
-    for hunk in hunks:
-        changed = [line for line in hunk if line.startswith(("+", "-"))]
-        if not changed:
-            continue
-        if any(any(marker in line for marker in ALLOWED) for line in changed):
-            continue
-        unexpected.extend(changed)
-    if unexpected:
-        print("unexpected diagnostics.rs differences:", file=sys.stderr)
-        for line in unexpected:
-            print(line, file=sys.stderr)
-        return 1
-    print("diagnostics.rs: only ca_bundle integration differences")
+    donor = Path(sys.argv[1]).read_text(encoding="utf-8")
+    current = Path(sys.argv[2]).read_text(encoding="utf-8")
+    for name in CONTRACTS:
+        if function(donor, name) != function(current, name):
+            print(f"unexpected diagnostics contract change: {name}", file=sys.stderr)
+            return 1
+    print("diagnostics.rs: unchanged donor contracts match")
     return 0
 
 

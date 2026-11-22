@@ -2,7 +2,7 @@
 
 use crate::flow_capacity::R2oFlowCapacity;
 use r2k_core::addr::Address;
-use r2k_core::control::{KEY_LEN, R2oVoiceSuspectEvent};
+use r2k_core::control::{AppliedEvent, KEY_LEN, R2oVoiceSuspectEvent};
 use r2k_core::packet::PacketView;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -92,6 +92,7 @@ struct PendingVoiceProof {
     expires: Instant,
     response_confirmed: bool,
     response_event: Option<r2k_core::control::R2oVoiceProofEvent>,
+    stun_execution: Option<Box<AppliedEvent>>,
     client_ssrc: Option<[u8; 4]>,
     outbound: RtpSequenceProgress,
     inbound: RtpSequenceProgress,
@@ -183,23 +184,19 @@ pub struct R2oVoiceTrialProofs {
 }
 
 impl R2oVoiceTrialProofs {
-    pub fn note_applied(
-        &mut self,
-        packet: &[u8],
-        event: &r2k_core::control::AppliedEvent,
-        now: Instant,
-    ) -> bool {
+    pub fn note_applied(&mut self, packet: &[u8], event: &AppliedEvent, now: Instant) -> bool {
         if event.binding.kind != 2
-            || event.binding.family != 4
             || event.binding.shape != r2k_core::control::SHAPE_VOICE
             || !event.binding.temporary
             || event.trial_id.iter().all(|byte| *byte == 0)
         {
             return false;
         }
-        let Some(view) =
-            PacketView::parse(packet).filter(|view| view.family == 4 && view.protocol == 17)
-        else {
+        let Some(view) = PacketView::parse(packet).filter(|view| {
+            view.family == event.binding.family
+                && view.protocol == 17
+                && view.fragment & 0x3fff == 0
+        }) else {
             return false;
         };
         let Some(udp) = packet.get(view.l4_offset..view.total_len) else {
@@ -222,19 +219,27 @@ impl R2oVoiceTrialProofs {
         let Some(payload) = packet.get(payload_range) else {
             return false;
         };
-        let proof = if r2k_core::stun::is_discord_ip_discovery_request(payload) {
+        let mut stun_execution = None;
+        let proof = if view.family == 4 && r2k_core::stun::is_discord_ip_discovery_request(payload)
+        {
             PendingVoiceProofKind::DiscordDiscovery {
                 ssrc: payload[4..8]
                     .try_into()
                     .expect("SSRC Discovery имеет 4 байта"),
             }
-        } else if r2k_core::stun::is_discord_voice_request(payload, destination.port)
-            && r2k_core::stun::is_binding_request(payload)
-        {
+        } else if r2k_core::stun::is_binding_request(payload) {
             let Some(transaction_id) = payload.get(8..20).and_then(|bytes| bytes.try_into().ok())
             else {
                 return false;
             };
+            if view.family != 4
+                || !r2k_core::stun::is_discord_voice_request(payload, destination.port)
+            {
+                if !event.is_stun_trial_execution() {
+                    return false;
+                }
+                stun_execution = Some(Box::new(event.clone()));
+            }
             PendingVoiceProofKind::StunBinding { transaction_id }
         } else {
             return false;
@@ -251,11 +256,11 @@ impl R2oVoiceTrialProofs {
         if !self.pending.contains_key(&key) && self.pending.len() >= VOICE_TRIAL_LIMIT {
             return false;
         }
-        if let Some(pending) = self
-            .pending
-            .get_mut(&key)
-            .filter(|pending| pending.trial_id == event.trial_id && pending.response_confirmed)
-        {
+        if let Some(pending) = self.pending.get_mut(&key).filter(|pending| {
+            pending.trial_id == event.trial_id
+                && pending.response_confirmed
+                && pending.stun_execution == stun_execution
+        }) {
             pending.expires = now + VOICE_TRIAL_TTL;
             return true;
         }
@@ -269,6 +274,7 @@ impl R2oVoiceTrialProofs {
                 expires: now + VOICE_TRIAL_TTL,
                 response_confirmed: false,
                 response_event: None,
+                stun_execution,
                 client_ssrc,
                 outbound: RtpSequenceProgress::default(),
                 inbound: RtpSequenceProgress::default(),
@@ -277,13 +283,23 @@ impl R2oVoiceTrialProofs {
         true
     }
 
-    pub fn observe_response(
+    #[cfg(test)]
+    fn observe_response(
         &mut self,
         packet: &[u8],
         now: Instant,
     ) -> Option<r2k_core::control::R2oVoiceProofEvent> {
-        let view =
-            PacketView::parse(packet).filter(|view| view.family == 4 && view.protocol == 17)?;
+        self.observe_response_with_stun_evidence(packet, now, || true)
+    }
+
+    pub fn observe_response_with_stun_evidence(
+        &mut self,
+        packet: &[u8],
+        now: Instant,
+        address_stun_provable: impl FnOnce() -> bool,
+    ) -> Option<r2k_core::control::R2oVoiceProofEvent> {
+        let view = PacketView::parse(packet)
+            .filter(|view| view.protocol == 17 && view.fragment & 0x3fff == 0)?;
         let udp = packet.get(view.l4_offset..view.total_len)?;
         if udp.len() < 8 {
             return None;
@@ -330,6 +346,12 @@ impl R2oVoiceTrialProofs {
                 }
             }
             PendingVoiceProofKind::StunBinding { transaction_id } => {
+                if pending.stun_execution.is_some() {
+                    pending.response_confirmed = address_stun_provable()
+                        && r2k_core::stun::verified_binding_address(payload, &transaction_id)
+                            .is_some();
+                    return None;
+                }
                 if !r2k_core::stun::is_binding_response_for(payload, &transaction_id) {
                     return None;
                 }
@@ -377,7 +399,7 @@ impl R2oVoiceTrialProofs {
             return None;
         }
         let pending = self.pending.get_mut(&key)?;
-        if !pending.response_confirmed {
+        if !pending.response_confirmed || pending.stun_execution.is_some() {
             return None;
         }
         let header = parse_rtp_header(packet.get(view.udp_payload_range(packet)?)?)?;
@@ -436,6 +458,21 @@ impl R2oVoiceTrialProofs {
                     })
             })
             .collect()
+    }
+
+    pub fn pending_stun_exchanges(&self) -> impl Iterator<Item = &AppliedEvent> {
+        self.pending.values().filter_map(|pending| {
+            if pending.response_confirmed {
+                pending.stun_execution.as_deref()
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn acknowledge_stun_exchange(&mut self, event: &AppliedEvent) {
+        self.pending
+            .retain(|_, pending| pending.stun_execution.as_deref() != Some(event));
     }
 
     /// Удалить или продвинуть доказательство только после постановки в управляющий канал.

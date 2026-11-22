@@ -158,7 +158,8 @@ fn cf_ip_attempts_prioritize_a_recently_successful_edge_for_its_domain() {
     let route = "dc2-proxy";
     let cooldowns = CooldownMap::new();
     let ips = ["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
-    remember_cf_edge(domain, ips[1]);
+    let route_scope = route;
+    remember_cf_edge(&format!("{domain};{route_scope}"), ips[1]);
 
     assert_eq!(
         cf_ip_attempts(&ips, 0, domain, route, &cooldowns),
@@ -170,7 +171,7 @@ fn cf_ip_attempts_prioritize_a_recently_successful_edge_for_its_domain() {
         .unwrap()
         .lock()
         .unwrap()
-        .remove(domain);
+        .remove(&format!("{domain};{route_scope}"));
 }
 
 #[tokio::test]
@@ -260,6 +261,7 @@ async fn диагностическое_подключение_измеряет_
         "localhost",
         "/apiws",
         true,
+        "localhost",
         address.port(),
         Duration::from_secs(2),
         &crate::outbound::OutboundConnector::direct(),
@@ -673,4 +675,94 @@ async fn cf_proxy_splits_tls_sni_from_http_host() {
         "HTTP Host должен остаться полным именем DC"
     );
     server.await.unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::result_large_err)]
+async fn auto_сохраняет_ws_когда_tls_отклоняет_sni() {
+    install_rustls_provider();
+    let plain_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tls_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let plain_addr = plain_listener.local_addr().unwrap();
+    let tls_addr = tls_listener.local_addr().unwrap();
+    let (tls_seen, wait_tls) = tokio::sync::oneshot::channel();
+    let tls_server = tokio::spawn(async move {
+        let (tcp, _) = tls_listener.accept().await.unwrap();
+        let hello = tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), tcp)
+            .await
+            .unwrap();
+        assert_eq!(
+            hello.client_hello().server_name(),
+            Some("kws2.blocked.example")
+        );
+        let groups = hello.client_hello().named_groups().unwrap();
+        assert!(groups.contains(&rustls::NamedGroup::X25519));
+        assert!(!groups.contains(&rustls::NamedGroup::X25519MLKEM768));
+        drop(hello);
+    });
+    let plain_server = tokio::spawn(async move {
+        let (tcp, _) = plain_listener.accept().await.unwrap();
+        wait_tls.await.unwrap();
+        let _ws = tokio_tungstenite::accept_hdr_async(
+            tcp,
+            |request: &tungstenite::handshake::server::Request, response| {
+                assert_eq!(request.uri().path(), "/apiws");
+                assert_eq!(
+                    request.uri().query(),
+                    Some("dst=149.154.167.51&dc=2&media=1")
+                );
+                assert!(!request.headers().contains_key("Sec-WebSocket-Protocol"));
+                Ok(response)
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let path = cf_worker_path("149.154.167.51", 2, true);
+    let host = "kws2.blocked.example";
+    let plain = async {
+        let tcp = TcpStream::connect(plain_addr).await.unwrap();
+        let request = websocket_request(host, &path, false, false).unwrap();
+        let (ws, _) = plain_handshake_and_upgrade(tcp, request).await.unwrap();
+        WsConnectResult::Connected(ws)
+    };
+    let tls = async {
+        let tcp = TcpStream::connect(tls_addr).await.unwrap();
+        let request = websocket_request(host, &path, false, true).unwrap();
+        let result = tls_handshake_and_upgrade_with_name(tcp, request, host).await;
+        assert!(matches!(result, Err(WsUpgradeError::Tls)));
+        tls_seen.send(()).unwrap();
+        WsConnectResult::Failed("TLS SNI отклонён".into())
+    };
+    let ws = tokio::time::timeout(
+        Duration::from_secs(2),
+        race_cf_transports(plain, tls, Duration::from_millis(1)),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(ws, WsConnectResult::Connected(_)));
+    tls_server.await.unwrap();
+    plain_server.await.unwrap();
+}
+
+#[test]
+fn сбой_mtproto_не_отключает_другой_транспорт_и_другой_тип_трафика() {
+    let host = "edge-recovery.example";
+    let dst = "149.154.167.51";
+    let chat = cf_worker_scope(2, false, dst);
+    let media = cf_worker_scope(2, true, dst);
+    let plain: SocketAddr = "192.0.2.71:80".parse().unwrap();
+    let tls: SocketAddr = "192.0.2.71:443".parse().unwrap();
+    let key = (plain.ip(), host.to_owned(), format!("{chat};tls=0"));
+    let cooldown = Duration::from_secs(30);
+    fail_cf_ws(host, &chat, plain, cooldown);
+    assert!(CF_EDGE_MTPROTO_FAIL.active(&key));
+    assert!(!CF_EDGE_MTPROTO_FAIL.active(&(tls.ip(), host.to_owned(), format!("{chat};tls=1"))));
+    assert!(!CF_EDGE_MTPROTO_FAIL.active(&(plain.ip(), host.to_owned(), format!("{media};tls=0"))));
+    confirm_cf_ws(host, &chat, plain);
+    assert!(!CF_EDGE_MTPROTO_FAIL.active(&key));
+    assert_eq!(
+        preferred_cf_edge(&format!("{host};{chat};tls=0")),
+        Some(plain.ip())
+    );
 }

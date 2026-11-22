@@ -57,6 +57,7 @@ struct NamePlanKey {
 struct AddrPlanKey {
     address: Address,
     shape: u8,
+    port: u16,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -110,6 +111,7 @@ pub struct NamePlans {
 }
 
 struct InstalledPlan {
+    dns_query_len: u16,
     plan: Plan,
     generation: u64,
     last_used: Cell<u64>,
@@ -139,6 +141,14 @@ struct AddrProbePlan {
     trial_id: [u8; 16],
     generation: u64,
     expires: Instant,
+    dns: Option<r2k_core::dns_probe::DnsProbeGuard>,
+}
+
+#[derive(Clone, Copy)]
+pub enum DnsProbeSelection<'a> {
+    Unreserved,
+    DifferentQuestion,
+    Matched(&'a Plan),
 }
 
 /// C `char name[254]` + `uint64_t expires` (`datapath/http80.c:23-27`):
@@ -349,7 +359,12 @@ impl NamePlans {
     }
 
     pub fn handle(&mut self, frame: &Frame) -> Ack {
-        let addr_probe = matches!(frame.kind, COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE);
+        let addr_probe = matches!(
+            frame.kind,
+            COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE | control::COMMAND_SET_DNS_PROBE
+        );
+        let dns_endpoint = frame.kind == control::COMMAND_SET_DNS_ENDPOINT;
+        let endpoint_bound = frame.kind == control::COMMAND_SET_ENDPOINT_BOUND || dns_endpoint;
         let area_command = matches!(
             frame.kind,
             COMMAND_SET_SUFFIX | COMMAND_DEL_SUFFIX | COMMAND_SET_BYPASS | COMMAND_DEL_BYPASS
@@ -361,7 +376,7 @@ impl NamePlans {
                 .and_then(|bytes| bytes.try_into().ok())
         } else if frame.kind == COMMAND_DEL_NAME_PROBE {
             control::name_probe_delete_trial_id(&frame.body)
-        } else if frame.kind == COMMAND_SET_NAME_BOUND {
+        } else if frame.kind == COMMAND_SET_NAME_BOUND || endpoint_bound {
             Some(
                 frame
                     .body
@@ -399,13 +414,19 @@ impl NamePlans {
         } else {
             &frame.body
         };
-        let (ok, reason) = if area_command && frame.body.len() < 16 {
+        let (ok, reason) = if (area_command && frame.body.len() < 16)
+            || (endpoint_bound && trial_id == Some([0; 16]))
+        {
             (false, control::ACK_BAD_ARGS)
         } else {
             match frame.kind {
                 COMMAND_SET_NAME => self.set_name(body, false),
                 COMMAND_SET_NAME_BOUND => self.set_name_bound(body),
                 COMMAND_SET_ADDR => self.set_addr(body),
+                control::COMMAND_SET_ENDPOINT
+                | control::COMMAND_SET_ENDPOINT_BOUND
+                | control::COMMAND_SET_DNS_ENDPOINT => self.set_endpoint(body, dns_endpoint),
+                control::COMMAND_DEL_ENDPOINT => self.delete_endpoint(body),
                 COMMAND_SET_SUFFIX => self.set_suffix(body),
                 COMMAND_DEL_SUFFIX => self.delete_domain_area(body, true),
                 COMMAND_SET_BYPASS => self.set_domain_bypass(body),
@@ -414,7 +435,9 @@ impl NamePlans {
                 COMMAND_SET_VOICE_ADDR => self.set_voice_addr(body),
                 COMMAND_SET_VOICE_ADDR_PROBE => self.set_voice_addr_probe(body, trial_id),
                 COMMAND_DEL_VOICE_ADDR_PROBE => self.delete_voice_addr_probe(body, trial_id),
-                COMMAND_SET_ADDR_PROBE => self.set_addr_probe(body),
+                COMMAND_SET_ADDR_PROBE | control::COMMAND_SET_DNS_PROBE => {
+                    self.set_addr_probe(body, frame.kind == control::COMMAND_SET_DNS_PROBE)
+                }
                 COMMAND_DEL_ADDR_PROBE => self.delete_addr_probe(body, trial_id),
                 COMMAND_DEL_NAME => self.delete_name(body),
                 COMMAND_DEL_NAME_BOUND => self.delete_name_bound(body),
@@ -449,7 +472,13 @@ impl NamePlans {
             reason,
             trial_id,
             area_id,
-            binding_context: if frame.kind == COMMAND_SET_NAME_BOUND {
+            binding_context: if endpoint_bound {
+                Some(if ok {
+                    self.endpoint_binding_context(body).unwrap_or_default()
+                } else {
+                    control::BindingContext::default()
+                })
+            } else if frame.kind == COMMAND_SET_NAME_BOUND {
                 Some(if ok {
                     self.name_binding_context(body, true).unwrap_or_default()
                 } else {
@@ -625,6 +654,11 @@ impl NamePlans {
                 .get(view.l4_offset + 2..view.l4_offset + 4)
                 .and_then(|bytes| bytes.try_into().ok())
                 .map(u16::from_be_bytes)?;
+            if r2k_core::stun::is_binding_request(payload)
+                && let Some(plan) = self.find_endpoint(view.dst, SHAPE_VOICE, destination_port)
+            {
+                return Some(plan);
+            }
             if r2k_core::stun::is_discord_voice_request(payload, destination_port) {
                 if let Some((r2o_plan, _, _, _)) = self.voice_address_binding(packet) {
                     return Some(r2o_plan);
@@ -681,6 +715,7 @@ impl NamePlans {
             {
                 return Some(plan);
             }
+            let quic_host = quic_host.filter(|host| !host.is_empty());
             let derived_quic_host = quic_host
                 .is_none()
                 .then(|| r2k_core::quic::initial_client_hello_sni(payload))
@@ -704,9 +739,15 @@ impl NamePlans {
                 }
                 plan
             } else {
-                let plan = r2k_core::quic::is_authenticated_initial(payload)
-                    .then(|| self.find_addr(view.dst, SHAPE_QUIC))
-                    .flatten();
+                let plan = self
+                    .find_endpoint(view.dst, SHAPE_QUIC, destination_port)
+                    .filter(|_| {
+                        matches!(
+                            r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(&[payload]),
+                            Ok(None)
+                        )
+                    })
+                    .or_else(|| self.find_addr(view.dst, SHAPE_QUIC));
                 if plan.is_none() {
                     self.note_shape_miss(None, view.dst, view.family, SHAPE_QUIC);
                 }
@@ -1127,7 +1168,23 @@ impl NamePlans {
         execution_id: u64,
         hook: Option<u8>,
     ) -> Option<AppliedEvent> {
-        let plan = self.select_with_quic_host_at_hook(packet, None, hook)?;
+        self.applied_event_for_packet_at_hook_probe(packet, execution_id, hook, false)
+    }
+
+    pub fn applied_event_for_packet_at_hook_probe(
+        &self,
+        packet: &[u8],
+        execution_id: u64,
+        hook: Option<u8>,
+        controller_probe: bool,
+    ) -> Option<AppliedEvent> {
+        let plan = match self.select_dns_probe(packet, hook, controller_probe) {
+            DnsProbeSelection::Matched(plan) => plan,
+            DnsProbeSelection::DifferentQuestion => return None,
+            DnsProbeSelection::Unreserved => {
+                self.select_with_quic_host_at_hook(packet, None, hook)?
+            }
+        };
         self.applied_event_for_plan(packet, execution_id, plan)
     }
 
@@ -1238,7 +1295,11 @@ impl NamePlans {
                 return Some(PlanBinding {
                     trial_id: probe.trial_id,
                     generation: probe.generation,
-                    shape: flow_probe_shape(&probe.plan),
+                    shape: if probe.dns.is_some() {
+                        control::SHAPE_DNS_PROBE
+                    } else {
+                        flow_probe_shape(&probe.plan)
+                    },
                     temporary: true,
                 });
             }
@@ -1276,6 +1337,8 @@ impl NamePlans {
         if let Some(key) = r2o_udp_addr_probe_flow_key(packet)
             && let Some(r2o_probe) = self.addr_probes.get(&key)
             && r2o_probe.expires > r2o_now
+            && r2o_probe.dns.is_none()
+            && !(r2o_probe.plan.proto == PROTO_VOICE && r2o_probe.plan.ipfrag != 0)
         {
             return Some((
                 &r2o_probe.plan,
@@ -1304,27 +1367,97 @@ impl NamePlans {
         packet: &[u8],
         hook: Option<u8>,
     ) -> Option<&AddrProbePlan> {
+        if self.addr_probes.is_empty() {
+            return None;
+        }
         let view = PacketView::parse(packet)?;
         if view.protocol != 17 || view.fragment & 0x3fff != 0 {
             return None;
         }
         let udp = packet.get(view.l4_offset..view.total_len)?;
-        if udp.len() < 8
-            || !crate::r2o_quic::r2o_quic_client_direction(
-                u16::from_be_bytes([udp[0], udp[1]]),
-                u16::from_be_bytes([udp[2], udp[3]]),
-                hook,
-            )
-            || !r2k_core::quic::is_authenticated_initial(
-                packet.get(view.udp_payload_range(packet)?)?,
-            )
-        {
+        if udp.len() < 8 {
             return None;
         }
         let key = r2o_udp_addr_probe_flow_key(packet)?;
-        self.addr_probes
-            .get(&key)
+        let probe = self.addr_probes.get(&key)?;
+        if probe.expires <= Instant::now() || probe.dns.is_some() {
+            return None;
+        }
+        let payload = packet.get(view.udp_payload_range(packet)?)?;
+        let matches = if probe.plan.proto == PROTO_VOICE {
+            !matches!(
+                hook,
+                Some(
+                    crate::netlink::R2O_NF_INET_LOCAL_IN | crate::netlink::R2O_NF_INET_PRE_ROUTING
+                )
+            ) && r2k_core::stun::is_binding_request(payload)
+        } else {
+            crate::r2o_quic::r2o_quic_client_direction(
+                u16::from_be_bytes([udp[0], udp[1]]),
+                u16::from_be_bytes([udp[2], udp[3]]),
+                hook,
+            ) && r2k_core::quic::is_authenticated_initial(payload)
+        };
+        matches.then_some(probe)
+    }
+
+    pub fn select_dns_probe(
+        &self,
+        packet: &[u8],
+        hook: Option<u8>,
+        controller_probe: bool,
+    ) -> DnsProbeSelection<'_> {
+        use crate::netlink::{R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING};
+
+        if !controller_probe
+            || (self.addr_probes.is_empty() && self.addr_plans.is_empty())
+            || !matches!(hook, Some(R2O_NF_INET_LOCAL_OUT | R2O_NF_INET_POST_ROUTING))
+        {
+            return DnsProbeSelection::Unreserved;
+        }
+        let Some(view) = PacketView::parse(packet).filter(|view| matches!(view.protocol, 6 | 17))
+        else {
+            return DnsProbeSelection::Unreserved;
+        };
+        let range = if view.protocol == 6 {
+            view.tcp_segment(packet).map(|segment| segment.payload)
+        } else {
+            view.udp_payload_range(packet)
+        };
+        let payload = range.and_then(|range| packet.get(range));
+        if let Some((probe, guard)) = r2o_addr_probe_packet_flow(view, packet)
+            .and_then(|key| self.addr_probes.get(&key))
             .filter(|probe| probe.expires > Instant::now())
+            .and_then(|probe| probe.dns.map(|guard| (probe, guard)))
+        {
+            return if payload.is_some_and(|payload| guard.matches_wire(payload, view.protocol)) {
+                DnsProbeSelection::Matched(&probe.plan)
+            } else {
+                DnsProbeSelection::DifferentQuestion
+            };
+        }
+        let Some(shape) = control::dns_endpoint_shape(view.protocol) else {
+            return DnsProbeSelection::Unreserved;
+        };
+        let Some(port) = packet.get(view.l4_offset + 2..view.l4_offset + 4) else {
+            return DnsProbeSelection::Unreserved;
+        };
+        let Some(entry) = self.addr_plans.get(&AddrPlanKey {
+            address: view.dst,
+            shape,
+            port: u16::from_be_bytes([port[0], port[1]]),
+        }) else {
+            return DnsProbeSelection::Unreserved;
+        };
+        if payload.is_some_and(|payload| {
+            payload.len() == usize::from(entry.dns_query_len)
+                && r2k_core::dns_probe::is_dns_probe_wire(payload, view.protocol)
+        }) {
+            Self::touch(entry, self.next_plan_clock());
+            DnsProbeSelection::Matched(&entry.plan)
+        } else {
+            DnsProbeSelection::Unreserved
+        }
     }
 
     fn set_name(&mut self, body: &[u8], dns_scope: bool) -> (bool, u8) {
@@ -1390,6 +1523,7 @@ impl NamePlans {
                         plan,
                         generation,
                         last_used: Cell::new(0),
+                        dns_query_len: 0,
                     },
                     expires: now + control::DNS_PLAN_LEASE,
                 },
@@ -1423,6 +1557,7 @@ impl NamePlans {
         self.plans.insert(
             key,
             InstalledPlan {
+                dns_query_len: 0,
                 plan,
                 generation,
                 last_used,
@@ -1448,7 +1583,99 @@ impl NamePlans {
         if !addr_plan_matches_shape(shape, &plan) || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
-        let key = AddrPlanKey { address, shape };
+        self.install_addr(
+            AddrPlanKey {
+                address,
+                shape,
+                port: 0,
+            },
+            plan,
+            0,
+        )
+    }
+
+    fn set_endpoint(&mut self, body: &[u8], dns_endpoint: bool) -> (bool, u8) {
+        let Some((key, records)) = body.split_at_checked(control::ENDPOINT_KEY_LEN) else {
+            return (false, control::ACK_BAD_ARGS);
+        };
+        let Some((endpoint, shape)) = control::decode_endpoint_key(key) else {
+            return (false, control::ACK_BAD_ARGS);
+        };
+        let dns_transport = control::dns_endpoint_transport(shape);
+        if dns_endpoint != dns_transport.is_some() {
+            return (false, control::ACK_BAD_ARGS);
+        }
+        let transport = dns_transport.unwrap_or(17);
+        let (dns_query_len, records) = if dns_endpoint {
+            let Some(([high, low], rest)) = records.split_first_chunk::<2>() else {
+                return (false, control::ACK_BAD_ARGS);
+            };
+            let len = u16::from_be_bytes([*high, *low]);
+            if !r2k_core::dns_probe::is_dns_probe_wire_length(usize::from(len), transport) {
+                return (false, control::ACK_BAD_ARGS);
+            }
+            (len, rest)
+        } else {
+            (0, records)
+        };
+        let Ok(plan) = Plan::parse_wire(records) else {
+            return (false, control::ACK_BAD_PLAN);
+        };
+        let shape_matches = match dns_transport {
+            Some(6) => crate::engine::is_dns_tcp_split_plan(&plan, usize::from(dns_query_len)),
+            Some(_) => crate::engine::is_dns_udp_fragment_plan(&plan),
+            None => addr_plan_matches_shape(shape, &plan),
+        };
+        if plan.transport != transport || !shape_matches || !self.r2o_plan_valid(&plan) {
+            return (false, control::ACK_BAD_PLAN);
+        }
+        self.install_addr(
+            AddrPlanKey {
+                address: endpoint.ip().into(),
+                shape,
+                port: endpoint.port(),
+            },
+            plan,
+            dns_query_len,
+        )
+    }
+
+    fn endpoint_binding_context(&self, body: &[u8]) -> Option<control::BindingContext> {
+        let (endpoint, shape) =
+            control::decode_endpoint_key(body.get(..control::ENDPOINT_KEY_LEN)?)?;
+        let key = AddrPlanKey {
+            address: endpoint.ip().into(),
+            shape,
+            port: endpoint.port(),
+        };
+        let installed = self.addr_plans.get(&key)?;
+        Some(control::BindingContext {
+            generation: installed.generation,
+            kind: if shape == control::SHAPE_DNS_TCP {
+                1
+            } else {
+                2
+            },
+            family: key.address.family(),
+            shape,
+            temporary: false,
+            epoch: self.epoch,
+        })
+    }
+
+    fn delete_endpoint(&mut self, body: &[u8]) -> (bool, u8) {
+        let Some((endpoint, shape)) = control::decode_endpoint_key(body) else {
+            return (false, control::ACK_BAD_ARGS);
+        };
+        self.addr_plans.remove(&AddrPlanKey {
+            address: endpoint.ip().into(),
+            shape,
+            port: endpoint.port(),
+        });
+        (true, control::ACK_OK)
+    }
+
+    fn install_addr(&mut self, key: AddrPlanKey, plan: Plan, dns_query_len: u16) -> (bool, u8) {
         if !self.addr_plans.contains_key(&key) && !self.make_room_exact() {
             return (false, control::ACK_NO_ROOM);
         }
@@ -1460,6 +1687,7 @@ impl NamePlans {
         self.addr_plans.insert(
             key,
             InstalledPlan {
+                dns_query_len,
                 plan,
                 generation,
                 last_used,
@@ -1520,6 +1748,7 @@ impl NamePlans {
         self.suffix_plans.insert(
             key,
             InstalledPlan {
+                dns_query_len: 0,
                 plan,
                 generation,
                 last_used: Cell::new(0),
@@ -1754,6 +1983,7 @@ impl NamePlans {
         self.voice_addr_plans.insert(
             r2o_server,
             InstalledPlan {
+                dns_query_len: 0,
                 plan: r2o_plan,
                 generation: r2o_generation,
                 last_used: Cell::new(0),
@@ -1825,7 +2055,7 @@ impl NamePlans {
         (true, control::ACK_OK)
     }
 
-    fn set_addr_probe(&mut self, body: &[u8]) -> (bool, u8) {
+    fn set_addr_probe(&mut self, body: &[u8], is_dns: bool) -> (bool, u8) {
         let fixed = control::KEY_LEN + 20;
         if body.len() < fixed {
             return (false, control::ACK_BAD_ARGS);
@@ -1842,7 +2072,7 @@ impl NamePlans {
                 .expect("длина срока адресного опыта проверена выше"),
         );
         let source_port = u16::from_be_bytes([key[33], key[34]]);
-        let voice_wildcard = source_port == 0;
+        let voice_wildcard = source_port == 0 && !is_dns;
         if voice_wildcard {
             // C `probe_flow_valid` допускает src_port=0 как голосовой
             // wildcard (`plans.c:857-874`); R2O хранит такие опыты в
@@ -1857,7 +2087,9 @@ impl NamePlans {
             {
                 return (false, control::ACK_BAD_ARGS);
             }
-        } else if !control::valid_udp_addr_probe_flow(&key) {
+        } else if !(control::valid_udp_addr_probe_flow(&key)
+            || is_dns && control::valid_tcp_addr_probe_flow(&key))
+        {
             return (false, control::ACK_BAD_ARGS);
         }
         if trial_id.iter().all(|byte| *byte == 0)
@@ -1866,11 +2098,36 @@ impl NamePlans {
         {
             return (false, control::ACK_BAD_ARGS);
         }
-        let plan = match Plan::parse_wire(&body[fixed..]) {
+        let mut records = &body[fixed..];
+        let dns = if is_dns {
+            let Some((guard, remaining)) =
+                r2k_core::dns_probe::DnsProbeGuard::decode_prefix(records, key[37])
+            else {
+                return (false, control::ACK_BAD_ARGS);
+            };
+            records = remaining;
+            Some(guard)
+        } else {
+            None
+        };
+        let plan = match Plan::parse_wire(records) {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
+        if let Some(guard) = dns {
+            let valid = if key[37] == 6 {
+                crate::engine::is_dns_tcp_split_plan(&plan, usize::from(guard.length))
+            } else {
+                crate::engine::is_dns_udp_fragment_plan(&plan)
+            };
+            if !valid || !self.r2o_plan_valid(&plan) {
+                return (false, control::ACK_BAD_PLAN);
+            }
+        }
         if voice_wildcard {
+            if plan.proto == PROTO_VOICE && plan.ipfrag != 0 {
+                return (false, control::ACK_BAD_PLAN);
+            }
             // C принимает любой разобранный план: shape выводится из proto
             // (2→QUIC, 3→VOICE, иначе ANY), отказа по proto здесь нет.
             let voice_key = VoiceProbeKey {
@@ -1908,14 +2165,15 @@ impl NamePlans {
             );
             return (true, control::ACK_OK);
         }
+        if plan.proto == PROTO_VOICE && (plan.transport != 17 || !self.r2o_plan_valid(&plan)) {
+            return (false, control::ACK_BAD_PLAN);
+        }
         // C не требует QUIC-плана: shape ANY допустим, прочие proto тоже.
         let now = Instant::now();
         self.addr_probes.retain(|_, probe| probe.expires > now);
-        if self
-            .addr_probes
-            .get(&key)
-            .is_some_and(|existing| existing.trial_id != trial_id)
-        {
+        if self.addr_probes.get(&key).is_some_and(|existing| {
+            existing.trial_id != trial_id || existing.dns.is_some() || dns.is_some()
+        }) {
             return (false, control::ACK_BAD_ARGS);
         }
         if !self.addr_probes.contains_key(&key) && self.flow_probe_count() >= MAX_FLOW_PROBES {
@@ -1932,6 +2190,7 @@ impl NamePlans {
                 trial_id,
                 generation,
                 expires: now + Duration::from_millis(u64::from(lease_ms)),
+                dns,
             },
         );
         (true, control::ACK_OK)
@@ -1978,7 +2237,7 @@ impl NamePlans {
             }
             return (true, control::ACK_OK);
         }
-        if !control::valid_udp_addr_probe_flow(&key) {
+        if !control::valid_udp_addr_probe_flow(&key) && !control::valid_tcp_addr_probe_flow(&key) {
             return (false, control::ACK_BAD_ARGS);
         }
         if self
@@ -2147,7 +2406,11 @@ impl NamePlans {
         if !valid_addr_shape(shape) {
             return (false, control::ACK_BAD_ARGS);
         }
-        self.addr_plans.remove(&AddrPlanKey { address, shape });
+        self.addr_plans.remove(&AddrPlanKey {
+            address,
+            shape,
+            port: 0,
+        });
         (true, control::ACK_OK)
     }
 
@@ -2240,7 +2503,9 @@ impl NamePlans {
         let entry = self
             .addr_plans
             .iter()
-            .find(|(key, _)| key.address == address && r2o_shape_fits(key.shape, seen_shape))
+            .find(|(key, _)| {
+                key.address == address && key.port == 0 && r2o_shape_fits(key.shape, seen_shape)
+            })
             .map(|(_, entry)| entry)?;
         Self::touch(entry, self.next_plan_clock());
         Some(&entry.plan)
@@ -2628,7 +2893,7 @@ impl NamePlans {
     pub fn find_addr_any(&self, address: Address) -> Option<&Plan> {
         self.addr_plans
             .iter()
-            .find(|(key, _)| key.address == address)
+            .find(|(key, _)| key.address == address && key.port == 0)
             .map(|(_, entry)| &entry.plan)
     }
 
@@ -2660,7 +2925,11 @@ impl NamePlans {
         {
             return false;
         }
-        let key = AddrPlanKey { address, shape };
+        let key = AddrPlanKey {
+            address,
+            shape,
+            port: 0,
+        };
         if !self.addr_plans.contains_key(&key) && !self.make_room_exact() {
             return false;
         }
@@ -2672,6 +2941,7 @@ impl NamePlans {
         self.addr_plans.insert(
             key,
             InstalledPlan {
+                dns_query_len: 0,
                 plan,
                 generation,
                 last_used,
@@ -2681,10 +2951,24 @@ impl NamePlans {
         true
     }
 
+    fn find_endpoint(&self, address: Address, shape: u8, port: u16) -> Option<&Plan> {
+        let entry = self.addr_plans.get(&AddrPlanKey {
+            address,
+            shape,
+            port,
+        })?;
+        Self::touch(entry, self.next_plan_clock());
+        Some(&entry.plan)
+    }
+
     fn find_addr(&self, address: Address, shape: u8) -> Option<&Plan> {
         let entry = self
             .addr_plans
-            .get(&AddrPlanKey { address, shape })
+            .get(&AddrPlanKey {
+                address,
+                shape,
+                port: 0,
+            })
             .or_else(|| {
                 // C `modern_shape_for_ech`: ECH_TCP→MODERN,
                 // ECH_NO_TS→MODERN_NO_TS, ECH_TS→MODERN_TS.
@@ -2697,6 +2981,7 @@ impl NamePlans {
                 self.addr_plans.get(&AddrPlanKey {
                     address,
                     shape: fallback,
+                    port: 0,
                 })
             })?;
         Self::touch(entry, self.next_plan_clock());
@@ -2999,28 +3284,27 @@ pub fn flow_journal_key_for_packet(packet: &[u8]) -> Option<[u8; r2k_core::contr
 }
 
 fn r2o_udp_addr_probe_flow_key(packet: &[u8]) -> Option<[u8; r2k_core::control::KEY_LEN]> {
-    let view = PacketView::parse(packet)?;
-    if view.protocol != 17 || view.fragment & 0x3fff != 0 {
+    let view = PacketView::parse(packet).filter(|view| view.protocol == 17)?;
+    r2o_addr_probe_packet_flow(view, packet)
+}
+
+fn r2o_addr_probe_packet_flow(
+    view: PacketView,
+    packet: &[u8],
+) -> Option<[u8; r2k_core::control::KEY_LEN]> {
+    if view.fragment & 0x3fff != 0 {
         return None;
     }
-    let udp = packet.get(view.l4_offset..view.total_len)?;
-    if udp.len() < 8 {
-        return None;
-    }
-    let source_port = u16::from_be_bytes([udp[0], udp[1]]);
-    let destination_port = u16::from_be_bytes([udp[2], udp[3]]);
-    if source_port == 0 || destination_port == 0 {
-        return None;
-    }
+    let ports = packet.get(view.l4_offset..view.l4_offset + 4)?;
     let mut key = [0; r2k_core::control::KEY_LEN];
     key[0] = view.family;
     let ip_length = if view.family == 4 { 4 } else { 16 };
     key[1..1 + ip_length].copy_from_slice(&view.src.bytes()[..ip_length]);
     key[17..17 + ip_length].copy_from_slice(&view.dst.bytes()[..ip_length]);
-    key[33..35].copy_from_slice(&source_port.to_be_bytes());
-    key[35..37].copy_from_slice(&destination_port.to_be_bytes());
-    key[37] = 17;
-    r2k_core::control::valid_udp_addr_probe_flow(&key).then_some(key)
+    key[33..37].copy_from_slice(ports);
+    key[37] = view.protocol;
+    (control::valid_udp_addr_probe_flow(&key) || control::valid_tcp_addr_probe_flow(&key))
+        .then_some(key)
 }
 
 fn canonical_plan_name(bytes: &[u8], shape: u8) -> Option<String> {
@@ -4596,10 +4880,12 @@ mod tests {
         assert!(!plans.addr_plans.contains_key(&super::AddrPlanKey {
             address: address_b.into(),
             shape: SHAPE_MODERN,
+            port: 0,
         }));
         assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
             address: address_c.into(),
             shape: SHAPE_MODERN,
+            port: 0,
         }));
     }
 
@@ -4800,6 +5086,7 @@ mod tests {
         assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
             address: address.into(),
             shape: SHAPE_LEGACY,
+            port: 0,
         }));
 
         let mut malformed = delete;
@@ -6355,6 +6642,126 @@ mod tests {
     }
 
     #[test]
+    fn адресный_endpoint_ограничивает_quic_портом_и_полным_client_hello_без_sni() {
+        use r2k_core::control::{
+            SHAPE_QUIC, SHAPE_VOICE, encode_delete_endpoint, encode_set_endpoint, read_frame,
+        };
+        let full = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin");
+        let named = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
+        let partial = include_bytes!("../tests/fixtures/quic_v1_initial_first.bin");
+        let mut plans = NamePlans::default();
+
+        fn packet(endpoint: std::net::SocketAddr, payload: &[u8]) -> Vec<u8> {
+            let mut udp = vec![0; 8 + payload.len()];
+            udp[..2].copy_from_slice(&50001_u16.to_be_bytes());
+            udp[2..4].copy_from_slice(&endpoint.port().to_be_bytes());
+            let len = udp.len() as u16;
+            udp[4..6].copy_from_slice(&len.to_be_bytes());
+            udp[8..].copy_from_slice(payload);
+            let mut ip = match endpoint.ip() {
+                std::net::IpAddr::V4(address) => {
+                    let mut ip = vec![0; 20];
+                    ip[0] = 0x45;
+                    ip[2..4].copy_from_slice(&(20 + len).to_be_bytes());
+                    ip[8] = 64;
+                    ip[9] = 17;
+                    ip[12..16].copy_from_slice(&[192, 0, 2, 1]);
+                    ip[16..].copy_from_slice(&address.octets());
+                    ip
+                }
+                std::net::IpAddr::V6(address) => {
+                    let mut ip = vec![0; 40];
+                    ip[0] = 0x60;
+                    ip[4..6].copy_from_slice(&len.to_be_bytes());
+                    ip[6] = 17;
+                    ip[7] = 64;
+                    ip[8..24].copy_from_slice(
+                        &"2001:db8::1"
+                            .parse::<std::net::Ipv6Addr>()
+                            .unwrap()
+                            .octets(),
+                    );
+                    ip[24..].copy_from_slice(&address.octets());
+                    ip
+                }
+            };
+            ip.extend(udp);
+            ip
+        }
+
+        for (endpoint, other) in [
+            ("192.0.2.5:8443", "192.0.2.6:8443"),
+            ("[2001:db8::5]:8443", "[2001:db8::6]:8443"),
+        ] {
+            let endpoint: std::net::SocketAddr = endpoint.parse().unwrap();
+            let other: std::net::SocketAddr = other.parse().unwrap();
+            let mut wrong_port = endpoint;
+            wrong_port.set_port(443);
+            let records = quic_plan_records([1; 16]);
+            let wrong_shape = encode_set_endpoint(endpoint, SHAPE_VOICE, &records).unwrap();
+            assert!(
+                !plans
+                    .handle(&read_frame(&mut wrong_shape.as_slice()).unwrap())
+                    .ok
+            );
+            let set = encode_set_endpoint(endpoint, SHAPE_QUIC, &records).unwrap();
+            assert!(plans.handle(&read_frame(&mut set.as_slice()).unwrap()).ok);
+
+            let hook = Some(crate::netlink::R2O_NF_INET_POST_ROUTING);
+            let hit = packet(endpoint, full);
+            // Датапат передаёт пустое имя после захвата безымянного ClientHello.
+            assert_eq!(
+                plans
+                    .select_with_quic_host_at_hook(&hit, Some(b""), hook)
+                    .unwrap()
+                    .id,
+                [1; 16],
+            );
+            let applied = plans
+                .applied_event_for_packet_at_hook(&hit, 42, hook)
+                .unwrap();
+            assert_eq!(applied.plan_id, [1; 16]);
+            assert_eq!(applied.binding.shape, SHAPE_QUIC);
+            assert!(!applied.binding.temporary);
+            for miss in [
+                packet(wrong_port, full),
+                packet(other, full),
+                packet(endpoint, named),
+                packet(endpoint, partial),
+                packet(endpoint, b"unrecognized UDP"),
+            ] {
+                assert!(
+                    plans
+                        .applied_event_for_packet_at_hook(&miss, 42, hook)
+                        .is_none()
+                );
+            }
+            let wrong_delete = encode_delete_endpoint(wrong_port, SHAPE_QUIC).unwrap();
+            assert!(
+                plans
+                    .handle(&read_frame(&mut wrong_delete.as_slice()).unwrap())
+                    .ok
+            );
+            assert!(
+                plans
+                    .applied_event_for_packet_at_hook(&hit, 42, hook)
+                    .is_some()
+            );
+            let delete = encode_delete_endpoint(endpoint, SHAPE_QUIC).unwrap();
+            assert!(
+                plans
+                    .handle(&read_frame(&mut delete.as_slice()).unwrap())
+                    .ok
+            );
+            assert!(
+                plans
+                    .applied_event_for_packet_at_hook(&hit, 42, hook)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn quic_name_plan_selects_only_its_authenticated_initial_sni() {
         let mut plans = NamePlans::default();
         let ack = plans.handle(&set_quic_name("example.com"));
@@ -7647,6 +8054,7 @@ mod tests {
                 shape: SHAPE_HTTP,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -7780,6 +8188,7 @@ mod tests {
                 trial_id: [0x21; 16],
                 generation: 1,
                 expires: now - Duration::from_millis(1),
+                dns: None,
             },
         );
         plans.addr_probes.insert(
@@ -7789,6 +8198,7 @@ mod tests {
                 trial_id: [0x22; 16],
                 generation: 2,
                 expires: now + Duration::from_secs(1),
+                dns: None,
             },
         );
         plans.voice_addr_probes.insert(
@@ -7822,6 +8232,7 @@ mod tests {
                 trial_id: [0x21; 16],
                 generation: 1,
                 expires: now,
+                dns: None,
             },
         );
         plans.voice_addr_probes.insert(
@@ -8366,8 +8777,13 @@ mod tests {
             r2k_core::control::SHAPE_LEGACY,
         ] {
             plans.addr_plans.insert(
-                super::AddrPlanKey { address, shape },
+                super::AddrPlanKey {
+                    address,
+                    shape,
+                    port: 0,
+                },
                 InstalledPlan {
+                    dns_query_len: 0,
                     plan: Plan::default(),
                     generation: 1,
                     last_used: std::cell::Cell::new(0),
@@ -8400,8 +8816,13 @@ mod tests {
             r2k_core::control::SHAPE_MODERN_TS,
         ] {
             plans.addr_plans.insert(
-                super::AddrPlanKey { address, shape },
+                super::AddrPlanKey {
+                    address,
+                    shape,
+                    port: 0,
+                },
                 InstalledPlan {
+                    dns_query_len: 0,
                     plan: Plan::default(),
                     generation: 1,
                     last_used: std::cell::Cell::new(0),
@@ -8480,6 +8901,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: plan.clone(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -8496,6 +8918,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: plan.clone(),
                 generation: 2,
                 last_used: std::cell::Cell::new(0),
@@ -8516,8 +8939,10 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_MODERN,
+                port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan,
                 generation: 3,
                 last_used: std::cell::Cell::new(0),
@@ -8539,8 +8964,13 @@ mod tests {
         ] {
             let mut plans = NamePlans::default();
             plans.addr_plans.insert(
-                super::AddrPlanKey { address, shape },
+                super::AddrPlanKey {
+                    address,
+                    shape,
+                    port: 0,
+                },
                 InstalledPlan {
+                    dns_query_len: 0,
                     plan: stream_input_tls_plan(),
                     generation: 1,
                     last_used: std::cell::Cell::new(0),
@@ -8593,6 +9023,7 @@ mod tests {
                 shape: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -8621,6 +9052,7 @@ mod tests {
                 shape: SHAPE_LEGACY,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan {
                     id: [0xE1; 16],
                     ..Plan::default()
@@ -8686,6 +9118,7 @@ mod tests {
                 shape: SHAPE_QUIC,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan {
                     id: [0xE3; 16],
                     ..Plan::default()
@@ -8711,6 +9144,7 @@ mod tests {
                 shape: SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan {
                     id: [0xE4; 16],
                     ..Plan::default()
@@ -8723,8 +9157,10 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: SHAPE_QUIC,
+                port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan {
                     id: [0xE5; 16],
                     ..Plan::default()
@@ -8764,6 +9200,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -8783,8 +9220,10 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_MODERN,
+                port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 2,
                 last_used: std::cell::Cell::new(0),
@@ -8807,6 +9246,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_VOICE,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 3,
                 last_used: std::cell::Cell::new(0),
@@ -8829,6 +9269,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_LEGACY,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 4,
                 last_used: std::cell::Cell::new(0),
@@ -8848,8 +9289,10 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_QUIC,
+                port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 5,
                 last_used: std::cell::Cell::new(0),
@@ -8868,8 +9311,10 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_MODERN,
+                port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -8889,8 +9334,10 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_GRANDFATHER,
+                port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 2,
                 last_used: std::cell::Cell::new(0),
@@ -8932,6 +9379,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_ECH_TS,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 4,
                 last_used: std::cell::Cell::new(0),
@@ -8992,6 +9440,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_HTTP,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 3,
                 last_used: std::cell::Cell::new(0),
@@ -9010,6 +9459,7 @@ mod tests {
         assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
             address,
             shape: r2k_core::control::SHAPE_GRANDFATHER,
+            port: 0,
         }));
         assert!(plans.set_addr_family_legacy(address, 4, tcp.clone()));
         assert!(plans.set_addr_shaped_legacy(
@@ -9021,6 +9471,7 @@ mod tests {
         assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
             address,
             shape: r2k_core::control::SHAPE_MODERN,
+            port: 0,
         }));
         let http = Plan {
             proto: r2k_core::plan::PROTO_HTTP,
@@ -9050,8 +9501,10 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_QUIC,
+                port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -9064,6 +9517,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 2,
                 last_used: std::cell::Cell::new(0),

@@ -2,6 +2,7 @@
 
 const BINDING_REQUEST: u16 = 0x0001;
 const BINDING_RESPONSE: u16 = 0x0101;
+const BINDING_ERROR: u16 = 0x0111;
 const MAGIC_COOKIE: u32 = 0x2112_a442;
 const XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const HEADER_LEN: usize = 20;
@@ -86,6 +87,45 @@ pub fn is_binding_request(packet: &[u8]) -> bool {
 /// Проверить Binding Response по типу, заголовку и идентификатору транзакции.
 pub fn is_binding_response_for(packet: &[u8], txid: &[u8; TXID_LEN]) -> bool {
     is_binding(packet, BINDING_RESPONSE) && packet.get(8..HEADER_LEN) == Some(txid.as_slice())
+}
+
+/// Доказательство Binding-обмена по адресу требует полного ответа и XOR-MAPPED-ADDRESS.
+pub fn verified_binding_address(packet: &[u8], txid: &[u8; TXID_LEN]) -> Option<MappedAddress> {
+    if !exact_binding_reply(packet, txid, BINDING_RESPONSE) {
+        return None;
+    }
+    parse_binding_response(packet, txid).ok().flatten()
+}
+
+pub fn is_binding_error_for(packet: &[u8], txid: &[u8; TXID_LEN]) -> bool {
+    exact_binding_reply(packet, txid, BINDING_ERROR)
+}
+
+fn exact_binding_reply(packet: &[u8], txid: &[u8; TXID_LEN], kind: u16) -> bool {
+    if !is_binding(packet, kind)
+        || packet.len() != HEADER_LEN + usize::from(u16::from_be_bytes([packet[2], packet[3]]))
+        || packet[8..HEADER_LEN] != txid[..]
+    {
+        return false;
+    }
+    let mut attributes = &packet[HEADER_LEN..];
+    while !attributes.is_empty() {
+        let Ok(length) = read_u16(attributes, 2) else {
+            return false;
+        };
+        let padded_len = (usize::from(length) + 3) & !3;
+        let Some((current, rest)) = attributes.split_at_checked(4 + padded_len) else {
+            return false;
+        };
+        if kind == BINDING_RESPONSE
+            && read_u16(current, 0) == Ok(XOR_MAPPED_ADDRESS)
+            && !matches!((length, current.get(5)), (8, Some(1)) | (20, Some(2)))
+        {
+            return false;
+        }
+        attributes = rest;
+    }
+    true
 }
 
 /// Текущий запрос Discord IP Discovery содержит ровно 74 байта и нулевые поля

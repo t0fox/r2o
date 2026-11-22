@@ -27,6 +27,9 @@ fn route(
         tls_ms: Some(3),
         websocket_ms: Some(4),
         mtproto_ms: (state == "healthy").then_some(5),
+        is_media: None,
+        wire: None,
+        sni: None,
     }
 }
 

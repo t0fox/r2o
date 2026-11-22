@@ -328,7 +328,7 @@ impl R2oQuicUdpSocketError {
 }
 
 #[cfg(target_os = "linux")]
-fn r2o_quic_http3_set_socket_mark(socket: &UdpSocket, mark: u32) -> std::io::Result<()> {
+pub fn r2o_quic_http3_set_socket_mark(socket: &UdpSocket, mark: u32) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
     let result = unsafe {
@@ -348,7 +348,7 @@ fn r2o_quic_http3_set_socket_mark(socket: &UdpSocket, mark: u32) -> std::io::Res
 }
 
 #[cfg(not(target_os = "linux"))]
-fn r2o_quic_http3_set_socket_mark(_socket: &UdpSocket, _mark: u32) -> std::io::Result<()> {
+pub fn r2o_quic_http3_set_socket_mark(_socket: &UdpSocket, _mark: u32) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "метка SO_MARK поддерживается только в Linux",

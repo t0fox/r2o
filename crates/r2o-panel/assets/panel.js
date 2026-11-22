@@ -582,6 +582,7 @@
       }
       if (this.m) this.renderTelegram(this.m, true);
     }
+    if (global.R2oPanelMotion && previous !== id) global.R2oPanelMotion.enter(screen);
     if (Motion.on() && !options.instant) {
       var g = Motion.g;
       var link = doc.querySelector(".index a[aria-current='page']");
@@ -1035,8 +1036,7 @@
     var lamp = this.$("update-lamp");
     if (lamp) lamp.setAttribute("data-tone", tone || (action || newer ? "live" : !absent && s.check_ok === true ? "ok" : "idle"));
     if (changed && !this.doc.hidden && Motion.on()) {
-      Motion.g.killTweensOf(state);
-      Motion.g.fromTo(state, { opacity: .55, y: 3 }, { opacity: 1, y: 0, duration: .2, clearProps: "opacity,transform" });
+      if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(state);
     }
     write("update-reason", reason).hidden = !reason;
     write("update-checked", num(s.checked_utc) > 0 ? "проверено " + localTime(num(s.checked_utc) * 1000) : "проверки ещё не было");
@@ -1744,6 +1744,7 @@
       var from = prev && /^(\d+) /.exec(prev[1]), to = /^(\d+) /.exec(m.headline[1]);
       if (!prev || !Motion.on()) {
         apply();
+        if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(title);
       } else if (from && to && prev[0] === m.headline[0]) {
         /* Тот же заголовок, другое число: число прокручивается. */
         apply();
@@ -1754,17 +1755,8 @@
         } });
         Motion.g.fromTo(em, { y: -5 }, { y: 0, duration: 0.32, ease: "back.out(3)" });
       } else {
-        /* Новая фраза собирается по буквам; разбиение снимается по окончании. */
-        Motion.g.timeline()
-          .to(title, { y: -14, autoAlpha: 0, duration: 0.18, ease: "power2.in" })
-          .add(function () {
-            apply();
-            Motion.g.set(title, { y: 0, autoAlpha: 1 });
-            if (!global.SplitText) { Motion.g.from(title, { y: 16, autoAlpha: 0, duration: 0.34, clearProps: "all" }); return; }
-            var split = new global.SplitText(title, { type: "words,chars" });
-            Motion.g.from(split.chars, { yPercent: 70, autoAlpha: 0, rotation: 4, duration: 0.4, stagger: 0.014, ease: "power4.out",
-              onComplete: function () { split.revert(); Motion.g.set(title, { clearProps: "all" }); } });
-          });
+        apply();
+        if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(title);
       }
     }
     title.setAttribute("data-tone", m.tone);
@@ -2754,7 +2746,7 @@
     portChip.append(el(doc, "span", "", "Порт"), el(doc, "b", "", "1443"));
     portChip.lastChild.setAttribute("data-tg-port", "");
     var modeChip = el(doc, "span", "tg-chip");
-    modeChip.append(el(doc, "span", "", "Режим"), el(doc, "b", "", "MTProto → WSS"));
+    modeChip.append(el(doc, "span", "", "Режим"), el(doc, "b", "", "MTProto → WS / HTTP/2"));
     var routeChip = el(doc, "span", "tg-chip");
     routeChip.append(el(doc, "span", "", "Маршрут"), el(doc, "b", "", "—"));
     routeChip.lastChild.setAttribute("data-tg-route", "");
@@ -2918,6 +2910,20 @@
     }
     if (ui.flowCaption) {
       var caption = flow ? flow.caption : "Маршруты обновляются по живому трафику.";
+      var sessions = Array.isArray(stats && stats.active_sessions) ? stats.active_sessions : [];
+      [false, true].forEach(function (media) {
+        var session = sessions.slice().reverse().find(function (entry) {
+          return entry && entry.is_media === media && entry.wire;
+        });
+        if (!session) return;
+        var parts = ["DC" + session.dc, media ? "медиа" : "чат", session.wire,
+          session.upstream_host, session.edge_ip].filter(Boolean);
+        parts.push(session.telegram_response_seen ? "MTProto подтверждён" : "транспорт подключён");
+        if (Number.isFinite(session.first_response_ms)) {
+          parts.push("первый MTProto " + telegramMilliseconds(session.first_response_ms));
+        }
+        caption += " " + parts.join(" · ") + ".";
+      });
       if (ui.flowCaption.textContent !== caption) ui.flowCaption.textContent = caption;
     }
   }
@@ -2933,8 +2939,8 @@
     var checked = root.querySelector("[data-tg-check-time]");
     var centers = root.querySelector("[data-tg-check-centers]");
     var states = {
-      healthy: "Все пять DC подтвердили обмен MTProto resPQ.",
-      partial: "resPQ подтверждён не для всех дата-центров.",
+      healthy: "Для чатов и медиа подтверждён обмен MTProto resPQ во всех пяти DC.",
+      partial: "resPQ подтверждён для части DC или типов трафика.",
       unavailable: "Маршрут с подтверждённым resPQ не найден.",
       unverified: "Ответ resPQ не подтверждён ни для одного дата-центра.",
       running: "Проверяются маршруты; успех засчитывается только после resPQ.",
@@ -2959,7 +2965,8 @@
     };
     var transports = {
       "direct-wss": "Прямой WSS", "cloudflare-worker": "Cloudflare Worker",
-      "cloudflare-proxy": "Прокси Cloudflare", "tcp-fallback": "Резервный TCP"
+      "cloudflare-proxy": "Прокси Cloudflare", "cf-worker": "Cloudflare Worker",
+      "cf-proxy": "Прокси Cloudflare", "cf-h2": "Cloudflare /api", "tcp-fallback": "Резервный TCP"
     };
     var timings = [["dns_ms", "DNS"], ["tcp_ms", "TCP"], ["tls_ms", "TLS"],
       ["websocket_ms", "WebSocket"], ["mtproto_ms", "resPQ"]];
@@ -2974,7 +2981,10 @@
         var item = el(root.ownerDocument, "li", "tg-check-route");
         var name = transports[route.transport] || str(route.transport) || "Маршрут";
         var parts = [name, routeStates[route.state] || "статус неизвестен"];
+        if (typeof route.is_media === "boolean") parts.push(route.is_media ? "медиа" : "чат");
+        if (route.wire) parts.push(str(route.wire));
         if (route.domain) parts.push(str(route.domain));
+        if (route.sni && route.sni !== route.domain) parts.push("SNI " + str(route.sni));
         if (route.selected_ip) parts.push(str(route.selected_ip));
         if (route.failed_stage) parts.push("сбой: " + str(route.failed_stage));
         if (route.http_status !== null && route.http_status !== undefined && Number.isFinite(Number(route.http_status))) {
@@ -3040,7 +3050,10 @@
         : st === "unavailable" ? "Нет маршрута"
           : st === "connecting" ? "Подключение"
             : info.on ? "Работает" : "Остановлен";
-      if (ui.badge.textContent !== badgeText) ui.badge.textContent = badgeText;
+      if (ui.badge.textContent !== badgeText) {
+        ui.badge.textContent = badgeText;
+        if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(ui.badge);
+      }
       var badgeTone = !info.on ? "idle" : info.lamp === "bad" ? "bad" : info.lamp === "warn" ? "warn" : "ok";
       ui.badge.setAttribute("data-tone", badgeTone);
     }

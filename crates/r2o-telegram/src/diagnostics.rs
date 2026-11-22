@@ -1,6 +1,7 @@
 //! Активная проверка доступности маршрутов Telegram без запуска listener.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::future::join_all;
@@ -9,13 +10,15 @@ use tokio::sync::Semaphore;
 
 use crate::config::{CfTransportMode, Config, default_dc_ips};
 use crate::dc_discovery::{probe_res_pq, start_ws_byte_stream};
+use crate::routing::{RouteFeedback, confirm_route, reject_route};
 use crate::runtime::Runtime;
 use crate::ws_client::{
-    WsProbeError, WsProbeTiming, cf_ws_domains, connect_probe_plain_ws, connect_probe_ws,
-    race_ws_candidates, ws_domains,
+    WsProbeError, WsProbeTiming, cf_pool_tls_name, cf_ws_domains, connect_probe_plain_ws,
+    connect_probe_ws, race_ws_candidates, ws_domains,
 };
 
-const ROUTE_TIMEOUT: Duration = Duration::from_secs(8);
+const ROUTE_TIMEOUT: Duration = Duration::from_secs(4);
+const CHECK_TIMEOUT: Duration = Duration::from_secs(53);
 const TCP_TIMEOUT: Duration = Duration::from_secs(3);
 const MTPROTO_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_PARALLEL_ROUTES: usize = 3;
@@ -50,6 +53,12 @@ pub struct RouteDiagnostic {
     pub tls_ms: Option<u64>,
     pub websocket_ms: Option<u64>,
     pub mtproto_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_media: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
 }
 
 impl DiagnosticReport {
@@ -60,11 +69,13 @@ impl DiagnosticReport {
 
 #[derive(Clone)]
 struct RouteSpec {
+    dc: u32,
     transport: &'static str,
     domain: Option<String>,
     target_ip: Option<IpAddr>,
     path: String,
     binary_subprotocol: bool,
+    is_media: bool,
 }
 
 /// Проверить DC1–DC5 по активным маршрутам из текущей конфигурации.
@@ -88,23 +99,38 @@ pub async fn run(config: &Config) -> Result<DiagnosticReport, String> {
         .with_cf_fail_cooldown(Duration::from_secs(config.cf_fail_cooldown))
         .with_ca_bundle(config.ca_bundle.clone());
 
-    let specs = route_specs(config, &runtime);
+    Ok(run_with_runtime(&runtime).await)
+}
+
+pub(crate) async fn run_with_runtime(runtime: &Runtime) -> DiagnosticReport {
+    let specs = route_specs(runtime);
+    let deadline = tokio::time::Instant::now() + CHECK_TIMEOUT;
     let semaphore = std::sync::Arc::new(Semaphore::new(MAX_PARALLEL_ROUTES));
     let futures = specs.into_iter().map(|(dc, sequence, spec)| {
         let semaphore = std::sync::Arc::clone(&semaphore);
-        let runtime = &runtime;
         async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|_| "диагностический лимит параллелизма закрыт".to_string())?;
-            Ok::<_, String>((dc, sequence, probe_route(runtime, spec).await))
+            let result = tokio::time::timeout_at(deadline, async {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("закрыт лимит диагностики");
+                let result = probe_route(runtime, spec.clone()).await;
+                update_route(runtime, dc, &spec, &result);
+                result
+            })
+            .await
+            .unwrap_or_else(|_| {
+                let mut result = RouteDiagnostic::empty(spec.transport, spec.domain, None);
+                result.state = "unverified";
+                result.reason = Some("истёк общий лимит времени диагностики".into());
+                result
+            });
+            let mut result = result;
+            result.is_media = Some(spec.is_media);
+            (dc, sequence, result)
         }
     });
-    let mut routes = join_all(futures)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut routes = join_all(futures).await;
     routes.sort_by_key(|route| (route.0, route.1));
 
     let mut data_centers = Vec::with_capacity(5);
@@ -121,11 +147,14 @@ pub async fn run(config: &Config) -> Result<DiagnosticReport, String> {
         });
     }
 
-    let report = DiagnosticReport {
+    DiagnosticReport {
         checked_at: unix_time(),
         state: if data_centers.iter().all(|dc| dc.state == "healthy") {
             "healthy"
-        } else if data_centers.iter().any(|dc| dc.state == "healthy") {
+        } else if data_centers
+            .iter()
+            .any(|dc| dc.routes.iter().any(|route| route.state == "healthy"))
+        {
             "partial"
         } else if data_centers.iter().all(|dc| dc.state == "unverified") {
             "unverified"
@@ -133,84 +162,100 @@ pub async fn run(config: &Config) -> Result<DiagnosticReport, String> {
             "unavailable"
         },
         data_centers,
-    };
-    Ok(report)
+    }
 }
 
-fn route_specs(config: &Config, runtime: &Runtime) -> Vec<(u32, usize, RouteSpec)> {
+fn route_specs(runtime: &Runtime) -> Vec<(u32, usize, RouteSpec)> {
     let fallback = default_dc_ips();
     let map = runtime.dc_map().current();
     let cf_domains = runtime.cf_domains();
     let mut routes = Vec::new();
 
     for dc in 1..=5 {
-        let target_ip = map
-            .as_ref()
-            .and_then(|snapshot| {
-                snapshot
-                    .endpoints
-                    .iter()
-                    .find(|endpoint| {
+        let dc_ip = |is_media| {
+            map.as_ref()
+                .and_then(|snapshot| {
+                    snapshot.endpoints.iter().find(|endpoint| {
                         endpoint.id == dc
                             && endpoint.port == 443
-                            && !endpoint.media_only
+                            && endpoint.media_only == is_media
                             && !endpoint.tcpo_only
                             && !endpoint.cdn
+                            && endpoint.secret.is_none()
                     })
-                    .map(|endpoint| endpoint.address)
-            })
-            .or_else(|| fallback.get(&dc)?.parse::<IpAddr>().ok());
-
-        let mut add = |transport, domain, ip, path, binary_subprotocol| {
-            let sequence = routes
-                .iter()
-                .filter(|route: &&(u32, usize, RouteSpec)| route.0 == dc)
-                .count();
-            routes.push((
-                dc,
-                sequence,
-                RouteSpec {
-                    transport,
-                    domain,
-                    target_ip: ip,
-                    path,
-                    binary_subprotocol,
-                },
-            ));
+                })
+                .map(|endpoint| endpoint.address)
         };
-
-        if let Some(ip) = target_ip {
-            add("tcp-fallback", None, Some(ip), String::new(), false);
-            add(
-                "direct-wss",
-                Some(ws_domains(dc, false)[0].clone()),
-                Some(ip),
-                "/apiws".into(),
-                true,
-            );
-
-            for domain in &config.cf_worker_domains {
-                add(
-                    "cf-worker",
-                    Some(domain.clone()),
-                    Some(ip),
-                    crate::ws_client::cf_worker_path(&ip.to_string(), dc, false),
-                    false,
-                );
+        let chat_ip = dc_ip(false).or_else(|| fallback.get(&dc)?.parse().ok());
+        let mut sequence = 0;
+        for (is_media, target_ip) in [(false, chat_ip), (true, dc_ip(true).or(chat_ip))] {
+            let mut add = |transport, domain, target_ip, path, binary_subprotocol| {
+                routes.push((
+                    dc,
+                    sequence,
+                    RouteSpec {
+                        dc,
+                        transport,
+                        domain,
+                        target_ip,
+                        path,
+                        binary_subprotocol,
+                        is_media,
+                    },
+                ));
+                sequence += 1;
+            };
+            if let Some(ip) = target_ip {
+                if !is_media || dc_ip(true).is_some() {
+                    add("tcp-fallback", None, Some(ip), String::new(), false);
+                }
+                for host in ws_domains(dc, is_media) {
+                    add("direct-wss", Some(host), Some(ip), "/apiws".into(), true);
+                }
+                for domain in runtime.cf_worker_domains() {
+                    add(
+                        "cf-worker",
+                        Some(domain.clone()),
+                        Some(ip),
+                        crate::ws_client::cf_worker_path(&ip.to_string(), dc, is_media),
+                        false,
+                    );
+                }
             }
-            for domain in cf_ws_domains(dc, &cf_domains.domains, false) {
-                add("cf-proxy", Some(domain), None, "/apiws".into(), true);
+            if runtime.cf_worker_domains().is_empty() {
+                add("cf-worker", None, None, String::new(), false);
             }
-        }
-
-        if config.cf_worker_domains.is_empty() {
-            add("cf-worker", None, None, String::new(), false);
-        }
-        if cf_domains.domains.is_empty() {
-            add("cf-proxy", None, None, String::new(), false);
+            let zones = &cf_domains.domains[..cf_domains.domains.len().min(8)];
+            for domain in cf_ws_domains(dc, zones, is_media) {
+                add("cf-proxy", Some(domain), target_ip, "/apiws".into(), true);
+            }
+            if is_media && runtime.cf_transport() != CfTransportMode::Plain {
+                for zone in zones {
+                    add("cf-h2", Some(zone.clone()), target_ip, "/api".into(), false);
+                }
+            }
+            if cf_domains.domains.is_empty() {
+                add("cf-proxy", None, None, String::new(), false);
+            }
         }
     }
-    routes
+
+    // Чередуем DC и тип трафика, чтобы общий тайм-аут не оставил последние DC без проверки.
+    let mut ordinal = std::collections::BTreeMap::new();
+    let mut scheduled = routes
+        .into_iter()
+        .map(|route| {
+            let index = ordinal
+                .entry((route.0, route.2.is_media, route.2.transport))
+                .or_insert(0);
+            let ordinal = *index;
+            *index += 1;
+            (ordinal, route)
+        })
+        .collect::<Vec<_>>();
+    scheduled
+        .sort_by_key(|(ordinal, (dc, _, spec))| (*ordinal, spec.transport, *dc, spec.is_media));
+    scheduled.into_iter().map(|(_, route)| route).collect()
 }
 
 async fn probe_route(runtime: &Runtime, spec: RouteSpec) -> RouteDiagnostic {
@@ -226,11 +271,88 @@ async fn probe_route(runtime: &Runtime, spec: RouteSpec) -> RouteDiagnostic {
     if route_requires_target_ip(&spec) && spec.target_ip.is_none() {
         return RouteDiagnostic::unverified(spec.transport);
     }
-    probe_wss(runtime, spec.clone(), spec.target_ip, &domain).await
+    if spec.transport == "cf-h2" {
+        return probe_h2(runtime, &spec, &domain).await;
+    }
+    let target_ip = spec.target_ip;
+    probe_wss(runtime, spec, target_ip, &domain).await
 }
 
 fn route_requires_target_ip(spec: &RouteSpec) -> bool {
     spec.transport != "cf-proxy"
+}
+
+async fn probe_h2(runtime: &Runtime, spec: &RouteSpec, zone: &str) -> RouteDiagnostic {
+    let mut result = RouteDiagnostic::empty("cf-h2", Some(format!("kws{}.{zone}", spec.dc)), None);
+    result.wire = Some("h2/443");
+    result.sni = Some(zone.to_owned());
+    match crate::cf_h2::connect(runtime, spec.dc, zone).await {
+        Ok(Some((client, latency))) => {
+            result.selected_ip = Some(client.peer.ip());
+            result.mtproto_ms = Some(latency.as_millis() as u64);
+            result.state = "healthy";
+            crate::cf_h2::clear_cooldown(spec.dc, zone);
+        }
+        Ok(None) => {
+            result.state = "unverified";
+            result.reason = Some("занят лимит HTTP/2".into());
+        }
+        Err(error) => {
+            result.selected_ip = error.ip;
+            result.http_status = error.http_status;
+            result.fail(error.stage, error.reason);
+        }
+    }
+    result
+}
+
+fn update_route(runtime: &Runtime, dc: u32, spec: &RouteSpec, result: &RouteDiagnostic) {
+    let Some(ip) = spec.target_ip else {
+        return;
+    };
+    let ip = ip.to_string();
+    let media = spec.is_media;
+    let timeout = runtime.cf_fail_cooldown();
+    if spec.transport == "tcp-fallback" && result.mtproto_ms.is_some() {
+        crate::routing::record_tcp_connect_success(dc, media, &ip);
+        return;
+    }
+    let feedback = match (
+        spec.transport,
+        spec.domain.as_deref(),
+        result.selected_ip,
+        result.wire,
+    ) {
+        ("direct-wss", _, _, _) => RouteFeedback::direct(dc, media, &ip, timeout),
+        ("cf-worker", Some(host), Some(edge), Some(wire)) => {
+            RouteFeedback::cf_worker(dc, media, &ip, host, timeout)
+                .with_peer(host.to_owned(), SocketAddr::new(edge, wire_port(wire)))
+        }
+        ("cf-proxy", Some(host), Some(edge), Some(wire)) => {
+            let Some(zone) = cf_pool_tls_name(host) else {
+                return;
+            };
+            RouteFeedback::cf_proxy(
+                dc,
+                media,
+                ip,
+                zone.to_owned(),
+                Arc::clone(runtime.cf_domain_pool()),
+                timeout,
+            )
+            .with_peer(host.to_owned(), SocketAddr::new(edge, wire_port(wire)))
+        }
+        _ => return,
+    };
+    if let Some(latency_ms) = result.mtproto_ms {
+        confirm_route(&feedback, Duration::from_millis(latency_ms));
+    } else if result.failed_stage == Some("mtproto") && spec.transport != "direct-wss" {
+        reject_route(&feedback);
+    }
+}
+
+fn wire_port(wire: &str) -> u16 {
+    if wire == "ws/80" { 80 } else { 443 }
 }
 
 async fn probe_tcp(runtime: &Runtime, spec: RouteSpec, ip: IpAddr) -> RouteDiagnostic {
@@ -255,6 +377,7 @@ async fn probe_tcp(runtime: &Runtime, spec: RouteSpec, ip: IpAddr) -> RouteDiagn
         }
     };
     result.tcp_ms = Some(elapsed_ms(started));
+    result.wire = Some("tcp");
     let mut stream = stream;
     let started = std::time::Instant::now();
     match tokio::time::timeout(MTPROTO_TIMEOUT, probe_res_pq(&mut stream)).await {
@@ -283,7 +406,10 @@ async fn probe_wss(
                 return result;
             }
         }
+    } else if !runtime.cf_ips().is_empty() {
+        (runtime.cf_ips().to_vec(), None)
     } else {
+        result.selected_ip = None;
         let started = std::time::Instant::now();
         match tokio::time::timeout(
             Duration::from_secs(3),
@@ -320,7 +446,11 @@ async fn probe_wss(
     let domain_owned = domain.to_string();
     let path = spec.path.clone();
     let binary_subprotocol = spec.binary_subprotocol;
-    let use_tls = spec.transport != "cf-proxy" || runtime.cf_transport() == CfTransportMode::Tls;
+    let mode = if spec.transport == "direct-wss" {
+        CfTransportMode::Tls
+    } else {
+        runtime.cf_transport()
+    };
     let outbound = runtime.outbound();
     let (winner, failures) = race_ws_candidates(
         candidates,
@@ -329,22 +459,15 @@ async fn probe_wss(
             let domain = domain_owned.clone();
             let path = path.clone();
             async move {
-                probe_wss_edge(
-                    outbound,
-                    &target,
-                    &domain,
-                    &path,
-                    binary_subprotocol,
-                    use_tls,
-                )
-                .await
+                probe_wss_edge(outbound, &target, &domain, &path, binary_subprotocol, mode).await
             }
         },
         |_| false,
     )
     .await;
-    if let Some((selected_ip, (timing, mtproto_ms))) = winner {
+    if let Some((selected_ip, (timing, mtproto_ms, use_tls))) = winner {
         result.selected_ip = selected_ip.parse().ok();
+        result.set_wire(&spec, domain, use_tls);
         result.tcp_ms = timing.tcp_ms;
         result.tls_ms = timing.tls_ms;
         result.websocket_ms = timing.websocket_ms;
@@ -352,8 +475,12 @@ async fn probe_wss(
         result.state = "healthy";
         return result;
     }
-    if let Some((selected_ip, error)) = failures.into_iter().last() {
+    if let Some((selected_ip, (error, use_tls))) = failures
+        .into_iter()
+        .max_by_key(|(_, (error, _))| probe_stage(error))
+    {
         result.selected_ip = selected_ip.parse().ok();
+        result.set_wire(&spec, domain, use_tls);
         result.apply_ws_error(error);
     } else {
         result.fail("websocket", "все попытки WSS отменены".into());
@@ -362,6 +489,53 @@ async fn probe_wss(
 }
 
 async fn probe_wss_edge(
+    outbound: &crate::outbound::OutboundConnector,
+    ip: &str,
+    domain: &str,
+    path: &str,
+    binary_subprotocol: bool,
+    mode: CfTransportMode,
+) -> Result<(WsProbeTiming, u64, bool), (WsProbeError, bool)> {
+    let modes = match mode {
+        CfTransportMode::Auto if !binary_subprotocol => vec!["wss".to_owned(), "ws".to_owned()],
+        CfTransportMode::Auto => vec!["ws".to_owned(), "wss".to_owned()],
+        CfTransportMode::Plain => vec!["ws".to_owned()],
+        CfTransportMode::Tls => vec!["wss".to_owned()],
+    };
+    let (winner, failures) = race_ws_candidates(
+        modes,
+        EDGE_HEDGE_DELAY,
+        |wire| async move {
+            let use_tls = wire == "wss";
+            probe_wss_edge_mode(outbound, ip, domain, path, binary_subprotocol, use_tls)
+                .await
+                .map(|(timing, elapsed)| (timing, elapsed, use_tls))
+                .map_err(|error| (error, use_tls))
+        },
+        |_| false,
+    )
+    .await;
+    winner.map(|(_, result)| result).ok_or_else(|| {
+        failures
+            .into_iter()
+            .map(|(_, failure)| failure)
+            .max_by_key(|(error, _)| probe_stage(error))
+            .expect("нет результата попытки")
+    })
+}
+
+fn probe_stage(error: &WsProbeError) -> u8 {
+    match error.phase {
+        "mtproto" => 5,
+        "websocket" if error.http_status.is_some() => 4,
+        "websocket" => 3,
+        "tls" => 2,
+        "tcp" => 1,
+        _ => 0,
+    }
+}
+
+async fn probe_wss_edge_mode(
     outbound: &crate::outbound::OutboundConnector,
     ip: &str,
     domain: &str,
@@ -390,7 +564,15 @@ async fn probe_wss_edge(
         )
         .await?
     };
-    let mut stream = start_ws_byte_stream(ws);
+    probe_mtproto(ws, binary_subprotocol, timing).await
+}
+
+async fn probe_mtproto(
+    ws: crate::ws_client::TgWsStream,
+    framed: bool,
+    timing: WsProbeTiming,
+) -> Result<(WsProbeTiming, u64), WsProbeError> {
+    let mut stream = start_ws_byte_stream(ws, framed);
     let started = std::time::Instant::now();
     match tokio::time::timeout(MTPROTO_TIMEOUT, probe_res_pq(&mut stream)).await {
         Ok(Ok(_)) => Ok((timing, elapsed_ms(started))),
@@ -424,6 +606,9 @@ impl RouteDiagnostic {
             tls_ms: None,
             websocket_ms: None,
             mtproto_ms: None,
+            is_media: None,
+            wire: None,
+            sni: None,
         }
     }
 
@@ -439,8 +624,19 @@ impl RouteDiagnostic {
         self.reason = Some(reason);
     }
 
+    fn set_wire(&mut self, spec: &RouteSpec, domain: &str, use_tls: bool) {
+        self.wire = Some(if use_tls { "wss/443" } else { "ws/80" });
+        if use_tls {
+            self.sni = Some(if spec.transport == "cf-proxy" {
+                cf_pool_tls_name(domain).unwrap_or(domain).to_owned()
+            } else {
+                domain.to_owned()
+            });
+        }
+    }
+
     fn apply_ws_error(&mut self, error: WsProbeError) {
-        self.dns_ms = error.timing.dns_ms;
+        self.dns_ms = self.dns_ms.or(error.timing.dns_ms);
         self.tcp_ms = error.timing.tcp_ms;
         self.tls_ms = error.timing.tls_ms;
         self.websocket_ms = error.timing.websocket_ms;
@@ -460,7 +656,12 @@ fn route_failure_state(stage: &str, reason: &str) -> &'static str {
 }
 
 fn dc_state(routes: &[RouteDiagnostic]) -> &'static str {
-    if routes.iter().any(|route| route.state == "healthy") {
+    let healthy = |is_media| {
+        routes.iter().any(|route| {
+            route.state == "healthy" && (route.is_media == is_media || route.is_media.is_none())
+        })
+    };
+    if healthy(Some(false)) && healthy(Some(true)) {
         "healthy"
     } else if routes.iter().all(|route| route.state == "unverified") {
         "unverified"
@@ -513,20 +714,74 @@ mod tests {
     #[test]
     fn cf_proxy_route_resolves_its_own_edge_without_a_dc_ip_hint() {
         let route = RouteSpec {
+            dc: 1,
             transport: "cf-proxy",
             domain: Some("kws1.cf.example".into()),
             target_ip: None,
             path: "/apiws".into(),
             binary_subprotocol: true,
+            is_media: false,
         };
         assert!(!route_requires_target_ip(&route));
         let worker = RouteSpec {
+            dc: 1,
             transport: "cf-worker",
             domain: Some("worker.example".into()),
             target_ip: None,
             path: "/telegram".into(),
             binary_subprotocol: false,
+            is_media: false,
         };
         assert!(route_requires_target_ip(&worker));
+    }
+
+    #[tokio::test]
+    async fn http_101_worker_без_mtproto_завершается_таймаутом() {
+        use futures_util::StreamExt;
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio_tungstenite::MaybeTlsStream;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            assert!(ws.next().await.unwrap().unwrap().is_binary());
+            assert!(ws.next().await.unwrap().unwrap().is_binary());
+            std::future::pending::<()>().await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (ws, response) = tokio_tungstenite::client_async(
+            "ws://worker.example/apiws?dst=149.154.167.51",
+            MaybeTlsStream::Plain(tcp),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status().as_u16(), 101);
+        let error = super::probe_mtproto(
+            ws,
+            false,
+            super::WsProbeTiming {
+                websocket_ms: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.phase, "mtproto");
+        assert_eq!(error.timing.websocket_ms, Some(1));
+        assert!(error.reason.contains("тайм-аут"));
+        server.abort();
+    }
+
+    #[test]
+    fn чат_и_медиа_подтверждаются_отдельно() {
+        let mut chat = RouteDiagnostic::empty("cf-proxy", None, None);
+        chat.is_media = Some(false);
+        chat.state = "healthy";
+        let mut media = chat.clone();
+        media.is_media = Some(true);
+        assert_ne!(dc_state(std::slice::from_ref(&chat)), "healthy");
+        assert_eq!(dc_state(&[chat, media]), "healthy");
     }
 }

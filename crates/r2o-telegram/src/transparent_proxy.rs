@@ -201,6 +201,7 @@ async fn bridge_direct_payload(
             }
             if let Some(telemetry) = payload.telemetry.as_ref() {
                 telemetry.select_transport("direct", "tcp_passthrough");
+                telemetry.set_upstream(None, payload.destination.ip(), "tcp");
             }
             match copy_bidirectional_with_telemetry(
                 &mut client,
@@ -462,6 +463,19 @@ pub async fn handle_transparent_client_with_runtime(
                 _ => ("fallback", "unknown_wss"),
             };
             telemetry.select_transport(branch, transport);
+            if let Some((host, edge)) = feedback.edge() {
+                telemetry.set_upstream(
+                    Some(host),
+                    edge.ip(),
+                    if edge.port() == 80 {
+                        "ws/80"
+                    } else {
+                        "wss/443"
+                    },
+                );
+            } else if let Some(edge) = crate::ws_client::ws_peer(&ws) {
+                telemetry.set_upstream(None, edge.ip(), "wss/443");
+            }
             let _wss_connection = runtime.stats().wss_connection();
             crate::bridge::bridge_transparent_ws(
                 stream,
@@ -479,6 +493,25 @@ pub async fn handle_transparent_client_with_runtime(
                 runtime.stats().memory_budget(),
             )
             .await;
+        }
+        Upstream::H2 { client, zone } => {
+            telemetry.select_transport("fallback", "cloudflare_h2");
+            telemetry.set_upstream(Some(&client.host), client.peer.ip(), "h2/443");
+            if let Err(error) = client
+                .relay(stream, init, init_info.proto, dc, &telemetry)
+                .await
+            {
+                if error.stage != "client" {
+                    crate::cf_h2::use_ws_fallback(dc, &zone);
+                    if error.stage != "memory" {
+                        runtime.stats().record_mtproto_failure(error.stage);
+                    }
+                }
+                warn!(
+                    "[{}] DC{}m: HTTP/2 /api через {} закрыт: {}: {}",
+                    label, dc, zone, error.stage, error.reason
+                );
+            }
         }
         Upstream::Tcp(host) => {
             let (fallback_host, fallback_port) =
@@ -515,6 +548,9 @@ pub async fn handle_transparent_client_with_runtime(
                     }
                     attempt.finish("connected");
                     telemetry.select_transport("fallback", "tcp_fallback");
+                    if let Ok(edge) = remote.peer_addr() {
+                        telemetry.set_upstream(None, edge.ip(), "tcp");
+                    }
                     let mut client = stream;
                     match copy_bidirectional_with_telemetry(
                         &mut client,

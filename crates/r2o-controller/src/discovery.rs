@@ -1425,6 +1425,7 @@ pub fn bind_confirmed(
     verified_by: u8,
     input: u8,
     at: i64,
+    port: u16,
     fingerprint: Option<&Fingerprint>,
 ) -> Result<(), String> {
     if box_id.is_empty() || box_id.len() >= 40 {
@@ -1435,6 +1436,12 @@ pub fn bind_confirmed(
     }
     if kind.is_empty() || kind.len() >= 8 || target.is_empty() || target.len() > 255 {
         return Err("catalog binding kind or target is invalid".into());
+    }
+    if port != 0
+        && (kind != "addr"
+            || !(transport == 17 || (transport == 6 && shape == r2k_core::control::SHAPE_DNS_TCP)))
+    {
+        return Err("порт поддерживается только адресными UDP- и DNS/TCP-привязками".into());
     }
     if !matches!(family, 4 | 6) {
         return Err("catalog binding family is invalid".into());
@@ -1496,6 +1503,7 @@ pub fn bind_confirmed(
     }
     if let Some(saved) = selected.bindings.iter_mut().find(|binding| {
         binding.transport == transport
+            && binding.port == port
             && binding.target == target
             && binding.kind == kind
             && (if binding.family == 0 {
@@ -1537,6 +1545,7 @@ pub fn bind_confirmed(
         successes: 1,
         enabled: true,
         transport,
+        port,
         family,
         shape,
         tcp_profile,
@@ -1802,6 +1811,7 @@ fn add_measured_binding_with_fingerprint_in_box_learn(
         if address_target { 5 } else { 1 },
         input,
         now,
+        0,
         observed_fingerprint,
     )?;
 
@@ -1844,10 +1854,206 @@ pub fn add_confirmed_quic_address_binding(
         "addr",
         &address.to_string(),
         family,
+        0,
         "",
         source_text,
         now,
     )
+}
+
+pub fn add_confirmed_quic_endpoint_binding(
+    catalog: &mut Catalog,
+    endpoint: std::net::SocketAddr,
+    source_text: &str,
+    now: i64,
+) -> Result<String, String> {
+    // Валидируем полный ключ, который будет отправлен датапату.
+    r2k_core::control::encode_delete_endpoint(endpoint, SHAPE_QUIC)?;
+    if now < 0 {
+        return Err("недопустимое время подтверждения QUIC".into());
+    }
+    let family = if endpoint.is_ipv4() { 4 } else { 6 };
+    add_confirmed_quic_binding(
+        catalog,
+        "addr",
+        &endpoint.ip().to_string(),
+        family,
+        endpoint.port(),
+        "",
+        source_text,
+        now,
+    )
+}
+
+pub fn add_confirmed_stun_endpoint_binding(
+    catalog: &mut Catalog,
+    endpoint: std::net::SocketAddr,
+    source_text: &str,
+    now: i64,
+) -> Result<String, String> {
+    let shape = r2k_core::control::SHAPE_VOICE;
+    r2k_core::control::encode_delete_endpoint(endpoint, shape)?;
+    if now < 0 {
+        return Err("недопустимое время подтверждения STUN".into());
+    }
+    let family = if endpoint.is_ipv4() { 4 } else { 6 };
+    let canonical = canonical_plan_text(source_text)?;
+    let plan_id = stable_plan_id(family, shape, &canonical);
+    let plan_text = text_with_id(&canonical, &plan_id)?;
+    let bytes = crate::plan_text::compile_text(&plan_text)?;
+    let plan = RuntimePlan::parse(&bytes).map_err(|error| error.to_string())?;
+    if plan.transport != 17 || plan.proto != r2k_core::plan::PROTO_VOICE || plan.ipfrag != 1 {
+        return Err("адресный STUN-план требует UDP voice с ipfrag 1".into());
+    }
+    r2o_datapath::engine::validate_runtime_plan(&plan)?;
+    bind_confirmed(
+        catalog,
+        &format!("auto-{plan_id}"),
+        &plan_id,
+        &plan_text,
+        "voice",
+        &endpoint.ip().to_string(),
+        "addr",
+        17,
+        family,
+        shape,
+        0,
+        3,
+        1,
+        now,
+        endpoint.port(),
+        None,
+    )?;
+    Ok(plan_id)
+}
+
+pub fn has_confirmed_stun_endpoint(catalog: &Catalog, endpoint: std::net::SocketAddr) -> bool {
+    let target = endpoint.ip().to_string();
+    let family = if endpoint.is_ipv4() { 4 } else { 6 };
+    catalog.boxes.iter().any(|record| {
+        record.bindings.iter().any(|binding| {
+            binding.kind == "addr"
+                && binding.transport == 17
+                && binding.shape == r2k_core::control::SHAPE_VOICE
+                && binding.family == family
+                && binding.target == target
+                && binding.port == endpoint.port()
+                && binding.port != 0
+                && binding.enabled
+                && binding.level >= 3
+                && binding.verified_by == 3
+                && binding.recheck_since.unwrap_or(0) == 0
+                && record
+                    .plans
+                    .iter()
+                    .any(|plan| plan.enabled && plan.id == binding.plan_id)
+        })
+    })
+}
+
+pub fn dns_endpoint_binding(
+    binding: &Binding,
+    endpoint: r2k_core::dns_config::PlainDnsEndpoint,
+) -> bool {
+    binding.kind == "addr"
+        && binding.transport == endpoint.transport
+        && r2k_core::control::dns_endpoint_transport(binding.shape) == Some(endpoint.transport)
+        && binding.family == if endpoint.address.is_ipv4() { 4 } else { 6 }
+        && binding.port == endpoint.address.port()
+        && binding.target.parse::<IpAddr>().ok() == Some(endpoint.address.ip())
+}
+
+pub fn confirmed_dns_endpoint(
+    catalog: &Catalog,
+    endpoint: r2k_core::dns_config::PlainDnsEndpoint,
+) -> Option<(&Binding, &Plan)> {
+    catalog
+        .boxes
+        .iter()
+        .flat_map(|record| record.bindings.iter().map(move |binding| (record, binding)))
+        .filter(|(_, binding)| {
+            dns_endpoint_binding(binding, endpoint)
+                && binding.enabled
+                && binding.level >= 3
+                && binding.verified_by == 1
+                && binding.recheck_since.unwrap_or(0) == 0
+                && r2k_core::dns_probe::is_dns_probe_wire_length(
+                    usize::from(binding.dns_query_bytes),
+                    endpoint.transport,
+                )
+        })
+        .filter_map(|(record, binding)| {
+            record
+                .plans
+                .iter()
+                .find(|plan| plan.enabled && plan.id == binding.plan_id)
+                .map(|plan| (binding, plan))
+        })
+        .max_by_key(|(binding, _)| binding.confirmed)
+}
+
+pub fn add_confirmed_dns_endpoint(
+    catalog: &mut Catalog,
+    endpoint: r2k_core::dns_config::PlainDnsEndpoint,
+    source_text: &str,
+    query_len: u16,
+    now: i64,
+) -> Result<(), String> {
+    let shape = r2k_core::control::dns_endpoint_shape(endpoint.transport)
+        .ok_or("неподдерживаемый транспорт DNS")?;
+    let family = if endpoint.address.is_ipv4() { 4 } else { 6 };
+    let canonical = canonical_plan_text(source_text)?;
+    let plan_id = stable_plan_id(family, shape, &canonical);
+    let plan_text = text_with_id(&canonical, &plan_id)?;
+    let bytes = crate::plan_text::compile_text(&plan_text)?;
+    let plan = RuntimePlan::parse(&bytes).map_err(|error| error.to_string())?;
+    let compatible = if endpoint.transport == 6 {
+        r2o_datapath::engine::is_dns_tcp_split_plan(&plan, usize::from(query_len))
+    } else {
+        r2o_datapath::engine::is_dns_udp_fragment_plan(&plan)
+    };
+    if now < 0
+        || !r2k_core::dns_probe::is_dns_probe_wire_length(
+            usize::from(query_len),
+            endpoint.transport,
+        )
+        || !compatible
+    {
+        return Err("DNS-привязка требует измеренную форму запроса и точный DNS-план".into());
+    }
+    r2k_core::control::encode_delete_endpoint(endpoint.address, shape)?;
+    let box_id = format!("auto-{plan_id}");
+    bind_confirmed(
+        catalog,
+        &box_id,
+        &plan_id,
+        &plan_text,
+        "dns",
+        &endpoint.address.ip().to_string(),
+        "addr",
+        endpoint.transport,
+        family,
+        shape,
+        0,
+        1,
+        1,
+        now,
+        endpoint.address.port(),
+        None,
+    )?;
+    let binding = catalog
+        .boxes
+        .iter_mut()
+        .find(|record| record.id == box_id)
+        .and_then(|record| {
+            record
+                .bindings
+                .iter_mut()
+                .find(|binding| dns_endpoint_binding(binding, endpoint))
+        })
+        .ok_or("сохранённая привязка DNS отсутствует")?;
+    binding.dns_query_bytes = query_len;
+    Ok(())
 }
 
 pub fn add_confirmed_quic_name_binding(
@@ -1868,7 +2074,16 @@ pub fn add_confirmed_quic_name_binding(
     {
         return Err("QUIC-привязка имени имеет недопустимые имя, путь или семейство".into());
     }
-    add_confirmed_quic_binding(catalog, "name", &host, family, probe_path, source_text, now)
+    add_confirmed_quic_binding(
+        catalog,
+        "name",
+        &host,
+        family,
+        0,
+        probe_path,
+        source_text,
+        now,
+    )
 }
 
 fn add_confirmed_quic_binding(
@@ -1876,6 +2091,7 @@ fn add_confirmed_quic_binding(
     kind: &str,
     target: &str,
     family: u8,
+    port: u16,
     probe_path: &str,
     source_text: &str,
     now: i64,
@@ -1909,7 +2125,7 @@ fn add_confirmed_quic_binding(
     let box_id = catalog.boxes[box_index].id.clone();
     bind_confirmed(
         catalog, &box_id, &plan_id, &plan_text, "quic", target, kind, 17, family, SHAPE_QUIC, 0, 6,
-        1, now, None,
+        1, now, port, None,
     )?;
     // C `verify_confirm` (`sched.c:9475-9489`) переносит измеренный путь в
     // подтверждённую привязку уже после `bind_confirmed`; пустой путь
@@ -1923,6 +2139,7 @@ fn add_confirmed_quic_binding(
                 && binding.plan_id == plan_id
                 && binding.transport == 17
                 && binding.family == family
+                && binding.port == port
                 && binding.shape == SHAPE_QUIC
             {
                 binding.probe_path = probe_path.to_owned();
@@ -1939,6 +2156,7 @@ fn add_confirmed_quic_binding(
                 && binding.plan_id == plan_id
                 && binding.transport == 17
                 && binding.family == family
+                && binding.port == port
                 && binding.shape == SHAPE_QUIC
                 && binding.budget == 0
             {
@@ -1951,11 +2169,23 @@ fn add_confirmed_quic_binding(
 
 /// Проверить, что у адреса уже есть применимый QUIC-план с replay-доказательством.
 pub fn has_usable_quic_address_binding(catalog: &Catalog, address: std::net::IpAddr) -> bool {
+    has_usable_quic_binding(catalog, std::net::SocketAddr::new(address, 0))
+}
+
+pub fn has_usable_quic_endpoint_binding(catalog: &Catalog, endpoint: std::net::SocketAddr) -> bool {
+    endpoint.port() != 0 && has_usable_quic_binding(catalog, endpoint)
+}
+
+fn has_usable_quic_binding(catalog: &Catalog, endpoint: std::net::SocketAddr) -> bool {
+    let address = endpoint.ip();
     let family = if address.is_ipv4() { 4 } else { 6 };
     let target = address.to_string();
     catalog.boxes.iter().any(|record| {
         record.bindings.iter().any(|binding| {
             quic_binding_key(binding, &target, family)
+                && binding.port == endpoint.port()
+                && binding.enabled
+                && binding.recheck_since.unwrap_or(0) == 0
                 && binding.verified_by == 6
                 && binding.input == 1
                 && record
@@ -3638,6 +3868,7 @@ mod tests {
             1,
             2,
             40,
+            0,
             None,
         )
         .unwrap();
@@ -3683,6 +3914,7 @@ mod tests {
             1,
             2,
             50,
+            0,
             None,
         )
         .unwrap();
@@ -3734,6 +3966,7 @@ mod tests {
             1,
             2,
             60,
+            0,
             None,
         )
         .unwrap();
@@ -3778,6 +4011,7 @@ mod tests {
                 verified_by,
                 input,
                 at,
+                0,
                 fingerprint,
             )
             .unwrap();

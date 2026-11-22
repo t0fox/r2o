@@ -180,6 +180,22 @@ async fn main() {
     }
 
     if config.check {
+        if config.check_live {
+            match r2o_telegram::stats::read_live_check(&config.stats_socket_path).await {
+                Ok(Some(report)) => {
+                    println!("{report}");
+                    if report["state"] != "healthy" {
+                        std::process::exit(2);
+                    }
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("ошибка диагностики работающего экземпляра Telegram: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         match r2o_telegram::diagnostics::run(&config).await {
             Ok(report) => {
                 println!(

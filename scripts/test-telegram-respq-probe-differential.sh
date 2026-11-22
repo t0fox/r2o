@@ -9,6 +9,7 @@ ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 CC=${CC:-gcc}
 CARGO=${CARGO:-cargo}
 TMPDIR=${TMPDIR:-"${ROOT%/r2o}/r2o-tooling/tmp"}
+TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT/target"}
 
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected D2O %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
@@ -41,7 +42,7 @@ fi
 : > "$TEMP/trace"
 for mode in valid wrong-nonce non-plain pq-too-long empty-fingerprints trailing bad-msg-id; do
     rm -f "$TEMP/port" "$TEMP/server.log"
-    "$ROOT/target/debug/examples/res_pq_server" "$TEMP/port" "$mode" 2 \
+    "$TARGET_DIR/debug/examples/res_pq_server" "$TEMP/port" "$mode" 2 \
         > "$TEMP/server.log" 2>&1 &
     server_pid=$!
     attempt=0
@@ -53,7 +54,7 @@ for mode in valid wrong-nonce non-plain pq-too-long empty-fingerprints trailing 
     port=$(cat "$TEMP/port")
 
     "$TEMP/d2o-respq" "$port" > "$TEMP/c.out"
-    "$ROOT/target/debug/examples/res_pq_probe_client" "$port" > "$TEMP/rust.out"
+    "$TARGET_DIR/debug/examples/res_pq_probe_client" "$port" > "$TEMP/rust.out"
 
     wait "$server_pid"
     grep -q '^ok=' "$TEMP/c.out"

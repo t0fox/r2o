@@ -17,14 +17,15 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 use tungstenite::Message;
 
-use crate::config::{CfTransportMode, default_dc_bootstrap_ips};
+use crate::config::default_dc_bootstrap_ips;
 use crate::crypto::ProtoTag;
 use crate::dc_map::{DcEndpoint, DcSnapshot, write_endpoint_manifest};
+use crate::routing::{RouteFeedback, confirm_route, reject_route};
 use crate::runtime::Runtime;
 use crate::splitter::MsgSplitter;
 use crate::transparent::direct_stream_ciphers;
 use crate::ws_client::{
-    CfDialOpts, TgWsStream, connect_cf_worker_ws_for_dc_with_outbound_opts,
+    CfDialOpts, TgWsStream, cf_pool_tls_name, connect_cf_worker_ws_for_dc_with_outbound_opts,
     connect_cf_ws_for_dc_with_outbound_opts,
 };
 
@@ -89,9 +90,16 @@ pub async fn fetch_config(runtime: &Runtime) -> Result<DcSnapshot, String> {
                 }
             }
         }
-        match fetch_from_cf_dc(runtime, dc, &cf_domains.domains).await {
-            Ok(snapshot) => return Ok(snapshot),
-            Err(error) => failures.push(format!("DC{dc} через WSS: {error}")),
+        for domain in cf_domains
+            .domains
+            .iter()
+            .filter(|domain| !runtime.cf_domain_pool().is_rate_limited(domain))
+            .take(MAX_BOOTSTRAP_ATTEMPTS)
+        {
+            match fetch_from_cf_dc(runtime, dc, address, domain).await {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(error) => failures.push(format!("DC{dc} через CF Proxy {domain}: {error}")),
+            }
         }
     }
 
@@ -115,13 +123,7 @@ where
     let deadline = tokio::time::Instant::now() + EXCHANGE_TIMEOUT;
     let mut transport = Obfuscated::new(Intermediate::new());
     let mut wire = Vec::with_capacity(16 * 1024);
-    let nonce: [u8; 16] = rand::random();
-    let request = grammers_tl_types::functions::ReqPqMulti { nonce }.to_bytes();
-    let mut mtp = Plain::new();
-    let mut packet = DequeBuffer::with_capacity(request.len() + 64, 0);
-    if mtp.push(&mut packet, &request).is_none() || mtp.finalize(&mut packet).is_none() {
-        return Err("req_pq_multi: не удалось сформировать plain-сообщение".to_string());
-    }
+    let (nonce, mut packet) = plain_probe_request()?;
     transport.pack(&mut packet);
     tokio::time::timeout_at(deadline, stream.write_all(packet.as_ref()))
         .await
@@ -137,9 +139,23 @@ where
     Ok(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
 }
 
+pub(crate) fn plain_probe_request() -> Result<([u8; 16], DequeBuffer<u8>), String> {
+    let nonce: [u8; 16] = rand::random();
+    let request = grammers_tl_types::functions::ReqPqMulti { nonce }.to_bytes();
+    let mut mtp = Plain::new();
+    let mut packet = DequeBuffer::with_capacity(request.len() + 64, 0);
+    if mtp.push(&mut packet, &request).is_none() || mtp.finalize(&mut packet).is_none() {
+        return Err("req_pq_multi: не удалось сформировать plain-сообщение".to_string());
+    }
+    Ok((nonce, packet))
+}
+
 /// C `parse_plain_response` + `parse_res_pq`: точная длина plain-сообщения,
 /// совпадение nonce, pq 1..8 байт, 1..64 fingerprint и отсутствие хвоста.
-fn validate_res_pq_probe_response(payload: &[u8], nonce: [u8; 16]) -> Result<(), String> {
+pub(crate) fn validate_res_pq_probe_response(
+    payload: &[u8],
+    nonce: [u8; 16],
+) -> Result<(), String> {
     if payload.len() < 20 {
         return Err("resPQ: короткий plain-ответ".to_string());
     }
@@ -185,21 +201,18 @@ async fn fetch_from_dc(runtime: &Runtime, address: &str) -> Result<DcSnapshot, S
         .set_nodelay(true)
         .map_err(|error| format!("TCP_NODELAY: {error}"))?;
 
-    fetch_over_stream(&mut stream).await
+    fetch_over_stream(&mut stream, |_| {}).await
 }
 
 async fn fetch_from_cf_dc(
     runtime: &Runtime,
     dc: u32,
-    cf_domains: &[String],
+    address: &str,
+    domain: &String,
 ) -> Result<DcSnapshot, String> {
-    if cf_domains.is_empty() {
-        return Err("домены Cloudflare для WSS не настроены".to_string());
-    }
-
-    let (ws, domain, _) = connect_cf_ws_for_dc_with_outbound_opts(
+    let (ws, host, _) = connect_cf_ws_for_dc_with_outbound_opts(
         dc,
-        cf_domains,
+        std::slice::from_ref(domain),
         false,
         CONNECT_TIMEOUT,
         runtime.outbound(),
@@ -212,14 +225,17 @@ async fn fetch_from_cf_dc(
     )
     .await;
     let ws = ws.ok_or_else(|| "Cloudflare WSS-соединение не установлено".to_string())?;
-    info!(
-        "Получение help.getConfig через проверенный WSS-маршрут DC{} ({})",
+    let host = host.ok_or_else(|| "неизвестен хост CF Proxy".to_string())?;
+    let feedback = RouteFeedback::cf_proxy(
         dc,
-        domain.as_deref().unwrap_or("домен неизвестен")
-    );
-
-    let mut stream = start_ws_byte_stream(ws);
-    fetch_over_stream(&mut stream).await
+        false,
+        address.to_owned(),
+        cf_pool_tls_name(&host).unwrap_or(domain).to_owned(),
+        Arc::clone(runtime.cf_domain_pool()),
+        runtime.cf_fail_cooldown(),
+    )
+    .with_edge(host, &ws);
+    fetch_discovered_ws_config(ws, true, &feedback).await
 }
 
 async fn fetch_from_worker(
@@ -238,7 +254,7 @@ async fn fetch_from_worker(
         CfDialOpts {
             cf_ips: runtime.cf_ips(),
             fail_cooldown: runtime.cf_fail_cooldown(),
-            transport: CfTransportMode::Tls,
+            transport: runtime.cf_transport(),
             ca_bundle: runtime.ca_bundle(),
         },
     )
@@ -248,17 +264,42 @@ async fn fetch_from_worker(
         "Получение help.getConfig через настроенный Worker {} для DC{}",
         worker_domain, dc
     );
-    let mut stream = start_ws_byte_stream(ws);
-    fetch_over_stream(&mut stream).await
+    let feedback = RouteFeedback::cf_worker(
+        dc,
+        false,
+        address,
+        worker_domain,
+        runtime.cf_fail_cooldown(),
+    )
+    .with_edge(worker_domain.to_owned(), &ws);
+    fetch_discovered_ws_config(ws, false, &feedback).await
 }
 
-pub(crate) fn start_ws_byte_stream(ws: TgWsStream) -> DuplexStream {
+async fn fetch_discovered_ws_config(
+    ws: TgWsStream,
+    framed: bool,
+    feedback: &RouteFeedback,
+) -> Result<DcSnapshot, String> {
+    let mut stream = start_ws_byte_stream(ws, framed);
+    let mut confirmed = false;
+    let result = fetch_over_stream(&mut stream, |latency| {
+        confirm_route(feedback, latency);
+        confirmed = true;
+    })
+    .await;
+    if !confirmed {
+        reject_route(feedback);
+    }
+    result
+}
+
+pub(crate) fn start_ws_byte_stream(ws: TgWsStream, framed: bool) -> DuplexStream {
     let (client, relay) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(bridge_ws_byte_stream(relay, ws));
+    tokio::spawn(bridge_ws_byte_stream(relay, ws, framed));
     client
 }
 
-async fn bridge_ws_byte_stream(stream: DuplexStream, ws: TgWsStream) {
+async fn bridge_ws_byte_stream(stream: DuplexStream, ws: TgWsStream, framed: bool) {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (sink, mut source) = ws.split();
     let sink = Arc::new(Mutex::new(sink));
@@ -287,6 +328,15 @@ async fn bridge_ws_byte_stream(stream: DuplexStream, ws: TgWsStream) {
                 .map_err(|error| format!("ошибка чтения bootstrap-запроса: {error}"))?;
             if length == 0 {
                 break;
+            }
+            if !framed {
+                upload_sink
+                    .lock()
+                    .await
+                    .send(Message::Binary(buffer[..length].to_vec()))
+                    .await
+                    .map_err(|error| format!("ошибка передачи в TCP-туннель Worker: {error}"))?;
+                continue;
             }
             decrypt.apply_keystream(&mut buffer[..length]);
             let packets = splitter.split_and_encrypt(&mut buffer[..length], &mut encrypt);
@@ -370,7 +420,10 @@ async fn bridge_ws_byte_stream(stream: DuplexStream, ws: TgWsStream) {
     }
 }
 
-async fn fetch_over_stream<S>(stream: &mut S) -> Result<DcSnapshot, String>
+async fn fetch_over_stream<S>(
+    stream: &mut S,
+    on_res_pq: impl FnOnce(Duration),
+) -> Result<DcSnapshot, String>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -379,13 +432,16 @@ where
 
     let (request, state) =
         authentication::step1().map_err(|error| format!("начало авторизации MTProto: {error}"))?;
+    let started = std::time::Instant::now();
     let response = exchange_plain(stream, &mut transport, &mut wire, &request)
         .await
         .map_err(|error| format!("этап req_pq_multi: {error}"))?;
+    let latency = started.elapsed();
     let response = parse_res_pq_response(&response)?;
 
     let (request, state) = authentication::step2(state, response)
         .map_err(|error| format!("обработка resPQ: {error}"))?;
+    on_res_pq(latency);
     let response = exchange_plain(stream, &mut transport, &mut wire, &request)
         .await
         .map_err(|error| format!("этап req_DH_params: {error}"))?;
