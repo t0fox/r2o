@@ -439,6 +439,26 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
             "panel-motion.js",
             "application/javascript; charset=utf-8",
         ),
+        (
+            "/assets/supporter-gallery.css",
+            "supporter-gallery.css",
+            "text/css; charset=utf-8",
+        ),
+        (
+            "/assets/supporter-gallery.js",
+            "supporter-gallery.js",
+            "application/javascript; charset=utf-8",
+        ),
+        (
+            "/assets/supporter-art.js",
+            "supporter-art.js",
+            "application/javascript; charset=utf-8",
+        ),
+        (
+            "/assets/supporters.js",
+            "supporters.js",
+            "application/javascript; charset=utf-8",
+        ),
         ("/assets/onest.woff2", "fonts/onest.woff2", "font/woff2"),
         ("/assets/jbmono.woff2", "fonts/jbmono.woff2", "font/woff2"),
         (
@@ -2351,6 +2371,10 @@ fn embedded_asset(name: &str) -> Option<&'static [u8]> {
         "telegram-flow-prototype.js" => include_bytes!("../assets/telegram-flow-prototype.js"),
         "gsap.js" => include_bytes!("../assets/gsap.js"),
         "panel-motion.js" => include_bytes!("../assets/panel-motion.js"),
+        "supporter-gallery.css" => include_bytes!("../assets/supporter-gallery.css"),
+        "supporter-gallery.js" => include_bytes!("../assets/supporter-gallery.js"),
+        "supporter-art.js" => include_bytes!("../assets/supporter-art.js"),
+        "supporters.js" => include_bytes!("../assets/supporters.js"),
         "fonts/onest.woff2" => include_bytes!("../assets/fonts/onest.woff2"),
         "fonts/jbmono.woff2" => include_bytes!("../assets/fonts/jbmono.woff2"),
         "fonts/nunito-cyrillic.woff2" => include_bytes!("../assets/fonts/nunito-cyrillic.woff2"),

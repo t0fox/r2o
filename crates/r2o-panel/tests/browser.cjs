@@ -821,6 +821,7 @@ esac
   });
   liveState.boxes[0].plans.push({ id: "test-plan", text: "r2o-plan 1 5\nproto tcp tls\nsplit sni_middle +0\norder reverse" });
   fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await evaluate("document.dispatchEvent(new Event('visibilitychange'))");
   await waitFor(() => evaluate("document.querySelector('#searches .search:first-child[data-outcome=saved] summary')?.dataset.mark === 'Сохранено · test-plan'"), "завершённый поиск поднялся наверх, хотя в снимке он последний");
   assert.equal(await evaluate(`(() => {
     const row = document.querySelector('.search[data-outcome=saved][data-call-state=saved]');
@@ -882,6 +883,7 @@ esac
   resolved.completed_at = new Date().toISOString();
   liveState.searches = [resolved];
   fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await evaluate("document.dispatchEvent(new Event('visibilitychange'))");
   await waitFor(() => evaluate("document.querySelectorAll('#searches .search[data-outcome=saved]').length === 1"), "финальная карточка показывается с уменьшенным движением");
   await waitFor(() => evaluate("document.querySelector('#searches .quiet') !== null"), "после ухода последней карточки появляется пустой список");
   assert.equal(await evaluate("document.querySelector('#searches .quiet').textContent"), "Результаты для сайтов сохраняются в каталоге, для DNS отображаются в карточке сервера.", "пустой список показывает, где появятся результаты, независимо от счётчика замеров");
@@ -1110,7 +1112,7 @@ esac
   writeUpdate({ busy: "", install_stage: 2, last_utc: failedAt, last_ok: false,
     last_message: "Активация прервана, рабочая версия восстановлена" });
   await call("Page.reload");
-  await waitFor(() => evaluate("document.querySelector('#updates-body').dataset.install === 'error'"), "ошибка установки сохранена после перезапуска");
+  await waitFor(() => evaluate("document.querySelector('#updates-body')?.dataset.install === 'error'"), "ошибка установки после перезапуска");
   assert.equal(await evaluate("document.querySelector('#update-install').disabled"), false);
   assert.match(await evaluate("document.querySelector('#update-reason').textContent"), /рабочая версия восстановлена/);
 
@@ -1123,7 +1125,7 @@ esac
   writeUpdate({ latest, current: "r2o-test-2", previous: "r2o-test-1",
     history: [{ utc: failedAt, message: "Проверка пройдена", release_id: "r2o-test-2" }] });
   await call("Page.reload");
-  await waitFor(() => evaluate("document.querySelector('#update-target').options.length === 2"), "каталог подписанных выпусков");
+  await waitFor(() => evaluate("document.querySelector('#update-target')?.options.length === 2"), "каталог подписанных выпусков");
   await evaluate("document.querySelector('#update-target-trigger').scrollIntoView({block:'center', behavior:'instant'})");
   await evaluate("document.querySelector('#update-target-trigger').focus()");
   await press("ArrowDown", 40);
@@ -1163,6 +1165,138 @@ esac
   await evaluate("document.querySelector('#update-selected').click(); document.querySelector('[data-ask=yes]').click()");
   await waitFor(() => fs.readFileSync(serviceLog, "utf8").includes("update-install --release r2o-test-1 --source gh-proxy"),
     "выбранный downgrade и зеркало переданы обновлятору");
+
+  await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+  assert.equal(await evaluate("performance.getEntriesByType('resource').some(item => item.name.includes('/assets/supporter'))"), false,
+    "ресурсы страницы подгружаются только с логотипа");
+  const brandPoint = await evaluate(`(() => {
+    const mark = document.querySelector(".brand-mark");
+    const rect = mark.getBoundingClientRect();
+    window.panelBrandFlow = mark.querySelector(".brand-flow").getAnimations()
+      .find(animation => animation.animationName === "loop-flow");
+    return { x: rect.left + rect.width / 2 - 8, y: rect.top + rect.height / 2 };
+  })()`);
+  const brandTime = await evaluate("panelBrandFlow.currentTime");
+  await call("Input.dispatchMouseEvent", { type: "mouseMoved", ...brandPoint });
+  await waitFor(() => evaluate("document.querySelector('.brand-mark[data-mark-repel] rect[data-flow-lit]') !== null"),
+    "световой импульс остаётся видимым во время рассыпания логотипа панели");
+  const brandPulse = await evaluate(`Array.from(document.querySelectorAll(".brand-mark .brand-pixels rect"),
+    pixel => Number(pixel.hasAttribute("data-flow-lit"))).join("")`);
+  await waitFor(() => evaluate(`Array.from(document.querySelectorAll(".brand-mark .brand-pixels rect"),
+    pixel => Number(pixel.hasAttribute("data-flow-lit"))).join("") !== "${brandPulse}"`),
+    "импульс продолжает двигаться по частицам под неподвижным курсором");
+  await call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 500, y: 93 });
+  await waitFor(() => evaluate("!document.querySelector('.brand-mark[data-mark-repel]')"), "логотип панели собирается обратно");
+  assert.equal(await evaluate(`document.querySelector(".brand-mark .brand-flow").getAnimations().includes(panelBrandFlow)
+    && panelBrandFlow.currentTime > ${brandTime}`), true, "фаза CSS-анимации сохраняется после сборки логотипа");
+
+  await evaluate("document.querySelector('.brand').focus()");
+  const beforeGallery = await evaluate("[location.hash, scrollY, document.querySelector('#update-target').value]");
+  await call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", text: "\r", windowsVirtualKeyCode: 13 });
+  await call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await waitFor(() => evaluate("document.querySelector('#supporter-gallery')?.open"), "открытие страницы с логотипа");
+  assert.equal(await evaluate("document.activeElement.id"), "supporter-title");
+  assert.equal(await evaluate("document.querySelectorAll('.index a').length"), 6);
+  const notes = await evaluate("[...document.querySelectorAll('.supporter-note')].map(node => node.textContent.trim())");
+  assert.equal(notes.every(Boolean) && new Set(notes).size === notes.length, true, "у каждого участника свой текст");
+  const canvases = "Array.from(document.querySelectorAll('.supporter-exhibit canvas'))";
+  const painted = `${canvases}.every(canvas => canvas.width > 300 && canvas.getContext('2d').getImageData(canvas.width / 2, canvas.height / 2, 1, 1).data[3] > 0)`;
+  await waitFor(() => evaluate(painted), "отрисовка отдельных сцен");
+  await evaluate(`window.artBefore = ${canvases}.map(canvas => canvas.toDataURL())`);
+  await waitFor(() => evaluate(`${canvases}.every((canvas, i) => canvas.toDataURL() !== artBefore[i])`), "анимация обеих сцен");
+  const galleryCaptureDir = process.env.R2O_LOCAL_GALLERY_CAPTURE_DIR;
+  async function galleryCapture(name) {
+    if (!galleryCaptureDir) return;
+    await delay(580);
+    const screenshot = await call("Page.captureScreenshot", { format: "png" });
+    fs.writeFileSync(path.join(galleryCaptureDir, `${name}.png`), Buffer.from(screenshot.data, "base64"));
+  }
+  await galleryCapture("gallery-desktop");
+  await evaluate("document.querySelector('.supporter-exhibit').focus()");
+  await call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", text: "\r", windowsVirtualKeyCode: 13 });
+  await call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await waitFor(() => evaluate("document.querySelector('#supporter-detail').open"), "увеличенная сцена первого участника");
+  assert.equal(await evaluate("document.activeElement.id"), "supporter-detail-name");
+  assert.equal(await evaluate("document.querySelector('#supporter-detail-name').textContent === document.querySelector('.supporter-name').textContent"), true);
+  await evaluate(`window.artPaused = ${canvases}[0].toDataURL()`);
+  await galleryCapture("gallery-orbital");
+  await delay(180);
+  assert.equal(await evaluate(`${canvases}[0].toDataURL() === artPaused`), true, "галерея приостанавливается за открытой сценой");
+  await press("Escape", 27);
+  await waitFor(() => evaluate("!document.querySelector('#supporter-detail').open"), "Esc закрывает сцену");
+  assert.equal(await evaluate("document.activeElement === document.querySelector('.supporter-exhibit')"), true);
+  await evaluate("document.querySelectorAll('.supporter-exhibit')[1].click()");
+  await waitFor(() => evaluate("document.querySelector('#supporter-detail').open"), "увеличенная сцена второго участника");
+  await galleryCapture("gallery-prism");
+  await evaluate("history.back()");
+  await waitFor(() => evaluate("!document.querySelector('#supporter-detail').open"), "браузер возвращает из сцены");
+  await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))");
+  assert.equal(await evaluate("document.querySelector('#command').open"), false, "командная палитра не перекрывает галерею");
+  await evaluate("document.querySelector('.supporter-footer').scrollIntoView({ block: 'end', behavior: 'instant' })");
+  const finaleCanvas = "document.querySelector('.supporter-finale canvas')";
+  await waitFor(() => evaluate(`${finaleCanvas}.width > 300`), "финальная сборка логотипа видна в галерее");
+
+  await waitFor(() => evaluate(`import('/assets/supporter-art.js').then(({ artTime }) => artTime(${finaleCanvas}) >= 3.6)`),
+    "логотип собирается из частиц");
+  const markPoint = await evaluate(`(() => {
+    window.finaleMark = ${finaleCanvas};
+    const rect = finaleMark.getBoundingClientRect();
+    return { x: rect.left + rect.width * .4, y: rect.top + rect.height * .5 };
+  })()`);
+  const scatteredPixels = `(() => {
+    const { width, height } = finaleMark;
+    const data = finaleMark.getContext('2d').getImageData(0, 0, width, height).data;
+    const limit = 59 * Math.min(width / 570, height / 178);
+    let count = 0;
+    for (let y = 0; y < height; y += 2) {
+      if (Math.abs(y - height / 2) < limit) continue;
+      for (let x = 0; x < width; x += 2) {
+        if (data[(y * width + x) * 4 + 3] > 100) count++;
+      }
+    }
+    return count;
+  })()`;
+  const restPixels = await evaluate(scatteredPixels);
+  await call("Input.dispatchMouseEvent", { type: "mouseMoved", ...markPoint });
+  await waitFor(() => evaluate(`${scatteredPixels} > ${restPixels + 20}`), "частицы логотипа расходятся от курсора");
+  await delay(450);
+  await evaluate("window.finaleFrame = finaleMark.toDataURL()");
+  await waitFor(() => evaluate("finaleMark.toDataURL() !== finaleFrame"), "световой импульс виден в рассыпанном знаке");
+  await call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 24, y: 24 });
+  await waitFor(() => evaluate(`${scatteredPixels} <= ${restPixels + 3}`), "те же частицы возвращаются на контур");
+  assert.equal(await evaluate(`${finaleCanvas} === finaleMark && !finaleMark.hidden`), true,
+    "собранный логотип остаётся частицами");
+  await galleryCapture("gallery-finale");
+  await evaluate("history.back()");
+  await waitFor(() => evaluate("!document.querySelector('#supporter-gallery')?.open"), "браузер возвращает в прежний раздел");
+  assert.deepEqual(await evaluate("[location.hash, scrollY, document.querySelector('#update-target').value]"), beforeGallery);
+  assert.equal(await evaluate("document.activeElement.matches('.brand')"), true);
+  await waitFor(() => evaluate("!document.querySelector('#supporter-gallery')"), "закрытая галерея освобождает сцены");
+
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+  await call("Emulation.setDeviceMetricsOverride", { width: 375, height: 812, deviceScaleFactor: 1, mobile: true });
+  await evaluate("document.querySelector('.mast-brand').click()");
+  await waitFor(() => evaluate("document.querySelector('#supporter-gallery')?.open"), "мобильный логотип открывает галерею");
+  await galleryCapture("gallery-mobile");
+  const layoutFits = `(() => {
+    const gallery = document.querySelector('#supporter-gallery');
+    const back = gallery.querySelector('.supporter-back').getBoundingClientRect();
+    return gallery.scrollWidth === gallery.clientWidth && back.height >= 44;
+  })()`;
+  assert.equal(await evaluate(layoutFits), true, "галерея и кнопка возврата помещаются на 375 пикселях");
+  const mobileCanvas = `${canvases}[0]`;
+  await waitFor(() => evaluate(`${mobileCanvas}.width > 300`), "первый объект виден в статическом режиме");
+  await delay(80);
+  await evaluate(`window.stillArt = ${mobileCanvas}.toDataURL()`);
+  await delay(180);
+  assert.equal(await evaluate(`${mobileCanvas}.toDataURL() === stillArt`), true, "режим уменьшенного движения оставляет статическую сцену");
+  await call("Emulation.setDeviceMetricsOverride", { width: 812, height: 375, deviceScaleFactor: 1, mobile: true });
+  assert.equal(await evaluate(layoutFits), true, "галерея помещается в альбомной ориентации");
+  await call("Emulation.setDeviceMetricsOverride", { width: 375, height: 812, deviceScaleFactor: 1, mobile: true });
+  await evaluate("document.querySelector('#supporter-gallery .supporter-back').click()");
+  await waitFor(() => evaluate("!document.querySelector('#supporter-gallery')"), "мобильная кнопка возвращает в панель");
+  assert.equal(await evaluate("document.activeElement.matches('.mast-brand')"), true, "фокус возвращается на мобильный логотип");
   assert.deepEqual(runtimeErrors, [], `ошибки JavaScript в браузере: ${runtimeErrors.join("; ")}`);
   console.log("Проверка Chrome-панели R2O: ПРОЙДЕНА");
 }

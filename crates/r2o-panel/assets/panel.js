@@ -819,6 +819,7 @@
       } else { self.poll(); self.pollUpdates(); }
     });
     doc.addEventListener("keydown", function (e) {
+      if (doc.getElementById("supporter-gallery")?.open) return;
       if (e.key === "Escape" && self.armed) { self.armed = null; self.renderActions(); }
       if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
@@ -3808,6 +3809,21 @@
     var boot = function () {
       var doc = global.document;
       doc.querySelectorAll(".panel-select").forEach(function (select) { styleSelect(select, doc); });
+      doc.querySelectorAll("button.brand, button.mast-brand").forEach(function (button) {
+        button.addEventListener("click", async function () {
+          if (button.hasAttribute("aria-busy")) return;
+          button.setAttribute("aria-busy", "true");
+          try {
+            var gallery = await import("/assets/supporter-gallery.js");
+            await gallery.openGallery(button);
+          } catch (error) {
+            console.error(error);
+            global.alert("Не удалось открыть страницу R2O. Попробуйте ещё раз.");
+          } finally {
+            button.removeAttribute("aria-busy");
+          }
+        });
+      });
       new App(doc, global).start();
     };
     if (global.document.readyState === "loading") global.document.addEventListener("DOMContentLoaded", boot);

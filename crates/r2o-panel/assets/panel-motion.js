@@ -20,7 +20,7 @@
   var measure = doc.createElement("canvas").getContext("2d");
   var hero = doc.getElementById("status-panel");
   var canvas = hero.querySelector(".pixel-trail"), painter, trail = [], lastPixel;
-  var markMotion;
+  var markSelector = ".brand-mark, .mast-mark", markMotion;
   var trailLimit = 40, trailLife = 510;
   var raf = 0;
   var pointer, surface, shadowDirty = true;
@@ -169,7 +169,7 @@
   }
 
   function repelMark(sample) {
-    var mark = sample.target.closest(".brand-mark, .mast-mark");
+    var mark = sample.target.closest(markSelector);
     if (markMotion) markMotion.point = null;
     if (!mark) return;
     var rect = mark.getBoundingClientRect();
@@ -195,10 +195,13 @@
         node.setAttribute("height", size);
         node.style.setProperty("--pixel-tone", 100 * (px + py - 15) / 50 + "%");
         group.append(node);
-        pixels.push({ node: node, x: px, y: py, dx: 0, dy: 0 });
+        pixels.push({ node: node, x: px, y: py, dx: 0, dy: 0, phase: offset / length, lit: false });
       }
       mark.setAttribute("data-mark-repel", "");
-      markMotion = { mark: mark, group: group, pixels: pixels };
+      var flow = mark.querySelector(".brand-flow").getAnimations().find(function (animation) {
+        return animation.animationName === "loop-flow";
+      });
+      markMotion = { mark: mark, group: group, pixels: pixels, flow: flow };
     }
     markMotion.point = { x: x, y: y };
   }
@@ -206,6 +209,8 @@
   function paintMark(now) {
     if (!markMotion) return false;
     var point = markMotion.point;
+    // Фаза штриха общая у цельного знака и разлетевшихся пикселей.
+    var progress = markMotion.flow?.effect.getComputedTiming().progress;
     var elapsed = markMotion.at ? Math.min(32, now - markMotion.at) : 16;
     var ease = 1 - Math.exp(-elapsed / (point ? 44 : 68));
     var moving = false;
@@ -219,14 +224,23 @@
       }
       var tx = x / distance * force, ty = y / distance * force;
       var active = Math.hypot(tx - pixel.dx, ty - pixel.dy) > .08;
-      pixel.dx = active ? pixel.dx + (tx - pixel.dx) * ease : tx;
-      pixel.dy = active ? pixel.dy + (ty - pixel.dy) * ease : ty;
-      pixel.node.setAttribute("transform", "translate(" + pixel.dx.toFixed(2) + " " + pixel.dy.toFixed(2) + ")");
+      var dx = active ? pixel.dx + (tx - pixel.dx) * ease : tx;
+      var dy = active ? pixel.dy + (ty - pixel.dy) * ease : ty;
+      if (dx !== pixel.dx || dy !== pixel.dy) {
+        pixel.dx = dx;
+        pixel.dy = dy;
+        pixel.node.setAttribute("transform", "translate(" + dx.toFixed(2) + " " + dy.toFixed(2) + ")");
+      }
+      var lit = progress != null && (pixel.phase - progress + 1) % 1 < .07;
+      if (lit !== pixel.lit) {
+        pixel.node.toggleAttribute("data-flow-lit", lit);
+        pixel.lit = lit;
+      }
       moving = moving || active;
     });
     markMotion.at = moving ? now : 0;
     if (!moving && !point) clearMark();
-    return moving;
+    return moving || Boolean(point && markMotion.flow?.playState === "running");
   }
 
   function paintPointer(now) {
@@ -234,6 +248,7 @@
     var sample = pointer;
     pointer = null;
     repelMark(sample);
+    if (!fine.matches) return;
     var next = sample.target.closest(surfaceSelector);
     if (next !== surface || !shown(next)) dropSpotlight();
     if (!next || !shown(next)) return;
@@ -410,7 +425,8 @@
   reduced.addEventListener("change", reset);
   fine.addEventListener("change", reset);
   doc.addEventListener("pointermove", function (event) {
-    if (!fine.matches || event.pointerType !== "mouse" || !motionAllowed()) return;
+    if (event.pointerType !== "mouse" || !motionAllowed()) return;
+    if (!fine.matches && !markMotion && !event.target.closest(markSelector)) return;
     pointer = { x: event.clientX, y: event.clientY, target: event.target };
     schedule();
   }, { passive: true });

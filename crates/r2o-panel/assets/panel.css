@@ -241,6 +241,16 @@ button { color: inherit; }
   scrollbar-width: none;
 }
 .rail::-webkit-scrollbar { display: none; }
+button.brand, button.mast-brand {
+  border: 0; background: transparent; cursor: pointer;
+}
+button.mast-brand { padding: 0; min-width: 44px; min-height: 44px; }
+@media (prefers-reduced-motion: no-preference) {
+  button.brand .brand-mark, button.mast-brand .mast-mark { transition: filter .25s var(--ease); }
+  button.brand:hover .brand-mark, button.mast-brand:hover .mast-mark {
+    filter: drop-shadow(0 0 6px var(--acc-line));
+  }
+}
 .brand {
   display: flex; flex-direction: column; align-items: center; gap: 0;
   align-self: center; padding: 0 12px 5px;
@@ -260,6 +270,7 @@ button { color: inherit; }
 }
 .brand-pixels { pointer-events: none; }
 .brand-pixels rect { fill: color-mix(in srgb, var(--acc), var(--amber) var(--pixel-tone)); }
+.brand-pixels rect[data-flow-lit] { fill: var(--focus); filter: drop-shadow(0 0 1px var(--acc)); }
 [data-mark-repel] > use { visibility: hidden; }
 @media (prefers-reduced-motion: no-preference) {
   .brand-flow { opacity: .88; animation: loop-flow 7.5s linear infinite; }
