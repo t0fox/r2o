@@ -796,7 +796,10 @@ esac
     fs::write(temp.0.join("hold"), []).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-manager"))
         .args(args)
-        .env("R2O_FIREWALL", root.join("releases/r2o-pruned/router/r2o-firewall.sh"))
+        .env(
+            "R2O_FIREWALL",
+            root.join("releases/r2o-pruned/router/r2o-firewall.sh"),
+        )
         .env("R2O_PPE_ADAPTER", temp.0.join("custom-ppe"))
         .env("R2O_FIXTURE_PPE", temp.0.join("custom-ppe"))
         .spawn()
