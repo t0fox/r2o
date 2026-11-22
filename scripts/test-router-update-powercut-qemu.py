@@ -107,8 +107,8 @@ def main():
         shutil.copyfile(args.manager, bundled)
         bundled.chmod(0o755)
         commands = work / "debugfs"
-        commands.write_text("mkdir /audit\\n" + "".join(
-            f"write {work / name} /audit/{name}\\n" for name in [*files, "r2o-manager"]
+        commands.write_text("mkdir /audit\n" + "".join(
+            f"write {work / name} /audit/{name}\n" for name in [*files, "r2o-manager"]
         ), encoding="utf8")
         subprocess.run(["debugfs", "-w", "-f", commands, disk], check=True, capture_output=True)
         vm = [
