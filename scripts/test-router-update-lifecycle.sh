@@ -32,4 +32,18 @@ env EVENTS="$TEMP/slot-events" R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/config" \
     sh "$active/S99r2o" status >/dev/null
 grep -Fxq "$active/r2o-firewall.sh $active/r2o-ppe-deoffload.sh" "$TEMP/slot-events"
 
+sed -n '/^service_pid_alive() {/,/^}/p' "$ROOT/router/S99r2o" > "$TEMP/service-pid.sh"
+# Даже успешный kill -0 не означает, что процесс держит ресурсы.
+PROC=$TEMP/proc
+mkdir -p "$PROC/$$"
+# shellcheck disable=SC1091
+. "$TEMP/service-pid.sh"
+printf '%s (тест) S 1\n' "$$" > "$PROC/$$/stat"
+service_pid_alive "$$"
+printf '%s (тест с ) в имени) Z 1\n' "$$" > "$PROC/$$/stat"
+if service_pid_alive "$$"; then
+    echo 'завершённый процесс ошибочно считается живым' >&2
+    exit 1
+fi
+
 echo "Проверены активация, откат и запуск с путями удалённого выпуска"
