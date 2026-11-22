@@ -17,6 +17,30 @@ async function visit(page, section) {
   assert.equal(await page.locator('[aria-current="page"]').getAttribute("data-nav"), section);
 }
 
+async function assertDecodeBaseline(label) {
+  const delta = await label.evaluate(element => {
+    const original = [...element.childNodes].find(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim());
+    const start = original.textContent.search(/\S/);
+    const range = document.createRange();
+    range.setStart(original, start);
+    range.setEnd(original, start + 1);
+    const baseline = range.getBoundingClientRect().top;
+    const ink = element.querySelector(".decode-ink");
+    const probe = document.createElement("span");
+    probe.style.cssText = ink.firstElementChild.style.cssText;
+    const sample = document.createElement("span");
+    sample.style.display = "inline-block";
+    sample.textContent = range.toString();
+    probe.append(sample);
+    ink.append(probe);
+    range.selectNodeContents(sample);
+    const shift = range.getBoundingClientRect().top - baseline;
+    probe.remove();
+    return shift;
+  });
+  assert.ok(Math.abs(delta) < .5, "Смещение текста при расшифровке: " + delta + " px");
+}
+
 async function record(browser) {
   const video = path.join(capture, "r2o-motion.webm");
   const encoder = spawn(process.env.R2O_CAPTURE_FFMPEG || "ffmpeg", [
@@ -105,6 +129,7 @@ async function main() {
         });
         assert.match(glyph.font, /Unbounded/);
         assert.equal(glyph.color, "rgb(255, 255, 255)");
+        await assertDecodeBaseline(wordmark);
         assert.equal(await wordmark.textContent(), "r2o");
         const spread = () => mark.locator(".brand-pixels rect").evaluateAll(pixels => Math.max(0, ...pixels.map(pixel => {
           const shift = pixel.transform.baseVal.getItem(0).matrix;
@@ -145,6 +170,7 @@ async function main() {
         await visit(page, "now");
         await page.locator("#now-title[data-decoding]").waitFor();
         assert.ok(await page.locator("#now-title").textContent());
+        await assertDecodeBaseline(page.locator("#now-title"));
         await page.locator("#now-title[data-decoding]").waitFor({ state: "detached" });
         const panel = page.locator("#status-panel");
         const box = await panel.boundingBox();

@@ -89,7 +89,8 @@
         var glyph = doc.createElement("span");
         glyph.style.left = (rect.left - box.left - element.clientLeft) + "px";
         glyph.style.top = (rect.top - box.top - element.clientTop) + "px";
-        glyph.style.font = [style.fontStyle, style.fontWeight, style.fontSize + "/1", style.fontFamily].join(" ");
+        glyph.style.font = font;
+        glyph.style.lineHeight = rect.height + "px";
         glyph.style.setProperty("--glyph-scale", Math.min(1, rect.width / widths.get(font)));
         glyph.dataset.glyph = symbols[letters.length % symbols.length];
         ink.append(glyph);
