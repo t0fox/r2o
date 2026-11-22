@@ -236,12 +236,24 @@ table inet r2o {
         flags timeout
         size 64
     }
+    set dns_h3_route4 {
+        type ipv4_addr . inet_service . uid
+        flags timeout
+        size 64
+    }
+    set dns_h3_route6 {
+        type ipv6_addr . inet_service . uid
+        flags timeout
+        size 64
+    }
     chain dns_output {
         type filter hook output priority dstnat + 10; policy accept;
         meta mark $MARK return
         ${MEASURE_MARK:+meta mark $MEASURE_MARK return}
         oifname "lo" return
         ct status dnat return
+        ip daddr . udp dport . meta skuid @dns_h3_route4 ct direction original ct original packets $nft_window counter queue num $QUEUE4 bypass
+        ip6 daddr . udp dport . meta skuid @dns_h3_route6 ct direction original ct original packets $nft_window counter queue num $QUEUE6 bypass
         meta l4proto { tcp, udp } ip daddr . meta l4proto . th dport @dns_route4 ct direction original ct original packets $nft_window counter queue num $QUEUE4 bypass
         meta l4proto { tcp, udp } ip6 daddr . meta l4proto . th dport @dns_route6 ct direction original ct original packets $nft_window counter queue num $QUEUE6 bypass
     }
@@ -258,6 +270,8 @@ table inet r2o {
         ${MEASURE_MARK:+meta mark $MEASURE_MARK return}
         ct status != dnat meta skuid 0-4294967294 meta l4proto { tcp, udp } ip daddr . meta l4proto . th dport @dns_route4 return
         ct status != dnat meta skuid 0-4294967294 meta l4proto { tcp, udp } ip6 daddr . meta l4proto . th dport @dns_route6 return
+        ct status != dnat ip daddr . udp dport . meta skuid @dns_h3_route4 return
+        ct status != dnat ip6 daddr . udp dport . meta skuid @dns_h3_route6 return
         meta l4proto { tcp, udp } th dport { $nft_dns } return
         ct status dnat return
         $nft_gate_out
@@ -380,14 +394,19 @@ nft_down() {
 
 # Срок записи ограничен на случай остановки контроллера или потери связи с ним.
 dns_route() {
-    [ "$#" -eq 5 ] || return 2
+    [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || return 2
     dns_action=$1
     dns_address=$2
     dns_protocol=$3
     dns_port=$4
     dns_seconds=$5
+    dns_uid=${6:-}
     case "$dns_action" in add|del) ;; *) return 2 ;; esac
     case "$dns_protocol" in tcp|udp) ;; *) return 2 ;; esac
+    if [ "$#" -eq 6 ]; then
+        number "$dns_uid" 4294967294 && [ "$dns_uid" -gt 0 ] && [ "$dns_protocol" = udp ] || return 2
+        [ "$BACKEND" = nft ] || return 1
+    fi
     number "$dns_port" 65535 && [ "$dns_port" -gt 0 ] && [ "$dns_port" -ne 53 ] || return 2
     number "$dns_seconds" 300 || return 2
     if [ "$dns_action" = add ] && [ "$dns_seconds" -eq 0 ]; then return 2; fi
@@ -414,10 +433,17 @@ dns_route() {
 
 nft_dns_route() {
     nft list table inet r2o 2>/dev/null | grep -F -q 'comment "r2o-managed"' || return 1
+    if [ -n "$dns_uid" ]; then
+        dns_set=dns_h3_route$dns_family
+        dns_element="$dns_address . $dns_port . $dns_uid"
+    else
+        dns_set=dns_route$dns_family
+        dns_element="$dns_address . $dns_protocol . $dns_port"
+    fi
     {
-        printf 'destroy element inet r2o dns_route%s { %s . %s . %s }\n' "$dns_family" "$dns_address" "$dns_protocol" "$dns_port"
+        printf 'destroy element inet r2o %s { %s }\n' "$dns_set" "$dns_element"
         if [ "$dns_action" = add ]; then
-            printf 'add element inet r2o dns_route%s { %s . %s . %s timeout %ss }\n' "$dns_family" "$dns_address" "$dns_protocol" "$dns_port" "$dns_seconds"
+            printf 'add element inet r2o %s { %s timeout %ss }\n' "$dns_set" "$dns_element" "$dns_seconds"
         fi
     } | nft -f -
 }
@@ -1043,6 +1069,8 @@ firewall_status_nft() {
         printf '%s\n' "$out_chain" | grep -F -q "@dns_route$dns_family" || return 1
         printf '%s\n' "$dns_output_chain" | grep -F -q "@dns_route$dns_family" || return 1
         printf '%s\n' "$input_chain" | grep -F -q "@dns_route$dns_family" || return 1
+        printf '%s\n' "$out_chain" | grep -F -q "@dns_h3_route$dns_family" || return 1
+        printf '%s\n' "$dns_output_chain" | grep -F -q "@dns_h3_route$dns_family" || return 1
     done
     printf '%s\n' "$nat_post_chain" | grep -F -q 'type nat hook postrouting priority srcnat - 1;' || return 1
     printf '%s\n' "$nat_post_chain" | grep -F -q masquerade || return 1
@@ -1108,5 +1136,5 @@ case "${1:-}" in
         shift
         dns_route "$@"
         ;;
-    *) echo "использование: $0 {backend|ipv6-enabled|up|down|flowoffload-ensure|flowoffload-restore|ppe ensure|ppe remove|rst-down|status|dns-ensure|dns-route add|del адрес tcp|udp порт срок}" >&2; exit 2 ;;
+    *) echo "использование: $0 {backend|ipv6-enabled|up|down|flowoffload-ensure|flowoffload-restore|ppe ensure|ppe remove|rst-down|status|dns-ensure|dns-route add|del адрес tcp|udp порт срок [UID]}" >&2; exit 2 ;;
 esac

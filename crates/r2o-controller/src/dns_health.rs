@@ -1512,15 +1512,22 @@ fn probe_quic_dns(
     }
 }
 
-/// C `d2k_verify_dns_on` для DoQ на уже занятом (и, при испытании, плановом)
-/// UDP-сокете: QUIC с ALPN `doq`, stream 0, zero ID, length-prefixed DNS.
-pub async fn probe_doq_on(
+/// Проверяет DNS-обмен DoQ или DoH3 на заданном UDP-сокете, в том числе под планом.
+pub async fn probe_quic_dns_on(
     socket: std::net::UdpSocket,
     address: SocketAddr,
     host: &str,
+    service: &DnsService,
     timeout: Duration,
 ) -> DnsHealthResult {
-    probe_doq_on_with_roots(socket, address, host, timeout, dns_roots()).await
+    match service.protocol.as_str() {
+        "doq" => probe_doq_on_with_roots(socket, address, host, timeout, dns_roots()).await,
+        "doh3" => probe_doh3_on(socket, address, host, service, timeout, dns_roots()).await,
+        _ => DnsHealthResult::default().fail(
+            DnsHealthFailure::Configuration,
+            "DNS: протокол не использует QUIC",
+        ),
+    }
 }
 
 fn trusted_quic_dns_endpoint(

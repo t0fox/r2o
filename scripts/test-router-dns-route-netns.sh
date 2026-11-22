@@ -155,7 +155,7 @@ packets() {
     if [ "$FW_BACKEND" = nft ]; then
         case "$1" in out) chain=dns_output ;; in) chain=input ;; esac
         nft list chain inet r2o "$chain" |
-            awk -v set="@dns_route$2" '$0 ~ set {for(i=1;i<NF-1;i++) if($i=="counter" && $(i+1)=="packets"){print $(i+2); exit}}'
+            awk -v set="@${3:-dns_route}$2" '$0 ~ set {for(i=1;i<NF-1;i++) if($i=="counter" && $(i+1)=="packets"){print $(i+2); exit}}'
     else
         case "$2" in 4) fw=iptables ;; 6) fw=ip6tables ;; esac
         case "$1" in out) chain=R2O_DNS_OUT ;; in) chain=R2O_DNS_IN ;; esac
@@ -181,6 +181,38 @@ sh "$FIREWALL" dns-route add 192.0.2.2 tcp 853 1
 has_route 4 192.0.2.2 tcp
 sleep 1.2
 if has_route 4 192.0.2.2 tcp; then exit 1; fi
+if [ "$FW_BACKEND" = nft ]; then
+    sh "$FIREWALL" dns-route add 192.0.2.2 udp 854 20 411
+    sh "$FIREWALL" dns-route add 2001:db8::2 udp 854 20 411
+    if sh "$FIREWALL" dns-route add 192.0.2.2 udp 854 20 0; then exit 1; fi
+    if sh "$FIREWALL" dns-route add 192.0.2.2 tcp 854 20 411; then exit 1; fi
+    python3 - <<'PY'
+import ctypes
+import socket
+
+libc = ctypes.CDLL(None)
+for family, address in [(socket.AF_INET, "192.0.2.2"), (socket.AF_INET6, "2001:db8::2")]:
+    for owner, mark in [(0, 0), (411, 47), (412, 0), (411, 0)]:
+        original = libc.setfsuid(owner)
+        try:
+            assert libc.setfsuid(-1) == owner
+            client = socket.socket(family, socket.SOCK_DGRAM)
+        finally:
+            libc.setfsuid(original)
+        with client:
+            if mark:
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark)
+            client.sendto(b"owner-check", (address, 854))
+PY
+    for family in 4 6; do
+        [ "$(packets out "$family" dns_h3_route)" = 1 ]
+    done
+    sh "$FIREWALL" dns-route del 192.0.2.2 udp 854 0 411
+    if nft get element inet r2o dns_h3_route4 '{ 192.0.2.2 . 854 . 411 }' >/dev/null 2>&1; then exit 1; fi
+    nft get element inet r2o dns_h3_route6 '{ 2001:db8::2 . 854 . 411 }' >/dev/null
+else
+    if sh "$FIREWALL" dns-route add 192.0.2.2 udp 854 20 411; then exit 1; fi
+fi
 sh "$FIREWALL" down
 if has_route 6 2001:db8::2 udp; then exit 1; fi
 echo "ПРОЙДЕНО ($FW_BACKEND): адресные DNS-маршруты IPv4/IPv6, исключение прямой пробы и снятие записи"

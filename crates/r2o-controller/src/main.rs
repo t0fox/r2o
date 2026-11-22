@@ -3445,11 +3445,11 @@ impl R2oDnsServices {
     fn sync_quic_dns_tasks(&mut self, now: std::time::Instant) {
         for index in 0..self.services.len() {
             let service = self.services[index].clone();
-            if !service.protocol.eq_ignore_ascii_case("doq") {
+            if !matches!(service.protocol.as_str(), "doq" | "doh3") {
                 continue;
             }
             let live = self.live.get(index).cloned().unwrap_or_default();
-            if !live.router_seen {
+            if !live.router_seen && live.recovery_phase.is_none() {
                 if let Some(slot) = self.task_of_service(&service)
                     && self.tasks[slot].state != r2o_controller::live::DnsTaskState::DnsHealth
                 {
@@ -3504,7 +3504,7 @@ impl R2oDnsServices {
             task.port = service.port;
             task.transport = 17;
             task.family = if task.ip.contains(':') { 6 } else { 4 };
-            task.dns_protocol = "doq".into();
+            task.dns_protocol = service.protocol.clone();
             task.dns_host = service.host.clone();
             task.doh_path = service.path.clone();
             task.dns_bootstrap = service.bootstrap_dns.clone();
@@ -7722,7 +7722,7 @@ struct R2oQuicDiscoveryTask {
     deny_recheck: bool,
     stall_cut: bool,
     cooldown_key: Option<R2oQuicCooldownKey>,
-    dns: Option<dns_recovery::DoqDiscovery>,
+    dns: Option<dns_recovery::QuicDnsDiscovery>,
 }
 
 /// Чем именно подтверждён QUIC-кандидат. C `t->ver.replay_proof` и
@@ -7744,7 +7744,7 @@ struct R2oQuicDiscoveryOutcome {
     probe_path: String,
     deny_recheck: bool,
     stall_cut: bool,
-    dns: Option<dns_recovery::DoqDiscovery>,
+    dns: Option<dns_recovery::QuicDnsDiscovery>,
     result: Result<Option<(String, String, R2oQuicConfirmProof)>, String>,
 }
 
@@ -13858,29 +13858,15 @@ fn r2o_dns_tcp_trial(
     }))
 }
 
-/// Найти DoQ-сервис по адресу и SNI/имени.
 #[cfg(unix)]
-fn r2o_dns_doq_service(
-    services: &[r2k_core::dns_config::DnsService],
-    server: std::net::SocketAddr,
-    host: &str,
-) -> Result<Option<r2k_core::dns_config::DnsService>, &'static str> {
-    match r2o_dns_unique_service(services, server, host, 17)? {
-        Some((_, service)) if service.protocol == "doq" => Ok(Some(service.clone())),
-        Some(_) => Err("DNS: для DoH3 требуется проверка DNS-ответа по HTTP/3"),
-        None => Ok(None),
-    }
-}
-
-#[cfg(unix)]
-fn r2o_dns_doq_service_for_server(
+fn r2o_dns_quic_service_for_server(
     server: std::net::SocketAddr,
     host: &str,
 ) -> Result<Option<r2k_core::dns_config::DnsService>, &'static str> {
     let services = r2o_dns_service_snapshot()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    r2o_dns_doq_service(&services, server, host)
+    Ok(r2o_dns_unique_service(&services, server, host, 17)?.map(|(_, service)| service.clone()))
 }
 
 /// Живое состояние DoQ-испытания для DNS task-ячейки.
@@ -26296,7 +26282,7 @@ impl ControlClient {
                 {
                     if outcome.dns.is_some() {
                         if let Some(recovery) = dns_recovery.as_mut() {
-                            recovery.finish_doq(self, &mut dns_services, outcome, now);
+                            recovery.finish_quic(self, &mut dns_services, outcome, now);
                         }
                         continue;
                     }
@@ -30158,7 +30144,7 @@ impl ControlClient {
         retry_strategy: bool,
         started_at: std::time::Instant,
         measurement_permit: &mut r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
-        doq: Option<&r2k_core::dns_config::DnsService>,
+        dns_service: Option<&r2k_core::dns_config::DnsService>,
         progress: &dyn Fn(&str, usize),
     ) -> Result<Option<QuicDiscoveryTrialOutcome>, Box<dyn Error>> {
         use r2o_controller::quic_replay::{
@@ -30244,7 +30230,7 @@ impl ControlClient {
                 },
                 decision: R2oQuicFilterDecision::Unknown,
                 applied: false,
-                dns_probe: doq.is_some(),
+                dns_probe: dns_service.is_some(),
                 dns_reply: false,
                 dns_level: r2o_controller::live::D2K_VER_NOT_MEASURED,
                 dns_status: 0,
@@ -30260,18 +30246,18 @@ impl ControlClient {
                 if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
                     return Err("истёк срок QUIC-испытания".into());
                 }
-                if let Some(service) = doq {
-                    // C `d2k_verify_dns_on` для DoQ: план уже стоит на
-                    // local/server, зонд шлёт DNS на stream 0 с zero ID.
+                if let Some(service) = dns_service {
+                    // DNS-запрос идёт по сокету, для которого установлен кандидат.
                     let host = if service.sni.is_empty() {
                         service.host.as_str()
                     } else {
                         service.sni.as_str()
                     };
-                    let dns = runtime.block_on(r2o_controller::dns_health::probe_doq_on(
+                    let dns = runtime.block_on(r2o_controller::dns_health::probe_quic_dns_on(
                         probe.try_clone_socket()?,
                         server,
                         host,
+                        service,
                         r2o_quic_trial_remaining(started_at, measurement_permit)
                             .min(std::time::Duration::from_secs(4)),
                     ));
@@ -30285,7 +30271,7 @@ impl ControlClient {
                     } else {
                         r2o_controller::live::D2K_VER_NOT_MEASURED
                     };
-                    outcome.dns_status = 0;
+                    outcome.dns_status = dns.http_status;
                     outcome.dns_reason = dns.reason;
                     let events = r2o_collect_controller_applied_events_until(
                         commands,
@@ -30433,7 +30419,7 @@ impl ControlClient {
         r2o_mark: Option<u32>,
         deny_recheck: bool,
         stall_cut: &mut bool,
-        scoped_dns: Option<&dns_recovery::DoqDiscovery>,
+        scoped_dns: Option<&dns_recovery::QuicDnsDiscovery>,
         progress: &dyn Fn(&str, usize),
     ) -> Result<Option<(String, String, R2oQuicConfirmProof)>, Box<dyn Error>> {
         use r2o_controller::quic_replay::{QuicReplayProbe, r2o_quic_address_is_local};
@@ -30576,28 +30562,35 @@ impl ControlClient {
                 return Ok(None);
             }
         };
-        // DoQ-endpoint: C `d2k_verify_dns_on` проверяет не HTTP/3, а DNS
-        // stream 0 / zero ID на том же плановом QUIC-сокете.
-        let doq_service = match r2o_dns_doq_service_for_server(server, &server_name) {
+        // Для DNS используется контракт настроенного сервиса на том же пробном сокете.
+        let dns_service = match r2o_dns_quic_service_for_server(server, &server_name) {
             Ok(service) => service,
             Err(reason) => {
                 eprintln!("{reason}");
                 return Ok(None);
             }
         };
-        if doq_service.as_ref() != scoped_dns.map(|dns| &dns.service) {
+        if dns_service.as_ref() != scoped_dns.map(|dns| &dns.service) {
             return Ok(None);
         }
-        if doq_service.is_some()
-            && let Err(reason) = r2k_core::quic::r2k_quic_doq_sni(parsed_snapshot.datagrams())
-        {
-            eprintln!("DoQ-проба пропущена: {reason}");
-            return Ok(None);
+        if let Some(dns) = scoped_dns {
+            let alpn = if dns.service.protocol == "doh3" {
+                r2k_core::quic::r2k_quic_doh3_sni(parsed_snapshot.datagrams())
+            } else {
+                r2k_core::quic::r2k_quic_doq_sni(parsed_snapshot.datagrams())
+            };
+            if let Err(reason) = alpn {
+                eprintln!("DNS QUIC-проба пропущена: {reason}");
+                return Ok(None);
+            }
+            if dns.service.protocol == "doh3" && dns.owner.is_none() {
+                return Ok(None);
+            }
         }
         #[cfg(not(test))]
         use std::net::ToSocketAddrs;
         #[cfg(not(test))]
-        let resolved_addresses = if doq_service.is_some() {
+        let resolved_addresses = if dns_service.is_some() {
             Vec::new()
         } else {
             (server_name.as_str(), server.port())
@@ -30614,10 +30607,13 @@ impl ControlClient {
             .build()?;
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        if let Some(service) = doq_service.as_ref() {
-            // Прямой DoQ-зонд без плана: работает — цель чистая, задача не
-            // нужна. Не работает — перебираем плановые кандидаты и проверяем
-            // каждый тем же DoQ DNS-обменом.
+        if let Some(dns) = scoped_dns {
+            let service = &dns.service;
+            let protocol = if service.protocol == "doh3" {
+                "DoH3"
+            } else {
+                "DoQ"
+            };
             let host = if service.sni.is_empty() {
                 service.host.as_str()
             } else {
@@ -30631,21 +30627,24 @@ impl ControlClient {
                 false,
                 r2o_controller::live::D2K_VER_NOT_MEASURED,
                 0,
-                "Автоматически проверяется корректный DNS-ответ DoQ endpoint.".into(),
+                format!("Автоматически проверяется DNS-ответ {protocol}."),
             );
             let check_direct = || -> Result<r2o_controller::dns_health::DnsHealthResult, String> {
                 let (socket, _) = r2o_controller::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(
                     server,
-                    scoped_dns.map(|dns| dns.direct_mark),
+                    Some(dns.direct_mark),
                 )
                 .map_err(|error| error.source.to_string())?;
-                Ok(runtime.block_on(r2o_controller::dns_health::probe_doq_on(
-                    socket,
-                    server,
-                    host,
-                    r2o_quic_trial_remaining(started_at, measurement_permit)
-                        .min(std::time::Duration::from_secs(4)),
-                )))
+                Ok(
+                    runtime.block_on(r2o_controller::dns_health::probe_quic_dns_on(
+                        socket,
+                        server,
+                        host,
+                        service,
+                        r2o_quic_trial_remaining(started_at, measurement_permit)
+                            .min(std::time::Duration::from_secs(4)),
+                    )),
+                )
             };
             use r2o_controller::dns_health::DnsHealthFailure;
             let direct = check_direct();
@@ -30662,7 +30661,9 @@ impl ControlClient {
                     let gates = r2o_doq_direct_clear_gates();
                     debug_assert!(!gates.volume_proven && !gates.ech_trial);
                     debug_assert!(!gates.rx_partial && !gates.rx_direct_complete);
-                    println!("DoQ {server}: прямой DNS-ответ получен, адресный план не требуется");
+                    println!(
+                        "{protocol} {server}: прямой DNS-ответ получен, адресный план не требуется"
+                    );
                     return Ok(None);
                 }
                 Ok(result) => {
@@ -30684,7 +30685,7 @@ impl ControlClient {
                         } else {
                             r2o_controller::live::D2K_VER_NOT_MEASURED
                         },
-                        0,
+                        result.http_status,
                         result.reason,
                     );
                     if !try_plan {
@@ -30700,7 +30701,7 @@ impl ControlClient {
                         false,
                         r2o_controller::live::D2K_VER_NOT_MEASURED,
                         0,
-                        format!("DoQ: прямой зонд не подготовлен: {error}"),
+                        format!("{protocol}: прямой зонд не подготовлен: {error}"),
                     );
                     return Ok(None);
                 }
@@ -30729,22 +30730,20 @@ impl ControlClient {
                         false,
                         r2o_controller::live::D2K_VER_NOT_MEASURED,
                         0,
-                        "DoQ-испытание отменено".into(),
+                        format!("{protocol}-испытание отменено"),
                     );
-                    return Err("DoQ-испытание отменено".into());
+                    return Err(format!("{protocol}-испытание отменено").into());
                 }
                 if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
                     break;
                 }
-                let probe = match r2o_new_quic_candidate_probe(
-                    &mut candidate_probes,
-                    server,
-                    snapshot,
-                    r2o_mark,
-                ) {
+                let probes = &mut candidate_probes;
+                let probe = match dns_recovery::with_socket_owner(dns.owner, move || {
+                    r2o_new_quic_candidate_probe(probes, server, snapshot, r2o_mark)
+                }) {
                     Ok(probe) => probe,
                     Err(error) => {
-                        eprintln!("DoQ-кандидат не подготовлен: {error}");
+                        eprintln!("{protocol}-кандидат не подготовлен: {error}");
                         break;
                     }
                 };
@@ -30757,7 +30756,7 @@ impl ControlClient {
                     false,
                     r2o_controller::live::D2K_VER_NOT_MEASURED,
                     0,
-                    "План записан в сокет; проверяется DoQ DNS-ответ.".into(),
+                    format!("План привязан к пробному сокету; проверяется DNS-ответ {protocol}."),
                 );
                 let outcome = match Self::run_quic_discovery_candidate(
                     commands,
@@ -30780,7 +30779,10 @@ impl ControlClient {
                     Ok(Some(outcome)) => outcome,
                     Ok(None) => continue,
                     Err(error) => {
-                        eprintln!("DoQ-кандидат «{}» не завершён: {error}", candidate.name);
+                        eprintln!(
+                            "{protocol}-кандидат «{}» не завершён: {error}",
+                            candidate.name
+                        );
                         continue;
                     }
                 };
@@ -30802,19 +30804,18 @@ impl ControlClient {
                         true,
                         true,
                         r2o_controller::live::D2K_VER_APPLICATION,
-                        0,
+                        outcome.dns_status,
                         outcome.dns_reason,
                     );
                     println!(
-                        "DoQ {server}: кандидат «{}» подтверждён DNS-ответом и точным APPLIED",
+                        "{protocol} {server}: кандидат «{}» подтверждён DNS-ответом и точным APPLIED",
                         candidate.name
                     );
                     return Ok(Some((
                         outcome.plan_text,
                         candidate.name,
                         R2oQuicConfirmProof {
-                            // DoQ подтверждается DNS-ответом и точным APPLIED;
-                            // ECH в DoQ-снимке не участвует.
+                            // QUIC DNS подтверждается DNS-ответом и точным APPLIED.
                             replay_proof: outcome.dns_reply,
                             handshake_level: outcome.dns_reply,
                         },
@@ -30829,7 +30830,7 @@ impl ControlClient {
                 false,
                 r2o_controller::live::D2K_VER_NOT_MEASURED,
                 0,
-                "DoQ: ни один кандидат не подтвердил DNS-ответ".into(),
+                format!("{protocol}: ни один кандидат не подтвердил DNS-ответ"),
             );
             return Ok(None);
         }
@@ -31276,7 +31277,7 @@ impl ControlClient {
                 true,
                 started_at,
                 measurement_permit,
-                doq_service.as_ref(),
+                None,
                 progress,
             ) {
                 Ok(Some(outcome)) => outcome,
@@ -31421,7 +31422,7 @@ impl ControlClient {
                     false,
                     started_at,
                     measurement_permit,
-                    doq_service.as_ref(),
+                    None,
                     progress,
                 ) {
                     Ok(Some(outcome)) => outcome,
@@ -31551,7 +31552,7 @@ impl ControlClient {
                     false,
                     started_at,
                     measurement_permit,
-                    doq_service.as_ref(),
+                    None,
                     progress,
                 ) {
                     Ok(Some(outcome)) => outcome,

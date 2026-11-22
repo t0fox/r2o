@@ -30,26 +30,119 @@ struct Request {
     generation: u64,
     endpoint: SocketAddr,
     target: DiscoveryTarget,
+    owner: Option<u32>,
 }
 
 #[derive(Clone)]
-pub(super) struct DoqDiscovery {
+pub(super) struct QuicDnsDiscovery {
     pub(super) generation: u64,
     pub(super) service: DnsService,
     pub(super) direct_mark: u32,
+    pub(super) owner: Option<u32>,
+}
+
+fn dnsproxy_owner() -> Option<u32> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    let uid = passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next()? == "dnsproxy").then_some(())?;
+        fields.nth(1)?.parse::<u32>().ok()
+    })?;
+    if matches!(uid, 0 | u32::MAX)
+        || passwd
+            .lines()
+            .filter(|line| {
+                line.split(':').nth(2).and_then(|id| id.parse::<u32>().ok()) == Some(uid)
+            })
+            .count()
+            != 1
+    {
+        return None;
+    }
+    // Проверяем именно рабочий процесс, а не родительский ujail от root.
+    std::fs::read_dir("/proc")
+        .ok()?
+        .flatten()
+        .any(|entry| {
+            if !std::fs::read_link(entry.path().join("exe"))
+                .is_ok_and(|exe| exe == std::path::Path::new("/usr/bin/dnsproxy"))
+            {
+                return false;
+            }
+            std::fs::read_to_string(entry.path().join("status")).is_ok_and(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Uid:"))
+                    .is_some_and(|ids| {
+                        ids.split_ascii_whitespace()
+                            .filter(|id| id.parse::<u32>().ok() == Some(uid))
+                            .count()
+                            == 4
+                    })
+            })
+        })
+        .then_some(uid)
+}
+
+pub(super) fn with_socket_owner<T, E: From<std::io::Error>>(
+    owner: Option<u32>,
+    open: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let Some(uid) = owner else {
+        return open();
+    };
+    #[cfg(target_os = "linux")]
+    {
+        struct RestoreUid(u32);
+        impl Drop for RestoreUid {
+            fn drop(&mut self) {
+                unsafe { libc::setfsuid(self.0) };
+            }
+        }
+        // UID сокета берётся при открытии. setfsuid изменяет только текущий Linux-поток.
+        let _restore = RestoreUid(unsafe { libc::setfsuid(uid) } as u32);
+        if unsafe { libc::setfsuid(u32::MAX) } as u32 != uid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Не удалось назначить владельца сокета DoH3",
+            )
+            .into());
+        }
+        open()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = uid;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Проверка владельца сокета DoH3 доступна на Linux",
+        )
+        .into())
+    }
 }
 
 impl Request {
-    fn from_failures(state: &R2oDnsServices, index: usize, family: Option<u8>) -> Option<Self> {
+    fn from_failures(
+        state: &R2oDnsServices,
+        index: usize,
+        family: Option<u8>,
+        doh3_owner: Option<u32>,
+    ) -> Option<Self> {
         let live = state.live.get(index)?;
         let service = state.services.get(index)?;
         if live.state != DnsServiceState::Failed
             || live.consecutive_network_failures < 2
-            || !matches!(service.protocol.as_str(), "doh" | "dot" | "doq")
             || service.verification_limitation().is_some()
         {
             return None;
         }
+        let owner = match service.protocol.as_str() {
+            "doh" | "dot" | "doq" => None,
+            "doh3" if matches!(service.source.as_str(), "dnsproxy" | "dnsproxy-http3") => {
+                Some(doh3_owner.filter(|uid| !matches!(*uid, 0 | u32::MAX))?)
+            }
+            _ => return None,
+        };
         let endpoint = SocketAddr::new(live.ip.parse().ok()?, service.port);
         let endpoint_family = if endpoint.is_ipv4() { 4 } else { 6 };
         if family.is_some_and(|allowed| allowed != endpoint_family) {
@@ -69,11 +162,12 @@ impl Request {
         Some(Self {
             generation: live.generation,
             endpoint,
+            owner,
             target: DiscoveryTarget {
                 host: host.clone(),
                 endpoint: endpoint.to_string(),
                 family: endpoint_family,
-                shape: if service.protocol == "doq" {
+                shape: if service.transport() == 17 {
                     SHAPE_QUIC
                 } else {
                     SHAPE_MODERN
@@ -157,7 +251,11 @@ impl Binding {
         evidence: R2oDnsTrialEvidence,
     ) -> Option<Self> {
         let key = if wire_shape == SHAPE_QUIC {
-            control::dns_doq_plan_key(request.endpoint, service.sni.as_bytes())?
+            if let Some(uid) = request.owner {
+                control::dns_doh3_plan_key(request.endpoint, service.sni.as_bytes(), uid)?
+            } else {
+                control::dns_doq_plan_key(request.endpoint, service.sni.as_bytes())?
+            }
         } else {
             control::dns_tcp_plan_key(request.endpoint, service.sni.as_bytes())?
         };
@@ -243,11 +341,15 @@ impl Binding {
     }
 }
 
-fn start_doq_probe(request: &Request) -> std::io::Result<(SocketAddr, Receiver<DnsHealthResult>)> {
+fn start_quic_dns_probe(
+    request: &Request,
+    service: DnsService,
+) -> std::io::Result<(SocketAddr, Receiver<DnsHealthResult>)> {
     let endpoint = request.endpoint;
-    let (socket, _) =
+    let (socket, _) = with_socket_owner(request.owner, || {
         r2o_controller::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(endpoint, None)
-            .map_err(|error| error.source)?;
+            .map_err(|error| error.source)
+    })?;
     socket.connect(endpoint)?;
     let local = socket.local_addr()?;
     let host = request.target.host.clone();
@@ -259,10 +361,11 @@ fn start_doq_probe(request: &Request) -> std::io::Result<(SocketAddr, Receiver<D
         else {
             return;
         };
-        let mut result = runtime.block_on(r2o_controller::dns_health::probe_doq_on(
+        let mut result = runtime.block_on(r2o_controller::dns_health::probe_quic_dns_on(
             socket,
             endpoint,
             &host,
+            &service,
             PROBE_TIMEOUT,
         ));
         result.local_endpoint = Some(local);
@@ -282,7 +385,7 @@ struct Recheck {
 impl Recheck {
     fn new(binding: Binding, request: &Request, mut service: DnsService, now: Instant) -> Self {
         let receiver = if request.transport() == 17 {
-            start_doq_probe(request)
+            start_quic_dns_probe(request, service)
                 .map(|(_, receiver)| receiver)
                 .unwrap_or_else(|_| std::sync::mpsc::channel().1)
         } else {
@@ -374,7 +477,7 @@ struct Retained {
 pub(super) struct Recovery {
     firewall: PathBuf,
     family: Option<u8>,
-    doq_marks: Option<(u32, u32)>,
+    quic_marks: Option<(u32, u32)>,
     gate: R2oMeasurementGate,
     attempt: Option<Attempt>,
     retained: Vec<Retained>,
@@ -403,7 +506,7 @@ impl Recovery {
         Some(Self {
             firewall,
             family,
-            doq_marks: mark
+            quic_marks: mark
                 .zip(confirm_mark)
                 .filter(|(direct, trial)| *trial != 0 && direct != trial),
             gate,
@@ -417,19 +520,23 @@ impl Recovery {
 
     fn route(&self, request: &Request, add: bool, now: Instant) -> Option<RouteCommand> {
         let seconds = if add { ROUTE_TTL.as_secs() } else { 0 };
-        let child = Command::new(&self.firewall)
-            .args([
-                "dns-route",
-                if add { "add" } else { "del" },
-                &request.endpoint.ip().to_string(),
-                if request.transport() == 17 {
-                    "udp"
-                } else {
-                    "tcp"
-                },
-                &request.endpoint.port().to_string(),
-                &seconds.to_string(),
-            ])
+        let mut command = Command::new(&self.firewall);
+        command.args([
+            "dns-route",
+            if add { "add" } else { "del" },
+            &request.endpoint.ip().to_string(),
+            if request.transport() == 17 {
+                "udp"
+            } else {
+                "tcp"
+            },
+            &request.endpoint.port().to_string(),
+            &seconds.to_string(),
+        ]);
+        if let Some(uid) = request.owner {
+            command.arg(uid.to_string());
+        }
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -559,22 +666,29 @@ impl Recovery {
         now: Instant,
         skip_generation: Option<u64>,
     ) -> Option<Request> {
+        let doh3_owner = std::cell::OnceCell::new();
         (0..state.services.len()).find_map(|index| {
-            let request = Request::from_failures(state, index, self.family)?;
-            (Some(request.generation) != skip_generation
-                && state.live[index]
-                    .recovery_retry_at
-                    .is_none_or(|retry| now >= retry)
-                && !self.retained.iter().any(|entry| {
-                    entry.request.endpoint == request.endpoint
-                        && entry.request.transport() == request.transport()
-                })
-                && if request.transport() == 17 {
-                    self.doq_marks.is_some()
-                        && quic.is_some_and(|worker| !worker.active.contains_key(&request.endpoint))
-                } else {
-                    !worker.is_active(&request.target)
-                })
+            let live = state.live.get(index)?;
+            if Some(live.generation) == skip_generation
+                || live.recovery_retry_at.is_some_and(|retry| now < retry)
+            {
+                return None;
+            }
+            let owner = (state.services[index].protocol == "doh3"
+                && live.state == DnsServiceState::Failed
+                && live.consecutive_network_failures >= 2)
+                .then(|| *doh3_owner.get_or_init(dnsproxy_owner))
+                .flatten();
+            let request = Request::from_failures(state, index, self.family, owner)?;
+            (!self.retained.iter().any(|entry| {
+                entry.request.endpoint == request.endpoint
+                    && entry.request.transport() == request.transport()
+            }) && if request.transport() == 17 {
+                self.quic_marks.is_some()
+                    && quic.is_some_and(|worker| !worker.active.contains_key(&request.endpoint))
+            } else {
+                !worker.is_active(&request.target)
+            })
             .then_some(request)
         })
     }
@@ -652,7 +766,7 @@ impl Recovery {
             } => {
                 if let Some(index) = current
                     && now < *deadline
-                    && let Some((direct_mark, trial_mark)) = self.doq_marks
+                    && let Some((direct_mark, trial_mark)) = self.quic_marks
                     && let Some(quic) = quic
                 {
                     if snapshot.is_some()
@@ -669,10 +783,11 @@ impl Recovery {
                             deny_recheck: false,
                             stall_cut: false,
                             cooldown_key: None,
-                            dns: Some(DoqDiscovery {
+                            dns: Some(QuicDnsDiscovery {
                                 generation: attempt.request.generation,
                                 service: state.services[index].clone(),
                                 direct_mark,
+                                owner: attempt.request.owner,
                             }),
                         });
                         if queued {
@@ -691,7 +806,7 @@ impl Recovery {
                     client,
                     state,
                     now,
-                    Some("Не удалось подготовить QUIC Initial для DoQ Discovery."),
+                    Some("Не удалось подготовить QUIC Initial для DNS Discovery."),
                 );
             }
             Phase::QuicSearch => {
@@ -706,7 +821,13 @@ impl Recovery {
                     self.attempt = Some(attempt);
                     return;
                 };
-                let Some(index) = current.filter(|_| opened) else {
+                let Some(index) = current.filter(|_| {
+                    opened
+                        && attempt
+                            .request
+                            .owner
+                            .is_none_or(|uid| dnsproxy_owner() == Some(uid))
+                }) else {
                     self.release(
                         &attempt.request,
                         binding.take(),
@@ -737,14 +858,16 @@ impl Recovery {
                         now,
                     ));
                 } else if attempt.request.transport() == 17 {
-                    let Ok((local, _)) = start_doq_probe(&attempt.request) else {
+                    let Ok((local, _)) =
+                        start_quic_dns_probe(&attempt.request, state.services[index].clone())
+                    else {
                         self.release(
                             &attempt.request,
                             None,
                             client,
                             state,
                             now,
-                            Some("Не удалось открыть UDP-сокет для DoQ Discovery."),
+                            Some("Не удалось открыть UDP-сокет для DNS Discovery."),
                         );
                         return;
                     };
@@ -843,7 +966,12 @@ impl Recovery {
         let Some(parsed) = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(captured) else {
             return;
         };
-        let Ok(sni) = r2k_core::quic::r2k_quic_doq_sni(parsed.datagrams()) else {
+        let sni = if request.owner.is_some() {
+            r2k_core::quic::r2k_quic_doh3_sni(parsed.datagrams())
+        } else {
+            r2k_core::quic::r2k_quic_doq_sni(parsed.datagrams())
+        };
+        let Ok(sni) = sni else {
             return;
         };
         if sni.as_ref().map_or_else(
@@ -854,7 +982,7 @@ impl Recovery {
         }
     }
 
-    pub(super) fn finish_doq(
+    pub(super) fn finish_quic(
         &mut self,
         client: &mut ControlClient,
         state: &mut R2oDnsServices,
@@ -868,6 +996,7 @@ impl Recovery {
         if !self.attempt.as_ref().is_some_and(|attempt| {
             matches!(attempt.phase, Phase::QuicSearch)
                 && attempt.request.generation == dns.generation
+                && attempt.request.owner == dns.owner
                 && attempt.request.endpoint == outcome.server
                 && attempt
                     .request
@@ -923,6 +1052,10 @@ impl Recovery {
         let mut attempt = self.attempt.take().expect("найдена DNS-задача");
         if let Some(index) = attempt.request.needs_recovery(state)
             && now + CHECK_TIMEOUT < attempt.expires
+            && attempt
+                .request
+                .owner
+                .is_none_or(|uid| dnsproxy_owner() == Some(uid))
             && let Some(proof) = proof
             && let Some(binding) = Binding::install(
                 client,
@@ -970,6 +1103,7 @@ mod tests {
         let doh3 = DnsService {
             protocol: "doh3".into(),
             path: "/dns-query".into(),
+            source: "dnsproxy".into(),
             ..doq.clone()
         };
         let mut state = R2oDnsServices {
@@ -984,14 +1118,21 @@ mod tests {
             tasks: Vec::new(),
             generation: 1,
         };
-        let job = Request::from_failures(&state, 0, Some(4)).unwrap();
+        let job = Request::from_failures(&state, 0, Some(4), None).unwrap();
         assert_eq!(job.transport(), 17);
         assert_eq!(job.target.shape, SHAPE_QUIC);
         state.services.push(doh3);
         state.live.push(state.live[0].clone());
         assert!(job.index(&state).is_none());
-        assert!(Request::from_failures(&state, 0, Some(4)).is_none());
-        assert!(Request::from_failures(&state, 1, Some(4)).is_none());
+        assert!(Request::from_failures(&state, 0, Some(4), None).is_none());
+        assert!(Request::from_failures(&state, 1, Some(4), Some(411)).is_none());
+        state.services.remove(0);
+        state.live.remove(0);
+        assert!(Request::from_failures(&state, 0, Some(4), None).is_none());
+        assert!(Request::from_failures(&state, 0, Some(4), Some(0)).is_none());
+        let owned = Request::from_failures(&state, 0, Some(4), Some(411)).unwrap();
+        assert_eq!(owned.owner, Some(411));
+        assert_eq!(owned.transport(), 17);
     }
 
     #[test]
@@ -1031,24 +1172,24 @@ mod tests {
             );
         };
         finish_probe(&mut state, DnsHealthFailure::Network);
-        assert!(Request::from_failures(&state, 0, Some(6)).is_none());
+        assert!(Request::from_failures(&state, 0, Some(6), None).is_none());
         finish_probe(&mut state, DnsHealthFailure::Network);
-        assert!(Request::from_failures(&state, 0, Some(4)).is_none());
-        let request = Request::from_failures(&state, 0, Some(6)).unwrap();
+        assert!(Request::from_failures(&state, 0, Some(4), None).is_none());
+        let request = Request::from_failures(&state, 0, Some(6), None).unwrap();
         assert_eq!(request.endpoint, "[2001:db8::5]:853".parse().unwrap());
         assert_eq!(request.target.host, "resolver.example");
         assert_eq!(request.index(&state), Some(0));
         finish_probe(&mut state, DnsHealthFailure::Certificate);
         finish_probe(&mut state, DnsHealthFailure::Network);
-        assert!(Request::from_failures(&state, 0, Some(6)).is_none());
+        assert!(Request::from_failures(&state, 0, Some(6), None).is_none());
         finish_probe(&mut state, DnsHealthFailure::Network);
         finish_probe(&mut state, DnsHealthFailure::Local);
         finish_probe(&mut state, DnsHealthFailure::Network);
-        assert!(Request::from_failures(&state, 0, Some(6)).is_none());
+        assert!(Request::from_failures(&state, 0, Some(6), None).is_none());
         finish_probe(&mut state, DnsHealthFailure::Network);
 
         state.services.push(service);
-        assert!(Request::from_failures(&state, 0, Some(6)).is_none());
+        assert!(Request::from_failures(&state, 0, Some(6), None).is_none());
         assert_eq!(request.index(&state), None);
         state.services.pop();
         state.live[0].generation += 1;
@@ -1088,7 +1229,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let request = Request::from_failures(&state, 0, Some(4)).unwrap();
+        let request = Request::from_failures(&state, 0, Some(4), None).unwrap();
         let key = r2o_discovery_task_key(&request.target);
         let cancel = Arc::new(AtomicBool::new(false));
         worker.active.insert(key.clone(), request.target.clone());
@@ -1100,7 +1241,7 @@ mod tests {
         let mut recovery = Recovery {
             firewall: PathBuf::new(),
             family: Some(4),
-            doq_marks: None,
+            quic_marks: None,
             gate,
             attempt: Some(Attempt {
                 request,
@@ -1199,6 +1340,7 @@ mod tests {
         let request = Request {
             endpoint,
             generation: 1,
+            owner: None,
             target: DiscoveryTarget {
                 host: "resolver.example".into(),
                 endpoint: "192.0.2.8:853".into(),
