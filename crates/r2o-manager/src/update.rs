@@ -740,6 +740,7 @@ fn download(
         &[],
         RequestKind::Metadata,
     )
+    .map(|_| ())
 }
 
 const HTTP_MAX_REDIRECTS: usize = 5;
@@ -759,6 +760,7 @@ struct HttpHead {
 #[derive(Clone, Copy)]
 enum RequestKind<'a> {
     Metadata,
+    Redirect,
     Probe(u64),
     Archive {
         total: u64,
@@ -774,7 +776,7 @@ fn download_rust(
     timeout: &str,
     overrides: &[(String, Vec<Ipv4Addr>)],
     kind: RequestKind<'_>,
-) -> Result<(), UpdateError> {
+) -> Result<Option<String>, UpdateError> {
     let timeout_seconds = timeout.parse::<u64>().unwrap_or(600).clamp(1, 3600);
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let initial_host = download_url_host(url)
@@ -813,11 +815,14 @@ fn download_rust(
                     next_url = Some(resolve_redirect(&current, &host, &location, &initial_host)?);
                     break;
                 }
-                Ok(None) => return Ok(()),
+                Ok(None) => return Ok(None),
                 Err(error) => last_error = Some(error),
             }
         }
         if let Some(next) = next_url {
+            if matches!(kind, RequestKind::Redirect) {
+                return Ok(Some(next));
+            }
             current = next;
             continue;
         }

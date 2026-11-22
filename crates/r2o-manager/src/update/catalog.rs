@@ -1,6 +1,7 @@
 use super::*;
 
 const API_LATEST: &str = "https://api.github.com/repos/t0fox/r2o/releases/latest";
+const LATEST_CATALOG: &str = "https://github.com/t0fox/r2o/releases/latest/download/catalog.json";
 pub(super) const CATALOG_MAX: u64 = 1024 * 1024;
 
 pub(super) struct Catalog {
@@ -122,6 +123,29 @@ pub(super) fn fetch(work: &Path, root: &Path, architecture: &str) -> Result<Cata
 }
 
 fn github_latest(work: &Path) -> Result<String, UpdateError> {
+    github_latest_from_api(work).or_else(|api_error| {
+        // GitHub привязывает latest/download к тегу стабильного выпуска до выдачи файла.
+        let tag = download_rust(
+            LATEST_CATALOG,
+            &work.join("github-redirect"),
+            0,
+            "10",
+            &[],
+            RequestKind::Redirect,
+        )
+        .and_then(|location| {
+            let location = location.ok_or_else(|| invalid("GitHub не перенаправил на каталог"))?;
+            tag_from_catalog_redirect(&location)
+        });
+        tag.map_err(|redirect_error| {
+            UpdateError::Download(format!(
+                "GitHub API: {api_error}; GitHub Releases: {redirect_error}"
+            ))
+        })
+    })
+}
+
+fn github_latest_from_api(work: &Path) -> Result<String, UpdateError> {
     let reply = work.join("github.json");
     download(API_LATEST, &reply, CATALOG_MAX, "13")?;
     let github: Value =
@@ -132,6 +156,17 @@ fn github_latest(work: &Path) -> Result<String, UpdateError> {
     if github["draft"] != false || github["prerelease"] != false {
         return Err(invalid("GitHub вернул черновик или предрелиз"));
     }
+    crate::validate_token(tag, "release_id", 128)?;
+    Ok(tag.to_owned())
+}
+
+fn tag_from_catalog_redirect(location: &str) -> Result<String, UpdateError> {
+    let tag = location
+        .strip_prefix(DOWNLOAD_URL)
+        .and_then(|path| path.strip_prefix('/'))
+        .and_then(|path| path.strip_suffix("/catalog.json"))
+        .ok_or_else(|| invalid("GitHub не перенаправил на каталог R2O"))?;
+    crate::validate_token(tag, "release_id", 128)?;
     Ok(tag.to_owned())
 }
 
@@ -220,5 +255,23 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("metadata");
         assert!(verify(json!([b, legacy]), "r2o-b").is_err());
         assert!(decode(b"{}", &[0; 64], key, "r2o-b").is_err());
+    }
+
+    #[test]
+    fn github_catalog_redirect_requires_the_exact_repo_tag_and_asset() {
+        assert_eq!(
+            tag_from_catalog_redirect(&format!("{DOWNLOAD_URL}/r2o-v1/catalog.json")).unwrap(),
+            "r2o-v1"
+        );
+        for bad in [
+            "https://github.com/other/r2o/releases/download/r2o-v1/catalog.json",
+            "https://release-assets.githubusercontent.com/r2o-v1/catalog.json",
+            "https://github.com/t0fox/r2o/releases/download//catalog.json",
+            "https://github.com/t0fox/r2o/releases/download/r2o-v1/other/catalog.json",
+            "https://github.com/t0fox/r2o/releases/download/r2o-v1/catalog.json?next=2",
+            "https://github.com/t0fox/r2o/releases/download/r2o-v1/latest.json",
+        ] {
+            assert!(tag_from_catalog_redirect(bad).is_err(), "{bad}");
+        }
     }
 }
