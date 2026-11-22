@@ -208,11 +208,12 @@ function collectConfirmedTrafficDeltas(previousBySession, sessions) {
         !Number.isFinite(fromUpstreams) || fromClients < 0 || fromUpstreams < 0) return;
     live.add(id);
     const previous = previousBySession.get(id);
-    previousBySession.set(id, { fromClients, fromUpstreams });
-    if (!previous || session.telegram_response_seen !== true) return;
     const laneIndex = selectedLaneFor(session);
     const dc = telegramDcNumber(session.dc);
-    if (laneIndex < 0 || dc === null) return;
+    const confirmed = session.telegram_response_seen === true;
+    previousBySession.set(id, { fromClients, fromUpstreams, laneIndex, dc, confirmed });
+    if (!confirmed || laneIndex < 0 || dc === null || !previous?.confirmed ||
+        previous.laneIndex !== laneIndex || previous.dc !== dc) return;
     if (fromClients > previous.fromClients) {
       deltas.push({ id, laneIndex, dc, direction: "request",
         bytes: fromClients - previous.fromClients });
@@ -256,6 +257,30 @@ function laneStatesForSession(session) {
   const connecting = states.map((state, lane) => state === "connecting" ? lane : -1).filter(lane => lane >= 0);
   if (connecting.length > 1) connecting.forEach(lane => { states[lane] = "race"; });
   return { states, transports, connecting: connecting.length > 1, selectedLane };
+}
+
+function motionRoutes(view) {
+  const routes = new Map();
+  if (view.state === "stale") return routes;
+  for (const session of view.sessions) {
+    const dc = telegramDcNumber(session.dc);
+    const { states, selectedLane } = laneStatesForSession(session);
+    const transport = session.selected_transport;
+    const latest = (session.events || []).findLast(event => event.transport === transport);
+    const status = transport === session.fallback_transport ? session.fallback_state
+      : transport === session.direct_transport ? session.direct_state : undefined;
+    const selected = !["cancelled", "failed", "skipped"].includes(latest?.state || status);
+    if (dc && selected && session.telegram_response_seen === true && selectedLane >= 0) {
+      routes.set(`${selectedLane}:${dc}`, { lane: selectedLane, dc, state: "confirmed" });
+    }
+    states.forEach((state, lane) => {
+      if (state === "connecting" || state === "race" || state === "connected"
+          || (state === "selected" && selected && session.telegram_response_seen !== true)) {
+        routes.set(`${lane}:pending`, { lane, dc: null, state: "discovery" });
+      }
+    });
+  }
+  return routes;
 }
 
 function summarize(snapshot, error) {
@@ -366,9 +391,10 @@ function summarize(snapshot, error) {
     .map(({ dc }) => telegramDcNumber(dc))
     .filter(Number.isInteger));
   const mediaSessions = sessions.filter(session => session.is_media === true).length;
-  const dcLabel = dcValues.size === 1 ? `DC${[...dcValues][0]}${mediaSessions ? ` · media ${mediaSessions}` : ""}`
-    : dcValues.size > 1 ? `Несколько DC · media ${mediaSessions}` : "DC неизвестен";
-  const transportLabel = selectedLanes.length > 1 ? "Несколько маршрутов"
+  const mediaLabel = mediaSessions ? ` · медиа ${mediaSessions}` : "";
+  const dcLabel = dcValues.size === 1 ? `DC${[...dcValues][0]}${mediaLabel}`
+    : dcValues.size > 1 ? `Несколько DC${mediaLabel}` : "DC неизвестен";
+  const transportLabel = selectedLanes.length > 1 ? "Разные маршруты"
     : selectedLanes.length === 1 ? selectedLanes[0].label
       : connectingLanes.length === 1 ? connectingLanes[0].label
         : connectingLanes.length > 1 ? "Несколько попыток" : failedLanes.length ? "Недоступно" : "Определяется";
@@ -427,6 +453,7 @@ global.R2oTelegramFlow = {
   telegramDcActivity,
   failureGateIndex,
   collectConfirmedTrafficDeltas,
+  motionRoutes,
   routeDescription,
   hasCurrentRouteFailure,
   visibleRouteLanes,

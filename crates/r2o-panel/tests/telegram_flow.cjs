@@ -43,6 +43,17 @@ assert.equal(view.acceptedConnections, 7);
 assert.equal(view.lanes[0].counts.selected, 1);
 assert.equal(view.lanes[0].confirmed, 1);
 assert.deepEqual(view.dcActivity[1], { active: 1, media: 0, confirmed: 1 });
+assert.deepEqual([...flow.motionRoutes(view)], [["0:2", { lane: 0, dc: 2, state: "confirmed" }]]);
+const alternate = { ...stats.active_sessions[0], dc: 5, events: [], direct_state: "cancelled",
+  fallback_transport: "cloudflare_worker", fallback_state: "connecting",
+  selected_transport: null, telegram_response_seen: false };
+const showing = session => flow.motionRoutes(flow.summarizeTelegramFlow({ ...stats, active_sessions: [session] }));
+assert.deepEqual([...showing(alternate)], [["1:pending", { lane: 1, dc: null, state: "discovery" }]]);
+assert.deepEqual([...showing({ ...alternate, fallback_state: "selected", selected_transport: "cloudflare_worker",
+  telegram_response_seen: true })], [["1:5", { lane: 1, dc: 5, state: "confirmed" }]]);
+assert.equal(showing({ ...alternate, fallback_state: "cancelled", selected_transport: "cloudflare_worker",
+  telegram_response_seen: true }).size, 0);
+assert.equal(flow.motionRoutes(flow.summarizeTelegramFlow(stats, "stale")).size, 0);
 assert.equal(flow.hasCurrentRouteFailure(stats), false,
   "исторические MTProto ошибки не объявляются текущим отказом маршрута");
 assert.deepEqual(flow.collectConfirmedTrafficDeltas(new Map(), stats.active_sessions), [],
@@ -64,4 +75,7 @@ assert.deepEqual(flow.collectConfirmedTrafficDeltas(previousTraffic, [{
   { id: 1, laneIndex: 0, dc: 2, direction: "request", bytes: 32 },
   { id: 1, laneIndex: 0, dc: 2, direction: "response", bytes: 16 },
 ], "рисуются только новые байты подтверждённой сессии");
+assert.deepEqual(flow.collectConfirmedTrafficDeltas(previousTraffic, [{
+  ...confirmedSession, dc: 4, selected_transport: "cloudflare_worker", bytes_from_clients: 720,
+}]), [], "смена маршрута сбрасывает точку отсчёта байтов");
 console.log("Telegram panel Rust stats compatibility: PASS");

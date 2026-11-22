@@ -3054,18 +3054,21 @@
 
     var flowCard = el(doc, "section", "tg-flow-card");
     var flowHead = el(doc, "div", "tg-flow-head");
-    flowHead.append(el(doc, "h4", "", "Карта маршрутов"));
-    flowHead.append(el(doc, "span", "", "клиент → R2O → Telegram DC"));
+    flowHead.appendChild(el(doc, "h4", "", "Карта маршрутов"));
     var flowStage = el(doc, "div", "tg-flow-stage");
     var canvas = el(doc, "canvas", "tg-flow-canvas");
     canvas.width = 960;
-    canvas.height = 420;
+    canvas.height = 310;
     canvas.setAttribute("role", "img");
     canvas.setAttribute("aria-label", "Поток соединений: клиент → R2O → Telegram DC");
     flowStage.appendChild(canvas);
     var flowCaption = el(doc, "p", "tg-flow-caption", "Маршруты обновляются по живому трафику.");
     flowCaption.setAttribute("data-tg-flow-caption", "");
-    flowCard.append(flowHead, flowStage, flowCaption);
+    var flowDetails = el(doc, "details", "tg-flow-details");
+    flowDetails.hidden = true;
+    var flowSessions = el(doc, "ul", "tg-flow-sessions");
+    flowDetails.append(el(doc, "summary", "", "Подробности соединений"), flowSessions);
+    flowCard.append(flowHead, flowStage, flowCaption, flowDetails);
 
     var routes = el(doc, "section", "tg-routes");
     var routesHead = el(doc, "div", "tg-routes-head");
@@ -3190,20 +3193,32 @@
     if (ui.flowCaption) {
       var caption = flow ? flow.caption : "Маршруты обновляются по живому трафику.";
       var sessions = Array.isArray(stats && stats.active_sessions) ? stats.active_sessions : [];
-      [false, true].forEach(function (media) {
+      var lines = [false, true].flatMap(function (media) {
         var session = sessions.slice().reverse().find(function (entry) {
           return entry && entry.is_media === media && entry.wire;
         });
-        if (!session) return;
-        var parts = ["DC" + session.dc, media ? "медиа" : "чат", session.wire,
+        if (!session) return [];
+        var dc = flow && global.R2oTelegramFlow.telegramDcNumber(session.dc);
+        var parts = [media ? "Медиа" : "Чат", dc ? "DC" + dc : "", session.wire,
           session.upstream_host, session.edge_ip].filter(Boolean);
         parts.push(session.telegram_response_seen ? "MTProto подтверждён" : "транспорт подключён");
         if (Number.isFinite(session.first_response_ms)) {
-          parts.push("первый MTProto " + telegramMilliseconds(session.first_response_ms));
+          parts.push("до первого ответа " + telegramMilliseconds(session.first_response_ms));
         }
-        caption += " " + parts.join(" · ") + ".";
+        return [parts.join(" · ")];
       });
       if (ui.flowCaption.textContent !== caption) ui.flowCaption.textContent = caption;
+      if (ui.flowDetails) {
+        var list = ui.flowDetails.querySelector("ul");
+        var key = JSON.stringify(lines);
+        if (list.__r2oKey !== key) {
+          list.__r2oKey = key;
+          list.replaceChildren.apply(list, lines.map(function (line) {
+            return el(list.ownerDocument, "li", "", line);
+          }));
+        }
+        ui.flowDetails.hidden = !lines.length;
+      }
     }
   }
 
@@ -3332,6 +3347,7 @@
         port: scene.querySelector("[data-tg-port]"),
         route: scene.querySelector("[data-tg-route]"),
         flowCaption: scene.querySelector("[data-tg-flow-caption]"),
+        flowDetails: scene.querySelector(".tg-flow-details"),
         actions: scene.querySelector("[data-tg-actions]"),
         routeCards: Array.prototype.map.call(
           scene.querySelectorAll("[data-tg-route-index]"),

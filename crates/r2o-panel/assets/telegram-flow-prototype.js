@@ -6,13 +6,17 @@
   "use strict";
 
   var WIDTH = 960;
-  var HEIGHT = 420;
-  var DESKTOP_TOP = 76;
-  var DESKTOP_HEIGHT = 264;
-  var MOBILE_WIDTH = 420;
-  var MOBILE_HEIGHT = 740;
-  var MOBILE_TOP = 62;
-  var MOBILE_BOTTOM = 652;
+  var HEIGHT = 310;
+  var MOBILE_WIDTH = 360;
+  var MOBILE_HEIGHT = 692;
+  var MOBILE_BREAKPOINT = 680;
+  var MONO = '"IBM Plex Mono", monospace';
+  var SANS = '"Manrope", sans-serif';
+  var ROW_TITLE = '700 12px ' + SANS;
+  var ROW_DETAIL = '10px ' + MONO;
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var MAX_PARTICLES = 24;
+  var ROUTE_TONES = ["direct", "worker", "cloudflare", "tcp"];
 
   var ROUTES = [
     { transport: "direct_wss", label: "Прямой WSS" },
@@ -26,16 +30,6 @@
     cloudflare_proxy: 2,
     tcp_passthrough: 3,
     tcp_fallback: 3
-  };
-  var STATE_WORDS = {
-    active: "АКТИВЕН",
-    mixed: "СМЕШАННЫЙ",
-    race: "ГОНКА",
-    searching: "ПОДБОР",
-    unavailable: "НЕДОСТУПЕН",
-    idle: "ПРОСТОЙ",
-    cooling: "ПАУЗА",
-    stale: "УСТАРЕЛ"
   };
   var ROUTE_WORDS = {
     idle: "резерв",
@@ -51,20 +45,22 @@
   var FAILURE_STAGES = { 1: "DNS", 2: "TCP", 3: "TLS", 4: "WebSocket", 5: "MTProto", 6: "маршрут", 7: "WSS" };
   var GATES = ["DNS", "TCP", "TLS", "WS", "MTP"];
 
-  var CLIENT = { x: 24, y: 76, w: 150, h: 264 };
-  var CORE = { x: 196, y: 76, w: 164, h: 264 };
-  var ROUTES_BOARD = { x: 384, y: 76, w: 344, h: 264 };
-  var DC_BOARD = { x: 752, y: 76, w: 184, h: 264 };
-  var ROW_X = ROUTES_BOARD.x + 14;
-  var ROW_W = ROUTES_BOARD.w - 28;
-  var ROW_H = 52;
-  var ROW_GAP = 7;
-  var ROW_TOP = ROUTES_BOARD.y + 24;
-  var DC_X = DC_BOARD.x + 12;
-  var DC_W = DC_BOARD.w - 24;
-  var DC_H = 40;
-  var DC_GAP = 6;
-  var DC_TOP = DC_BOARD.y + 30;
+  var DESKTOP = {
+    client: { x: 16, y: 12, w: 150, h: 286 },
+    core: { x: 196, y: 12, w: 160, h: 286 },
+    routes: { x: 386, y: 12, w: 342, h: 286 },
+    dcs: { x: 758, y: 12, w: 186, h: 286 },
+    routeRows: { x: 398, y: 54, w: 318, h: 50, gap: 8 },
+    dcRows: { x: 770, y: 54, w: 162, h: 39, gap: 9 }
+  };
+  var MOBILE = {
+    client: { x: 20, y: 12, w: 320, h: 102 },
+    core: { x: 20, y: 128, w: 320, h: 148 },
+    routes: { x: 20, y: 290, w: 320, h: 230 },
+    dcs: { x: 20, y: 534, w: 320, h: 146 },
+    routeRows: { x: 32, y: 328, w: 296, h: 42, gap: 4 },
+    dcRows: { x: 32, y: 570, w: 296, h: 18, gap: 3 }
+  };
 
   function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 
@@ -110,49 +106,170 @@
     return Number.isInteger(number) && number >= 1 && number <= 5 ? number : null;
   }
 
-  function shortText(text, max) {
-    text = String(text || "");
-    return text.length > max ? text.slice(0, Math.max(1, max - 1)) + "…" : text;
-  }
-
-  function ageText(ms) {
-    var value = Number(ms);
-    if (!Number.isFinite(value) || value < 0) return "";
-    if (value < 1000) return "только что";
-    var seconds = Math.floor(value / 1000);
-    if (seconds < 60) return seconds + " с назад";
-    var minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return minutes + " мин назад";
-    var hours = Math.floor(minutes / 60);
-    return hours + " ч назад";
-  }
-
   function latencyText(ms) {
     var value = Number(ms);
     if (!Number.isFinite(value) || value < 0) return "—";
     return Math.round(value) + " мс";
   }
 
+  function makeAtmosphere(doc, canAnimate) {
+    var field = doc.createElement("pre");
+    field.className = "tg-flow-signal-field";
+    field.setAttribute("aria-hidden", "true");
+    var symbols = "01·+";
+    field.textContent = Array.from({ length: 40 }, function (_, y) {
+      return Array.from({ length: 170 }, function (_, x) {
+        return Math.sin(x * 0.29 - y * 0.64) + Math.sin(x * 0.16 + y * 0.35) > 0.7
+          ? symbols[(x * 3 + y) % symbols.length] : " ";
+      }).join("");
+    }).join("\n");
+
+    var orb = doc.createElementNS(SVG_NS, "svg");
+    orb.classList.add("tg-flow-orb");
+    orb.setAttribute("viewBox", "0 0 100 100");
+    orb.setAttribute("aria-hidden", "true");
+    orb.innerHTML = [
+      '<rect class="tg-orbit-hit" width="100" height="100"/>',
+      '<circle class="tg-orbit-fill" cx="50" cy="50" r="43"/>',
+      '<g class="tg-orbit-edge"/>',
+      '<g class="tg-orbit-turn tg-orbit-cross"/>',
+      '<g class="tg-orbit-turn"/>',
+      '<g class="tg-orbit-label"/>'
+    ].join("");
+
+    var layers = Array.from(orb.querySelectorAll("g"), function (node) { return { node: node, pixels: [] }; });
+    var point = null, frame = 0, last = 0, index = 0;
+
+    function addPixel(layer, x, y, size) {
+      var node = doc.createElementNS(SVG_NS, "rect");
+      node.setAttribute("x", (x - size / 2).toFixed(2));
+      node.setAttribute("y", (y - size / 2).toFixed(2));
+      node.setAttribute("width", size);
+      node.setAttribute("height", size);
+      node.setAttribute("rx", Math.min(size / 2, 0.4));
+      layer.node.append(node);
+      var angle = ++index * 2.39996;
+      layer.pixels.push({ node: node, x: x, y: y, dx: 0, dy: 0, vx: Math.cos(angle), vy: Math.sin(angle),
+        spread: 38 + 28 * (0.5 + 0.5 * Math.cos(angle * 1.31)) });
+    }
+
+    function ring(layer, rx, ry, tilt, count, size) {
+      var cos = Math.cos(tilt), sin = Math.sin(tilt);
+      for (var i = 0; i < count; i += 1) {
+        var angle = i / count * 2 * Math.PI;
+        var x = rx * Math.cos(angle), y = ry * Math.sin(angle);
+        addPixel(layer, 50 + x * cos - y * sin, 50 + x * sin + y * cos, i % 6 === 0 ? size * 1.65 : size);
+      }
+    }
+
+    ring(layers[0], 40, 40, 0, 50, 1.2);
+    ring(layers[1], 37, 17, 0.49, 29, 1.55);
+    ring(layers[2], 38, 18, -0.54, 34, 1.65);
+    ["11110/10001/10001/11110/10100/10010/10001",
+      "01110/10001/00001/00010/00100/01000/11111",
+      "01110/10001/10001/10001/10001/10001/01110"].forEach(function (glyph, letter) {
+      glyph.split("/").forEach(function (row, y) {
+        for (var x = 0; x < row.length; x += 1) {
+          if (row[x] === "1") addPixel(layers[3], 50 + (letter * 6 + x - 8) * 2.18, 50 + (y - 3) * 2.18, 2.0);
+        }
+      });
+    });
+
+    function paint(now) {
+      frame = 0;
+      var viewport = orb.getScreenCTM();
+      if (!viewport) return;
+      var inverse = viewport.inverse();
+      var cursor = point && point.matrixTransform(inverse);
+      var ease = 1 - Math.exp(-Math.min(32, last ? now - last : 16) / (cursor ? 58 : 115));
+      last = now;
+      var moving = false;
+      // Координаты орбит читаются до записи смещений частиц для текущего кадра.
+      var matrices = layers.map(function (layer) { return inverse.multiply(layer.node.getScreenCTM()); });
+      layers.forEach(function (layer, i) {
+        var matrix = matrices[i];
+        layer.pixels.forEach(function (pixel) {
+          var tx = 0, ty = 0;
+          if (cursor) {
+            var x = matrix.a * pixel.x + matrix.c * pixel.y + matrix.e - cursor.x;
+            var y = matrix.b * pixel.x + matrix.d * pixel.y + matrix.f - cursor.y;
+            var distance = Math.hypot(x, y);
+            var force = pixel.spread * Math.max(0, 1 - distance / 105);
+            var bias = 0.34 / Math.max(1, distance);
+            tx = force * (pixel.vx + bias * x);
+            ty = force * (pixel.vy + bias * y) * 0.82;
+          }
+          pixel.dx += (tx - pixel.dx) * ease;
+          pixel.dy += (ty - pixel.dy) * ease;
+          if (!cursor && Math.hypot(pixel.dx, pixel.dy) < 0.12) {
+            pixel.dx = pixel.dy = 0;
+            pixel.node.removeAttribute("transform");
+            return;
+          }
+          // Смещение остаётся в координатах ядра, пока орбита под частицей вращается.
+          var localX = matrix.a * pixel.dx + matrix.b * pixel.dy;
+          var localY = matrix.c * pixel.dx + matrix.d * pixel.dy;
+          pixel.node.setAttribute("transform", "translate(" + localX.toFixed(2) + " " + localY.toFixed(2) + ")");
+          moving = true;
+        });
+      });
+      if (cursor || moving) frame = window.requestAnimationFrame(paint);
+      else last = 0;
+    }
+
+    orb.addEventListener("pointermove", function (event) {
+      if (event.pointerType !== "mouse" || !canAnimate()) return;
+      point = new DOMPoint(event.clientX, event.clientY);
+      if (!frame) frame = window.requestAnimationFrame(paint);
+    }, { passive: true });
+    orb.addEventListener("pointerleave", function () { point = null; });
+
+    function resetOrb() {
+      if (!frame) return;
+      window.cancelAnimationFrame(frame);
+      frame = last = 0;
+      point = null;
+      for (var layer of layers) for (var pixel of layer.pixels) {
+        pixel.dx = pixel.dy = 0;
+        pixel.node.removeAttribute("transform");
+      }
+    }
+
+    return { field: field, orb: orb, resetOrb: resetOrb };
+  }
+
   function mountTelegramFlow(canvas) {
     var api = global.R2oTelegramFlow;
     if (!api) throw new Error("Данные анимации Telegram не загружены");
-    var context = canvas.getContext("2d", { alpha: false });
+    var context = canvas.getContext("2d");
     if (!context) throw new Error("Canvas 2D недоступен для схемы Telegram");
-    var root = canvas.closest(".tg-flow");
+    var links = canvas.ownerDocument.createElementNS(SVG_NS, "svg");
+    links.classList.add("tg-flow-links");
+    links.setAttribute("aria-hidden", "true");
+    var overlay = canvas.ownerDocument.createElement("canvas");
+    overlay.className = "tg-flow-particles";
+    overlay.setAttribute("aria-hidden", "true");
+    var brush = overlay.getContext("2d");
+    canvas.before(links);
+    canvas.after(overlay);
+    var stage = canvas.parentElement;
+    var atmosphere = makeAtmosphere(canvas.ownerDocument, canAnimate);
+    stage.prepend(atmosphere.field);
+    canvas.after(atmosphere.orb);
     var reduce = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
 
     var fallback = {
       line: [46, 58, 68],
       text: [231, 236, 239],
-      muted: [116, 129, 139],
+      muted: [148, 163, 173],
       accent: [127, 208, 212],
-      accent2: [215, 164, 91],
       failure: [185, 106, 106],
       warning: [198, 155, 89],
       confirmed: [127, 175, 132],
       background: [14, 19, 23],
       surface: [17, 22, 26],
       direct: [185, 138, 82],
+      worker: [183, 161, 236],
       cloudflare: [127, 208, 212],
       tcp: [111, 152, 184]
     };
@@ -161,20 +278,15 @@
 
     var view = api.summarizeTelegramFlow(null, "");
     var snapshot = null;
+    var paths = new Map();
+    var flows = new Map();
+    var previousBySession = new Map();
     var particles = [];
-    var pulses = [];
-    var sparks = [];
-    var dcPulse = [0, 0, 0, 0, 0];
-    var corePulse = 0;
-    var statePulse = 0;
-    var lastSpawn = 0;
-    var lastFrame = 0;
+    var layout = DESKTOP;
     var lastDraw = 0;
-    var clock = 0;
     var frameId = 0;
     var inView = true;
     var destroyed = false;
-    var pixelRatio = 1;
     var layoutMobile = false;
     var maxConnections = 0;
 
@@ -187,29 +299,19 @@
       palette.text = cssColor(style.getPropertyValue("--tg-flow-text"), fallback.text);
       palette.muted = cssColor(style.getPropertyValue("--tg-flow-muted"), fallback.muted);
       palette.accent = cssColor(style.getPropertyValue("--tg-flow-accent"), fallback.accent);
-      palette.accent2 = cssColor(style.getPropertyValue("--tg-flow-accent-2"), fallback.accent2);
       palette.failure = cssColor(style.getPropertyValue("--tg-flow-failure"), fallback.failure);
       palette.warning = cssColor(style.getPropertyValue("--tg-flow-warning"), fallback.warning);
       palette.confirmed = cssColor(style.getPropertyValue("--tg-flow-confirmed"), fallback.confirmed);
       palette.background = cssColor(style.getPropertyValue("--tg-flow-background"), fallback.background);
       palette.surface = cssColor(style.getPropertyValue("--tg-flow-surface"), fallback.surface);
-      palette.direct = cssColor(style.getPropertyValue("--tg-flow-direct"), fallback.direct);
-      palette.cloudflare = cssColor(style.getPropertyValue("--tg-flow-cloudflare"), fallback.cloudflare);
-      palette.tcp = cssColor(style.getPropertyValue("--tg-flow-tcp"), fallback.tcp);
+      for (var tone of ROUTE_TONES) {
+        palette[tone] = cssColor(style.getPropertyValue("--tg-flow-" + tone), fallback[tone]);
+      }
       paletteReady = true;
     }
 
-    function laneColor(lane) {
-      if (!lane) return palette.muted;
-      if (lane.status === "failed") return palette.failure;
-      if (lane.status === "cooldown" || lane.status === "cancelled" || lane.status === "skipped") return palette.warning;
-      if (lane.status === "connecting" || lane.status === "race") return palette.warning;
-      if (lane.status === "selected" || lane.status === "connected") return lane.index === 3 ? palette.tcp : lane.index === 0 ? palette.direct : palette.cloudflare;
-      return palette.muted;
-    }
-
     function routeStatus(lane) {
-      if (lane.counts && lane.counts.selected) return "selected";
+      if (lane.counts && lane.counts.selected) return lane.confirmed ? "selected" : "connecting";
       if (lane.counts && (lane.counts.race || lane.counts.connecting)) return lane.counts.race ? "race" : "connecting";
       if (lane.counts && lane.counts.failed) return "failed";
       if (lane.cooldownCount) return "cooldown";
@@ -221,9 +323,11 @@
     function countsText(lane) {
       var parts = [];
       var counts = lane.counts || {};
-      ["selected", "connecting", "race", "failed", "cancelled", "skipped"].forEach(function (state) {
+      ["connecting", "race", "failed", "cancelled", "skipped"].forEach(function (state) {
         if (Number(counts[state]) > 0) parts.push(ROUTE_WORDS[state] + " " + counts[state]);
       });
+      var unconfirmed = (Number(counts.selected) || 0) - (Number(lane.confirmed) || 0);
+      if (unconfirmed > 0) parts.push("ожидается ответ " + unconfirmed);
       if (lane.cooldownCount) parts.push("пауза " + lane.cooldownCount);
       if (lane.confirmed) parts.push("подтверждено " + lane.confirmed);
       return parts.length ? parts.join(" · ") : "нет сессий";
@@ -242,9 +346,13 @@
 
     function panel(x, y, w, h, tint) {
       roundRect(x, y, w, h, 9);
-      context.fillStyle = rgba(tint || palette.surface, tint ? 0.16 : 0.72);
+      context.fillStyle = rgba(palette.surface, 0.94);
       context.fill();
-      context.strokeStyle = rgba(palette.line, 0.72);
+      if (tint) {
+        context.fillStyle = rgba(tint, 0.055);
+        context.fill();
+      }
+      context.strokeStyle = rgba(tint || palette.line, tint ? 0.42 : 0.9);
       context.lineWidth = 1;
       context.stroke();
     }
@@ -258,21 +366,6 @@
       context.lineWidth = width || 1;
       context.setLineDash(dash || []);
       context.lineDashOffset = dashOffset || 0;
-      context.stroke();
-      context.restore();
-    }
-
-    function path(points, color, alpha, width, dash) {
-      if (!points.length) return;
-      context.save();
-      context.beginPath();
-      context.moveTo(points[0][0], points[0][1]);
-      for (var i = 1; i < points.length; i++) context.lineTo(points[i][0], points[i][1]);
-      context.strokeStyle = rgba(color, alpha);
-      context.lineWidth = width || 1;
-      context.lineJoin = "round";
-      context.lineCap = "round";
-      context.setLineDash(dash || []);
       context.stroke();
       context.restore();
     }
@@ -307,7 +400,7 @@
     }
 
     function label(value, x, y, color) {
-      text(value, x, y, '600 8px "IBM Plex Mono", monospace', color || palette.muted, "left", "middle");
+      text(value, x, y, '700 12px ' + SANS, color || palette.text);
     }
 
     function chip(value, x, y, color, options) {
@@ -350,683 +443,329 @@
       return width;
     }
 
-    function rowTop(index) { return ROW_TOP + index * (ROW_H + ROW_GAP); }
-    function rowCenter(index) { return rowTop(index) + ROW_H / 2; }
-    function dcTop(index) { return DC_TOP + index * (DC_H + DC_GAP); }
-    function dcCenter(index) { return dcTop(index) + DC_H / 2; }
+    function rowTop(index) { return layout.routeRows.y + index * (layout.routeRows.h + layout.routeRows.gap); }
+    function rowCenter(index) { return rowTop(index) + layout.routeRows.h / 2; }
+    function dcTop(index) { return layout.dcRows.y + index * (layout.dcRows.h + layout.dcRows.gap); }
+    function dcCenter(index) { return dcTop(index) + layout.dcRows.h / 2; }
 
-    function pointOnPolyline(points, progress) {
-      var lengths = [];
-      var total = 0;
-      for (var i = 1; i < points.length; i++) {
-        var segment = Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
-        lengths.push(segment);
-        total += segment;
-      }
-      var target = clamp(progress, 0, 1) * total;
-      for (var j = 0; j < lengths.length; j++) {
-        if (target <= lengths[j] || j === lengths.length - 1) {
-          var ratio = lengths[j] ? target / lengths[j] : 0;
-          return [
-            points[j][0] + (points[j + 1][0] - points[j][0]) * ratio,
-            points[j][1] + (points[j + 1][1] - points[j][1]) * ratio
-          ];
-        }
-        target -= lengths[j];
-      }
-      return points[points.length - 1];
+    function dcPath(dc, lane) {
+      var route = layout.routeRows, node = layout.dcRows;
+      var x = route.x + route.w;
+      var bus = layoutMobile ? MOBILE_WIDTH - 10 : layout.dcs.x - 15;
+      var end = layoutMobile ? node.x + node.w : node.x;
+      return [[x, rowCenter(lane)], [bus, rowCenter(lane)], [bus, dcCenter(dc - 1)], [end, dcCenter(dc - 1)]];
     }
 
-    function dcPath(session, lane) {
-      var dc = dcNumber(session && session.dc);
-      var laneIndexValue = lane >= 0 ? lane : laneIndex(session && session.selected_transport);
-      if (dc === null || laneIndexValue < 0) return null;
-      return [
-        [ROW_X + ROW_W, rowCenter(laneIndexValue)],
-        [ROW_X + ROW_W + 16, rowCenter(laneIndexValue)],
-        [ROW_X + ROW_W + 16, dcCenter(dc - 1)],
-        [DC_X, dcCenter(dc - 1)]
-      ];
+    function ingressPath() {
+      var client = layout.client, core = layout.core;
+      if (layoutMobile) return verticalLink(client, core);
+      var y = core.y + 100;
+      return [[client.x + client.w, y], [core.x, y]];
     }
 
-    function drawBackground(width, height) {
-      var gradient = context.createLinearGradient(0, 0, 0, height);
-      gradient.addColorStop(0, rgba(palette.background, 1));
-      gradient.addColorStop(1, rgba(palette.surface, 1));
-      context.fillStyle = gradient;
-      context.fillRect(0, 0, width, height);
-      context.save();
-      context.globalAlpha = 0.32;
-      for (var x = 0; x <= width; x += 24) line(x, 0, x, height, palette.line, 0.08, 1);
-      for (var y = 0; y <= height; y += 24) line(0, y, width, y, palette.line, 0.08, 1);
-      context.restore();
-      line(0, 60, width, 60, palette.line, 0.5, 1);
+    function verticalLink(first, second) {
+      var x = first.x + first.w / 2;
+      return [[x, first.y + first.h], [x, second.y]];
     }
 
-    function drawStatus(width) {
-      var state = STATE_WORDS[view.state] || String(view.state || "—").toUpperCase();
-      var stateColor = view.state === "active" || view.state === "mixed" ? palette.accent2
-        : view.state === "unavailable" || view.state === "stale" ? palette.failure
-          : view.state === "idle" ? palette.muted : palette.warning;
-      var stats = view.activeConnections + " активных · " + view.acceptedConnections + " принято" +
-        (view.mediaSessions ? " · медиа " + view.mediaSessions : "");
-      var statsFont = '9px "IBM Plex Mono", monospace';
-      var statsWidth = Math.min(300, measure(fitText(stats, 300, statsFont), statsFont) + 18);
-      var statsLeft = width - 24 - statsWidth;
-      var x = 24;
-      x += chip(state, x, 28, stateColor, { font: '600 10px "IBM Plex Mono", monospace' }) + 9;
-      if (view.transportLabel) {
-        var transport = fitText(view.transportLabel, Math.max(80, statsLeft - x - 16), statsFont);
-        mono(transport, x, 28, 9, palette.text);
-        x += measure(transport, statsFont) + 14;
-      }
-      if (view.dcLabel) {
-        var dcFont = '10px "IBM Plex Mono", monospace';
-        var dcText = fitText(view.dcLabel, 150, dcFont);
-        var dcWidth = measure(dcText, dcFont) + 14;
-        if (x + dcWidth < statsLeft - 8) chip(dcText, x, 28, palette.accent, { font: dcFont });
-      }
-      mono(fitText(stats, 300, statsFont), width - 24, 28, 9, palette.muted, "right");
+    function card(box, title, tint) {
+      panel(box.x, box.y, box.w, box.h, tint);
+      label(title, box.x + 14, box.y + 20);
     }
 
     function drawClient() {
-      panel(CLIENT.x, CLIENT.y, CLIENT.w, CLIENT.h, palette.surface);
-      label("КЛИЕНТ", CLIENT.x + 14, CLIENT.y + 17);
-      label("MTProto", CLIENT.x + CLIENT.w - 14, CLIENT.y + 17);
-      // Устройство: экран и нижняя полоса.
-      var dx = CLIENT.x + 14, dy = CLIENT.y + 38;
-      roundRect(dx, dy, 30, 46, 5);
-      context.strokeStyle = rgba(palette.accent, 0.7);
-      context.lineWidth = 1.3;
-      context.stroke();
-      roundRect(dx + 5, dy + 6, 20, 28, 2);
-      context.strokeStyle = rgba(palette.accent, 0.28);
-      context.stroke();
-      dot(dx + 15, dy + 41, palette.accent, 1.2);
-      // Главное число активных сессий.
-      text(view.activeConnections, CLIENT.x + 76, CLIENT.y + 56, '600 32px "Unbounded", sans-serif', palette.text, "left", "middle");
-      mono("активных", CLIENT.x + 78, CLIENT.y + 78, 9, palette.muted);
-      line(CLIENT.x + 14, CLIENT.y + 96, CLIENT.x + CLIENT.w - 14, CLIENT.y + 96, palette.line, 0.7, 1);
-      var rows = [
-        ["принято", String(view.acceptedConnections)],
-        ["медиа", String(view.mediaSessions)],
-        ["сессий", String(view.sessions.length) + (view.truncated ? "+" : "")]
+      var box = layout.client;
+      var count = String(view.activeConnections);
+      var font = '650 32px "Unbounded", ' + SANS;
+      card(box, "Клиент");
+      text(fitText(count, layoutMobile ? 82 : box.w - 28, font), box.x + 14, box.y + 60, font, palette.text);
+      text("Активные", box.x + 14, box.y + 84, '10px ' + SANS, palette.muted);
+
+      var values = [
+        ["Принято", view.acceptedConnections],
+        ["Медиа", view.mediaSessions],
+        ["Сессии", String(view.sessions.length) + (view.truncated ? "+" : "")]
       ];
-      rows.forEach(function (item, index) {
-        var y = CLIENT.y + 116 + index * 24;
-        mono(item[0], CLIENT.x + 14, y, 9, palette.muted);
-        mono(item[1], CLIENT.x + CLIENT.w - 14, y, 10, palette.text, "right");
-      });
-      if (maxConnections > 0) {
-        line(CLIENT.x + 14, CLIENT.y + 188, CLIENT.x + CLIENT.w - 14, CLIENT.y + 188, palette.line, 0.5, 1);
-        mono("лимит", CLIENT.x + 14, CLIENT.y + 204, 9, palette.muted);
-        mono(maxConnections, CLIENT.x + CLIENT.w - 14, CLIENT.y + 204, 10, palette.text, "right");
-      }
-      var portY = CLIENT.y + CLIENT.h - 18;
-      line(CLIENT.x + 14, portY - 18, CLIENT.x + CLIENT.w - 14, portY - 18, palette.line, 0.5, 1);
-      mono("TCP 1443", CLIENT.x + 14, portY, 9, palette.accent);
-      mono("→ WSS 443", CLIENT.x + CLIENT.w - 14, portY, 9, palette.muted, "right");
-    }
-
-    function drawCore() {
-      panel(CORE.x, CORE.y, CORE.w, CORE.h, palette.accent2);
-      label("R2O", CORE.x + 14, CORE.y + 17);
-      label("ЯДРО", CORE.x + CORE.w - 14, CORE.y + 17);
-      var cx = CORE.x + CORE.w / 2;
-      var cy = CORE.y + 108;
-      var pulse = 1 + Math.sin(clock * 2.2) * 0.03 + corePulse * 0.12;
-      context.save();
-      context.beginPath();
-      context.arc(cx, cy, 38 * pulse, 0, Math.PI * 2);
-      context.strokeStyle = rgba(palette.accent, 0.14 + corePulse * 0.16);
-      context.lineWidth = 10;
-      context.stroke();
-      context.beginPath();
-      context.arc(cx, cy, 30, 0, Math.PI * 2);
-      context.strokeStyle = rgba(palette.accent, 0.6);
-      context.lineWidth = 1.4;
-      context.stroke();
-      context.beginPath();
-      for (var i = 0; i < 6; i++) {
-        var angle = -Math.PI / 2 + i * Math.PI / 3;
-        var px = cx + Math.cos(angle) * 21;
-        var py = cy + Math.sin(angle) * 21;
-        if (i === 0) context.moveTo(px, py); else context.lineTo(px, py);
-      }
-      context.closePath();
-      context.fillStyle = rgba(palette.accent, 0.1 + corePulse * 0.12);
-      context.fill();
-      context.strokeStyle = rgba(palette.accent, 0.9);
-      context.lineWidth = 1.5;
-      context.stroke();
-      context.restore();
-      text(String(view.activeConnections), cx, cy + 1, '600 20px "Unbounded", sans-serif', palette.text, "center", "middle");
-      mono("сессий", cx, cy + 17, 8, palette.muted);
-
-      text("MTProto → WSS", cx, CORE.y + 162, '600 10px "Manrope", sans-serif', palette.text, "center");
-      mono(fitText(view.transportLabel || "маршрут не выбран", CORE.w - 28, '9px "IBM Plex Mono", monospace'), cx, CORE.y + 179, 9, palette.accent, "center");
-      mono(fitText(view.dcLabel || "DC неизвестен", CORE.w - 28, '9px "IBM Plex Mono", monospace'), cx, CORE.y + 195, 9, palette.muted, "center");
-
-      // Пять ворот прохождения: DNS → TCP → TLS → WebSocket → MTProto.
-      var maxGate = 0;
-      var failedGate = 0;
-      view.lanes.forEach(function (lane) {
-        if (Number(lane.passedGate) > maxGate) maxGate = Number(lane.passedGate);
-        if (lane.status === "failed" && Number(lane.failureStage) > failedGate) failedGate = Number(lane.failureStage);
-      });
-      var gateY = CORE.y + 224;
-      mono("этапы", CORE.x + 14, gateY - 12, 8, palette.muted);
-      GATES.forEach(function (gate, index) {
-        var gateX = CORE.x + 14 + index * 27;
-        var tone = failedGate === index + 1 ? palette.failure : maxGate >= index + 1 ? palette.accent : palette.line;
-        roundRect(gateX, gateY, 22, 12, 2);
-        context.fillStyle = rgba(tone, maxGate >= index + 1 ? 0.16 : 0.05);
-        context.fill();
-        context.strokeStyle = rgba(tone, 0.55);
-        context.stroke();
-        mono(gate, gateX + 11, gateY + 6, 7, maxGate >= index + 1 ? tone : palette.muted, "center");
-      });
-      if (snapshot && Number(snapshot.last_success_latency_ms) >= 0 && Number(snapshot.last_success_dc) > 0) {
-        mono("ответ DC" + snapshot.last_success_dc + " · " + latencyText(snapshot.last_success_latency_ms),
-          cx, CORE.y + CORE.h - 18, 8, palette.confirmed, "center");
+      if (maxConnections > 0) values.push(["Лимит", maxConnections]);
+      if (layoutMobile) {
+        var columns = (box.w - 118) / 2;
+        values.forEach(function (item, index) {
+          var x = box.x + 104 + index % 2 * columns;
+          var y = box.y + 48 + Math.floor(index / 2) * 27;
+          text(item[0], x, y, '10px ' + SANS, palette.muted);
+          mono(fitText(item[1], columns - 12, '11px ' + MONO), x + columns - 11, y, 11, palette.text, "right");
+        });
       } else {
-        mono("ответов пока нет", cx, CORE.y + CORE.h - 18, 8, palette.muted, "center");
-      }
-    }
-
-    function drawRouteRow(lane, index) {
-      var top = rowTop(index);
-      var color = laneColor(lane);
-      var status = routeStatus(lane);
-      var alpha = status === "idle" ? 0.34 : 1;
-      context.save();
-      roundRect(ROW_X, top, ROW_W, ROW_H, 6);
-      context.fillStyle = status === "idle" ? rgba(palette.surface, 0.38) : rgba(color, 0.07);
-      context.fill();
-      context.strokeStyle = rgba(status === "idle" ? palette.line : color, status === "idle" ? 0.45 : 0.32);
-      context.lineWidth = 1;
-      context.stroke();
-      // Цветной рельс состояния.
-      roundRect(ROW_X, top + 8, 2, ROW_H - 16, 1);
-      context.fillStyle = rgba(color, alpha);
-      context.fill();
-      context.restore();
-
-      mono(("0" + (index + 1)).slice(-2), ROW_X + 11, top + 15, 8, palette.muted);
-      text(fitText(lane.label, ROW_W - 92, '600 10px "Manrope", sans-serif'), ROW_X + 31, top + 15, '600 10px "Manrope", sans-serif', status === "idle" ? palette.muted : palette.text, "left", "middle");
-      var stateWord = ROUTE_WORDS[status] || status;
-      if (status === "failed" && Number(lane.failureStage)) stateWord += " · " + (FAILURE_STAGES[Number(lane.failureStage)] || "сбой");
-      if (status === "cooldown" && Number(lane.cooldownRemainingMs)) stateWord += " · " + Math.ceil(Number(lane.cooldownRemainingMs) / 1000) + " с";
-      chipRight(stateWord, ROW_X + ROW_W - 8, top + 14, color, { font: '8px "IBM Plex Mono", monospace', height: 16, pad: 5 });
-      mono(fitText(countsText(lane), ROW_W - 44, '7.5px "IBM Plex Mono", monospace'), ROW_X + 31, top + 31, 7.5, status === "idle" ? palette.muted : palette.text);
-      // Дорожка маршрута и пакеты.
-      line(ROW_X + 12, top + ROW_H - 8, ROW_X + ROW_W - 12, top + ROW_H - 8, status === "idle" ? palette.line : color, status === "idle" ? 0.45 : 0.3, 1);
-      if (status !== "idle") {
-        line(ROW_X + 12, top + ROW_H - 8, ROW_X + ROW_W - 12, top + ROW_H - 8,
-          color, status === "failed" ? 0.55 : 0.8, 1.6, [3, 9], -clock * 28);
-      }
-      if (Number(lane.cooldownRemainingMs) > 0 && Number(view.cooldownDurationMs) > 0) {
-        var ratio = clamp(Number(lane.cooldownRemainingMs) / Number(view.cooldownDurationMs), 0, 1);
-        line(ROW_X + 12, top + ROW_H - 8, ROW_X + 12 + (ROW_W - 24) * ratio, top + ROW_H - 8, palette.warning, 0.85, 2);
-      }
-    }
-
-    function drawRoutes() {
-      panel(ROUTES_BOARD.x, ROUTES_BOARD.y, ROUTES_BOARD.w, ROUTES_BOARD.h, palette.surface);
-      label("МАРШРУТЫ", ROUTES_BOARD.x + 14, ROUTES_BOARD.y + 17);
-      label("4 КАНАЛА", ROUTES_BOARD.x + ROUTES_BOARD.w - 14, ROUTES_BOARD.y + 17);
-      view.lanes.forEach(drawRouteRow);
-    }
-
-    function drawDcRow(index) {
-      var activity = (view.dcActivity && view.dcActivity[index]) || { active: 0, media: 0, confirmed: 0 };
-      var top = dcTop(index);
-      var active = Number(activity.active) || 0;
-      var media = Number(activity.media) || 0;
-      var confirmed = Number(activity.confirmed) || 0;
-      var color = active > 0 ? palette.confirmed : confirmed > 0 ? palette.accent : palette.muted;
-      context.save();
-      roundRect(DC_X, top, DC_W, DC_H, 5);
-      context.fillStyle = active > 0 ? rgba(color, 0.09) : rgba(palette.surface, 0.32);
-      context.fill();
-      context.strokeStyle = rgba(active > 0 ? color : palette.line, active > 0 ? 0.36 : 0.4);
-      context.lineWidth = 1;
-      context.stroke();
-      context.restore();
-      dot(DC_X + 10, top + 13, color, 2);
-      mono("DC" + (index + 1), DC_X + 18, top + 13, 9, active > 0 ? palette.text : palette.muted);
-      var value = active > 0 ? String(active) : "—";
-      mono(value, DC_X + DC_W - 10, top + 13, 11, active > 0 ? color : palette.muted, "right");
-      var detail = active > 0
-        ? (media ? "media " + media : "сессий") + (confirmed ? " · ✓" + confirmed : "")
-        : "нет сессий";
-      mono(fitText(detail, DC_W - 30, '7.5px "IBM Plex Mono", monospace'), DC_X + 18, top + 28, 7.5, palette.muted);
-      if (active > 0) {
-        var ghost = 1 + Math.sin(clock * 2 + index) * 0.06 + dcPulse[index] * 0.2;
-        context.save();
-        context.beginPath();
-        context.arc(DC_X + DC_W - 12, top + 28, 3.2 * ghost, 0, Math.PI * 2);
-        context.fillStyle = rgba(color, 0.75);
-        context.fill();
-        context.restore();
-      }
-    }
-
-    function drawDcs() {
-      panel(DC_BOARD.x, DC_BOARD.y, DC_BOARD.w, DC_BOARD.h, palette.surface);
-      label("TELEGRAM DC", DC_BOARD.x + 14, DC_BOARD.y + 17);
-      label("5 УЗЛОВ", DC_BOARD.x + DC_BOARD.w - 14, DC_BOARD.y + 17);
-      for (var i = 0; i < 5; i += 1) drawDcRow(i);
-    }
-
-    function drawConnections() {
-      // Клиент → ядро.
-      line(CLIENT.x + CLIENT.w, 208, CORE.x, 208, palette.accent, 0.45, 2);
-      if (!prefersReduced()) line(CLIENT.x + CLIENT.w, 208, CORE.x, 208, palette.accent, 0.85, 1.4, [2, 7], -clock * 34);
-      dot(CLIENT.x + CLIENT.w + 2, 208, palette.accent, 2);
-      // Ядро → четыре маршрута.
-      view.lanes.forEach(function (lane, index) {
-        var color = laneColor(lane);
-        path([
-          [CORE.x + CORE.w, 208],
-          [CORE.x + CORE.w + 10, 208],
-          [CORE.x + CORE.w + 10, rowCenter(index)],
-          [ROW_X, rowCenter(index)]
-        ], color, lane.status === "idle" ? 0.16 : 0.3, 1);
-      });
-      // Маршруты → выбранные DC по живым сессиям.
-      var busX = ROW_X + ROW_W + 16;
-      line(busX, dcCenter(0), busX, dcCenter(4), palette.line, 0.32, 1);
-      var drawn = 0;
-      (view.sessions || []).forEach(function (session) {
-        if (drawn >= 12) return;
-        var dc = dcNumber(session.dc);
-        if (dc === null) return;
-        var selected = laneIndex(session.selected_transport);
-        var fallback = laneIndex(session.fallback_transport);
-        var direct = laneIndex(session.direct_transport);
-        var lane = selected >= 0 ? selected : fallback >= 0 ? fallback : direct >= 0 ? direct : -1;
-        if (lane < 0) return;
-        var color = session.telegram_response_seen === true ? palette.confirmed
-          : session.selected_transport ? palette.accent : palette.warning;
-        var points = dcPath(session, lane);
-        if (!points) return;
-        path(points, color, 0.24, 1);
-        if (!prefersReduced()) {
-          context.save();
-          context.beginPath();
-          context.moveTo(points[0][0], points[0][1]);
-          for (var p = 1; p < points.length; p += 1) context.lineTo(points[p][0], points[p][1]);
-          context.strokeStyle = rgba(color, 0.55);
-          context.lineWidth = 1;
-          context.setLineDash([2, 8]);
-          context.lineDashOffset = -clock * 30;
-          context.stroke();
-          context.restore();
-        }
-        drawn += 1;
-      });
-      if (!drawn) {
-        for (var i = 0; i < 5; i += 1) line(busX, dcCenter(i), DC_X, dcCenter(i), palette.line, 0.24, 1, [2, 4]);
-      }
-    }
-
-    function particlePoint(particle) {
-      return particle.kind === "dc"
-        ? pointOnPolyline(particle.points, particle.progress)
-        : [particle.x1 + (particle.x2 - particle.x1) * particle.progress,
-          particle.y1 + (particle.y2 - particle.y1) * particle.progress];
-    }
-
-    function burstSparks(x, y, color) {
-      for (var i = 0; i < 5; i += 1) {
-        var angle = Math.random() * Math.PI * 2;
-        var speed = 18 + Math.random() * 26;
-        sparks.push({
-          x: x, y: y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
-          age: 0, life: .35 + Math.random() * .2, color: color
+        line(box.x + 14, box.y + 108, box.x + box.w - 14, box.y + 108, palette.line, 0.9, 1);
+        values.forEach(function (item, index) {
+          var y = box.y + 135 + index * 33;
+          text(item[0], box.x + 14, y, '11px ' + SANS, palette.muted);
+          mono(fitText(item[1], 64, '11px ' + MONO), box.x + box.w - 14, y, 11, palette.text, "right");
         });
       }
     }
 
-    function drawParticles() {
-      context.save();
-      context.globalCompositeOperation = "lighter";
-      // Хвост из нескольких затухающих точек — как поток пакетов, а не одна искра.
-      particles.forEach(function (particle) {
-        var point = particlePoint(particle);
-        var trail = particle.trail || [];
-        for (var i = 0; i < trail.length; i += 1) {
-          var weight = (i + 1) / trail.length;
-          context.save();
-          context.beginPath();
-          context.arc(trail[i][0], trail[i][1], 1.1 + weight * 1.6, 0, Math.PI * 2);
-          context.fillStyle = rgba(particle.color, 0.06 + weight * 0.3);
-          context.fill();
-          context.restore();
-        }
-        context.save();
-        context.shadowColor = rgba(particle.color, 0.95);
-        context.shadowBlur = 14;
-        context.beginPath();
-        context.arc(point[0], point[1], 3.1, 0, Math.PI * 2);
-        context.fillStyle = rgba(particle.color, 1);
-        context.fill();
-        context.beginPath();
-        context.arc(point[0], point[1], 6, 0, Math.PI * 2);
-        context.strokeStyle = rgba(particle.color, 0.22);
-        context.lineWidth = 1;
-        context.stroke();
-        context.restore();
-      });
-      sparks.forEach(function (spark) {
-        context.save();
-        context.beginPath();
-        context.moveTo(spark.x, spark.y);
-        context.lineTo(spark.x - spark.vx * .025, spark.y - spark.vy * .025);
-        context.strokeStyle = rgba(spark.color, Math.max(0, 1 - spark.age / .55));
-        context.lineWidth = 1.2;
-        context.lineCap = "round";
-        context.stroke();
-        context.restore();
-      });
-      context.restore();
-      pulses.forEach(function (pulse) {
-        context.save();
-        context.beginPath();
-        context.arc(pulse.x, pulse.y, pulse.radius, 0, Math.PI * 2);
-        context.strokeStyle = rgba(pulse.color, pulse.alpha);
-        context.lineWidth = 1.4;
-        context.stroke();
-        context.restore();
-      });
-    }
-
-    function drawLegend(width, height) {
-      var y = height - 31;
-      var items = [
-        [palette.accent2, "активен"],
-        [palette.warning, "подключение / пауза"],
-        [palette.failure, "отказ"],
-        [palette.muted, "резерв"]
-      ];
-      var x = 24;
-      items.forEach(function (item) {
-        dot(x + 3, y, item[0], 2.2);
-        mono(item[1], x + 10, y, 8, palette.muted);
-        x += 22 + measure(item[1], '8px "IBM Plex Mono", monospace');
-      });
-      var note = view.truncated ? "выборка сессий ограничена" : view.cooldowns.length ? "часть маршрутов на паузе" : "";
-      if (!note && snapshot) {
-        var last = Number(snapshot.last_failure_stage) ? "последний сбой: " + (FAILURE_STAGES[Number(snapshot.last_failure_stage)] || "маршрут") : "";
-        if (last) note = last;
-      }
-      if (note) mono(note, width - 24, y, 8, palette.muted, "right");
-      line(0, height - 52, width, height - 52, palette.line, 0.4, 1);
-    }
-
-    function drawDesktop() {
-      drawBackground(WIDTH, HEIGHT);
-      drawConnections();
-      drawClient();
-      drawCore();
-      drawRoutes();
-      drawDcs();
-      drawParticles();
-    }
-
-    /* ─── Мобильная схема: та же информация, но вертикально и крупнее. ─── */
-
-    function drawMobileStatus() {
-      var state = STATE_WORDS[view.state] || String(view.state || "—").toUpperCase();
-      var stateColor = view.state === "active" || view.state === "mixed" ? palette.accent2
-        : view.state === "unavailable" || view.state === "stale" ? palette.failure
-          : view.state === "idle" ? palette.muted : palette.warning;
-      chip(state, 16, 30, stateColor, { font: '600 10px "IBM Plex Mono", monospace' });
-      mono(view.activeConnections + " активных · " + view.acceptedConnections + " принято", MOBILE_WIDTH - 16, 30, 8.5, palette.muted, "right");
-      if (view.transportLabel) {
-        mono(shortText(view.transportLabel, 34), 16, 50, 8, palette.text);
-        mono(shortText(view.dcLabel || "DC неизвестен", 24), MOBILE_WIDTH - 16, 50, 8, palette.accent, "right");
-      }
-      line(0, 62, MOBILE_WIDTH, 62, palette.line, 0.5, 1);
-    }
-
-    function drawMobileClient() {
-      var x = 16, y = 74, w = MOBILE_WIDTH - 32, h = 86;
-      panel(x, y, w, h, palette.surface);
-      label("КЛИЕНТ", x + 12, y + 16);
-      text(String(view.activeConnections), x + 12, y + 45, '600 26px "Unbounded", sans-serif', palette.text, "left", "middle");
-      mono("активных", x + 13, y + 63, 8, palette.muted);
-      var stats = [
-        ["принято", String(view.acceptedConnections)],
-        ["медиа", String(view.mediaSessions)],
-        ["сессий", String(view.sessions.length) + (view.truncated ? "+" : "")]
-      ];
-      stats.forEach(function (item, index) {
-        var sx = x + 110 + index * 92;
-        mono(item[0], sx, y + 38, 7.5, palette.muted);
-        mono(item[1], sx, y + 54, 10, palette.text);
-      });
-      mono("TCP 1443 → WSS 443", x + w - 12, y + 72, 8, palette.accent, "right");
-    }
-
-    function drawMobileCore() {
-      var x = 16, y = 170, w = MOBILE_WIDTH - 32, h = 104;
-      panel(x, y, w, h, palette.accent2);
-      label("R2O · ЯДРО", x + 12, y + 15);
-      var cx = x + 34, cy = y + 51, pulse = 1 + Math.sin(clock * 2.2) * 0.04 + corePulse * 0.1;
-      context.save();
-      context.beginPath();
-      context.arc(cx, cy, 21 * pulse, 0, Math.PI * 2);
-      context.strokeStyle = rgba(palette.accent, 0.18 + corePulse * 0.16);
-      context.lineWidth = 7;
-      context.stroke();
-      context.beginPath();
-      context.arc(cx, cy, 16, 0, Math.PI * 2);
-      context.strokeStyle = rgba(palette.accent, 0.7);
-      context.lineWidth = 1.2;
-      context.stroke();
-      context.restore();
-      text(String(view.activeConnections), cx, cy + 1, '600 13px "Unbounded", sans-serif', palette.text, "center", "middle");
-      text("MTProto → WSS", x + 68, y + 34, '600 9px "Manrope", sans-serif', palette.text);
-      mono(shortText(view.transportLabel || "маршрут не выбран", 34), x + 68, y + 48, 8, palette.accent);
-      mono(shortText(view.dcLabel || "DC неизвестен", 30), x + 68, y + 61, 8, palette.muted);
-      var maxGate = 0, failedGate = 0;
+    function drawGates(box, y) {
+      var passed = 0, failed = 0;
       view.lanes.forEach(function (lane) {
-        if (Number(lane.passedGate) > maxGate) maxGate = Number(lane.passedGate);
-        if (lane.status === "failed" && Number(lane.failureStage) > failedGate) failedGate = Number(lane.failureStage);
+        passed = Math.max(passed, Number(lane.passedGate) || 0);
+        if (routeStatus(lane) === "failed") failed = Math.max(failed, Number(lane.failureStage) || 0);
       });
+      var width = (box.w - 28 - 4 * 4) / 5;
       GATES.forEach(function (gate, index) {
-        var gateX = x + 12 + index * 31;
-        var tone = failedGate === index + 1 ? palette.failure : maxGate >= index + 1 ? palette.accent : palette.line;
-        roundRect(gateX, y + 78, 26, 12, 2);
-        context.fillStyle = rgba(tone, maxGate >= index + 1 ? 0.16 : 0.05);
+        var x = box.x + 14 + index * (width + 4);
+        var color = failed === index + 1 ? palette.failure : passed > index ? palette.accent : palette.muted;
+        roundRect(x, y, width, 18, 4);
+        context.fillStyle = rgba(color, passed > index ? 0.12 : 0.045);
         context.fill();
-        context.strokeStyle = rgba(tone, 0.55);
-        context.stroke();
-        mono(gate, gateX + 13, y + 84, 7, maxGate >= index + 1 ? tone : palette.muted, "center");
-      });
-    }
-
-    function drawMobileRoutes() {
-      var x = 16, y = 286, w = MOBILE_WIDTH - 32, h = 214;
-      panel(x, y, w, h, palette.surface);
-      label("МАРШРУТЫ", x + 12, y + 15);
-      label("4 КАНАЛА", x + w - 12, y + 15);
-      var rowX = x + 10, rowW = w - 20, rowH = 43, rowGap = 4, rowStart = y + 26;
-      view.lanes.forEach(function (lane, index) {
-        var top = rowStart + index * (rowH + rowGap);
-        var color = laneColor(lane);
-        var status = routeStatus(lane);
-        roundRect(rowX, top, rowW, rowH, 5);
-        context.fillStyle = status === "idle" ? rgba(palette.surface, 0.38) : rgba(color, 0.07);
-        context.fill();
-        context.strokeStyle = rgba(status === "idle" ? palette.line : color, status === "idle" ? 0.4 : 0.3);
+        context.strokeStyle = rgba(color, 0.32);
         context.lineWidth = 1;
         context.stroke();
-        roundRect(rowX, top + 7, 2, rowH - 14, 1);
-        context.fillStyle = rgba(color, status === "idle" ? 0.35 : 1);
-        context.fill();
-        mono(("0" + (index + 1)).slice(-2), rowX + 10, top + 12, 7.5, palette.muted);
-        text(fitText(lane.label, rowW - 100, '600 9px "Manrope", sans-serif'), rowX + 28, top + 12, '600 9px "Manrope", sans-serif', status === "idle" ? palette.muted : palette.text);
-        var stateWord = ROUTE_WORDS[status] || status;
-        if (status === "failed" && Number(lane.failureStage)) stateWord += " · " + (FAILURE_STAGES[Number(lane.failureStage)] || "сбой");
-        if (status === "cooldown" && Number(lane.cooldownRemainingMs)) stateWord += " · " + Math.ceil(Number(lane.cooldownRemainingMs) / 1000) + " с";
-        chipRight(stateWord, rowX + rowW - 7, top + 12, color, { font: '7.5px "IBM Plex Mono", monospace', height: 14, pad: 5 });
-        mono(fitText(countsText(lane), rowW - 40, '7px "IBM Plex Mono", monospace'), rowX + 28, top + 26, 7, status === "idle" ? palette.muted : palette.text);
-        line(rowX + 10, top + rowH - 6, rowX + rowW - 10, top + rowH - 6, status === "idle" ? palette.line : color, status === "idle" ? 0.4 : 0.28, 1);
-        if (status !== "idle" && !prefersReduced()) {
-          line(rowX + 10, top + rowH - 6, rowX + rowW - 10, top + rowH - 6, color, 0.8, 1.4, [3, 8], -clock * 30);
-        }
-        if (!prefersReduced() && (status === "selected" || status === "connecting" || status === "race")) {
-          var dotX = rowX + 16 + ((clock * 44 + index * 23) % (rowW - 32));
-          dot(dotX, top + rowH - 6, color, 1.8);
-        }
-        if (Number(lane.cooldownRemainingMs) > 0 && Number(view.cooldownDurationMs) > 0) {
-          var ratio = clamp(Number(lane.cooldownRemainingMs) / Number(view.cooldownDurationMs), 0, 1);
-          line(rowX + 10, top + rowH - 6, rowX + 10 + (rowW - 20) * ratio, top + rowH - 6, palette.warning, 0.9, 2);
-        }
+        mono(gate, x + width / 2, y + 9, layoutMobile ? 9 : 8, color, "center");
       });
     }
 
-    function drawMobileDcs() {
-      var x = 16, y = 510, w = MOBILE_WIDTH - 32, h = 142;
-      panel(x, y, w, h, palette.surface);
-      label("TELEGRAM DC", x + 12, y + 15);
-      label("5 УЗЛОВ", x + w - 12, y + 15);
-      for (var i = 0; i < 5; i += 1) {
-        var activity = (view.dcActivity && view.dcActivity[i]) || { active: 0, media: 0, confirmed: 0 };
-        var top = y + 25 + i * 22;
-        var active = Number(activity.active) || 0;
-        var color = active > 0 ? palette.confirmed : Number(activity.confirmed) > 0 ? palette.accent : palette.muted;
-        roundRect(x + 10, top, w - 20, 18, 4);
-        context.fillStyle = active > 0 ? rgba(color, 0.1) : rgba(palette.surface, 0.2);
-        context.fill();
-        context.strokeStyle = rgba(active > 0 ? color : palette.line, 0.35);
-        context.stroke();
-        dot(x + 19, top + 9, color, 1.7);
-        mono("DC" + (i + 1), x + 27, top + 9, 7.5, active > 0 ? palette.text : palette.muted);
-        mono(active > 0 ? active + " " + plural(active, "сессия", "сессии", "сессий") + (activity.media ? " · media " + activity.media : "") + (activity.confirmed ? " · ✓" + activity.confirmed : "") : "нет сессий",
-          x + w - 18, top + 9, 7.5, palette.muted, "right");
+    function drawCore() {
+      var box = layout.core;
+      var active = stage.dataset.motion === "confirmed";
+      var tone = active ? palette.accent : view.activeConnections ? palette.warning : palette.muted;
+      card(box, "Прокси R2O", active ? palette.accent : null);
+      var x = layoutMobile ? box.x + 76 : box.x + 14;
+      var y = box.y + (layoutMobile ? 56 : 158);
+      var width = box.x + box.w - 14 - x;
+      text(fitText(view.transportLabel || "Маршрут не выбран", width, ROW_TITLE), x, y, ROW_TITLE, palette.text);
+      text(fitText(view.dcLabel || "DC неизвестен", width, ROW_DETAIL), x, y + 20, ROW_DETAIL, palette.muted);
+      var gateY = box.y + (layoutMobile ? 113 : 232);
+      label("Этапы соединения", box.x + 14, gateY - 11);
+      drawGates(box, gateY);
+      if (!layoutMobile) {
+        var dc = dcNumber(snapshot && snapshot.last_success_dc);
+        var detail = dc ? "DC" + dc + " · " + latencyText(snapshot.last_success_latency_ms) : "Ответов пока нет";
+        mono(detail, box.x + 14, box.y + 267, 10, dc ? palette.confirmed : palette.muted);
       }
     }
 
-    function drawMobileLegend() {
-      var y = MOBILE_HEIGHT - 25;
-      line(0, y - 24, MOBILE_WIDTH, y - 24, palette.line, 0.4, 1);
-      dot(19, y, palette.accent2, 2); mono("активен", 27, y, 7.5, palette.muted);
-      dot(94, y, palette.warning, 2); mono("подключение", 102, y, 7.5, palette.muted);
-      dot(180, y, palette.failure, 2); mono("отказ", 188, y, 7.5, palette.muted);
-      dot(232, y, palette.muted, 2); mono("резерв", 240, y, 7.5, palette.muted);
-      if (view.truncated) mono("выборка ограничена", MOBILE_WIDTH - 16, y, 7, palette.muted, "right");
+    function drawRouteRow(lane, index) {
+      var rows = layout.routeRows;
+      var x = rows.x, top = rowTop(index), w = rows.w, h = rows.h;
+      var status = routeStatus(lane);
+      var routeTone = palette[ROUTE_TONES[index]];
+      var color = status === "failed" ? palette.failure : routeTone;
+      var active = status === "selected" || status === "connecting" || status === "race";
+      roundRect(x, top, w, h, 7);
+      context.fillStyle = rgba(status === "idle" ? palette.background : color, status === "idle" ? 0.6 : 0.07);
+      context.fill();
+      context.strokeStyle = rgba(status === "idle" ? palette.line : color, status === "idle" ? 0.74 : 0.34);
+      context.lineWidth = 1;
+      context.stroke();
+
+      dot(x + 13, top + 13, routeTone, 2.2);
+      var state = ROUTE_WORDS[status] || status;
+      if (status === "failed" && Number(lane.failureStage)) state += " · " + (FAILURE_STAGES[Number(lane.failureStage)] || "сбой");
+      if (status === "cooldown" && Number(lane.cooldownRemainingMs)) state += " · " + Math.ceil(Number(lane.cooldownRemainingMs) / 1000) + " с";
+      var chipFont = '9px ' + MONO;
+      var badgeWidth = chipRight(fitText(state, 105, chipFont), x + w - 8, top + 13, color,
+        { font: chipFont, height: 16, pad: 5 });
+      text(fitText(lane.label, w - badgeWidth - 40, ROW_TITLE),
+        x + 23, top + 13, ROW_TITLE, status === "idle" ? palette.muted : palette.text);
+      text(fitText(countsText(lane), w - 35, ROW_DETAIL), x + 23, top + (layoutMobile ? 26 : 29), ROW_DETAIL, palette.muted);
+
+      var rail = top + h - 5;
+      line(x + 10, rail, x + w - 10, rail, active ? color : palette.line, active ? 0.52 : 0.55, 1);
+      if (Number(lane.cooldownRemainingMs) > 0 && Number(view.cooldownDurationMs) > 0) {
+        var ratio = clamp(Number(lane.cooldownRemainingMs) / Number(view.cooldownDurationMs), 0, 1);
+        line(x + 10, rail, x + 10 + (w - 20) * ratio, rail, palette.warning, 0.85, 2);
+      }
     }
 
-    function drawMobile() {
-      drawBackground(MOBILE_WIDTH, MOBILE_HEIGHT);
-      drawMobileClient();
-      drawMobileCore();
-      drawMobileRoutes();
-      drawMobileDcs();
+    function drawRoutes() {
+      card(layout.routes, "Маршруты");
+      view.lanes.forEach(drawRouteRow);
+    }
+
+    function drawDcs() {
+      card(layout.dcs, "Telegram DC");
+      var rows = layout.dcRows;
+      for (var index = 0; index < 5; index += 1) {
+        var activity = (view.dcActivity || [])[index] || {};
+        var active = Number(activity.active) || 0;
+        var media = Number(activity.media) || 0;
+        var confirmed = Number(activity.confirmed) || 0;
+        var color = confirmed ? palette.confirmed : active ? palette.accent : palette.muted;
+        var top = dcTop(index);
+        roundRect(rows.x, top, rows.w, rows.h, 6);
+        context.fillStyle = rgba(active ? color : palette.background, active ? 0.1 : 0.58);
+        context.fill();
+        context.strokeStyle = rgba(active ? color : palette.line, active ? 0.42 : 0.64);
+        context.lineWidth = 1;
+        context.stroke();
+
+        var y = top + (layoutMobile ? 9 : 13);
+        dot(rows.x + 10, y, color, active ? 2.4 : 2);
+        mono("DC" + (index + 1), rows.x + 19, y, 11, active ? palette.text : palette.muted);
+        var detail = active
+          ? (media ? "Медиа " + media : "") + (confirmed ? (media ? " · " : "") + "✓ " + confirmed : "")
+          : "Нет сессий";
+        if (layoutMobile) {
+          var summary = active ? active + " " + plural(active, "сессия", "сессии", "сессий") + (detail ? " · " + detail : "") : detail;
+          text(fitText(summary, rows.w - 70, ROW_DETAIL), rows.x + rows.w - 10, y, ROW_DETAIL, color, "right");
+        } else {
+          mono(active || "—", rows.x + rows.w - 10, y, 12, color, "right");
+          if (detail) text(fitText(detail, rows.w - 28, ROW_DETAIL), rows.x + 19, top + 29, ROW_DETAIL, palette.muted);
+        }
+      }
+    }
+
+    function dispatchPath(index) {
+      var core = layout.core;
+      var y = core.y + (layoutMobile ? core.h - 17 : 100);
+      var x = layoutMobile ? core.x : core.x + core.w;
+      var bus = x + (layoutMobile ? -10 : 15);
+      return [[x, y], [bus, y], [bus, rowCenter(index)], [layout.routeRows.x, rowCenter(index)]];
+    }
+
+    function syncPaths() {
+      var wanted = new Map();
+      var inbound = "idle";
+      for (var flow of flows.values()) {
+        var active = flow.state === "confirmed";
+        var dispatch = "dispatch-" + flow.lane;
+        if (active || !wanted.has(dispatch)) wanted.set(dispatch, [dispatchPath(flow.lane), flow.state, flow.lane]);
+        if (active) {
+          inbound = "confirmed";
+          wanted.set("out-" + flow.lane + "-" + flow.dc, [dcPath(flow.dc, flow.lane), "confirmed", flow.lane]);
+        } else if (inbound === "idle") {
+          inbound = "discovery";
+        }
+      }
+      view.lanes.forEach(function (lane, index) {
+        var key = "dispatch-" + index;
+        if (view.state !== "stale" && routeStatus(lane) === "failed" &&
+            Number.isFinite(lane.failureAgeMs) && lane.failureAgeMs < 1000 && !wanted.has(key)) {
+          wanted.set(key, [dispatchPath(index), "failed", index]);
+        }
+      });
+      wanted.set("in", [ingressPath(), inbound]);
+
+      for (var [key, entry] of paths) {
+        if (!wanted.has(key)) {
+          entry.node.remove();
+          paths.delete(key);
+        }
+      }
+      for (var [key, [points, state, lane]] of wanted) {
+        var d = points.map(function (point, index) {
+          return (index ? "L" : "M") + point[0] + " " + point[1];
+        }).join(" ");
+        var entry = paths.get(key);
+        if (!entry) {
+          var node = canvas.ownerDocument.createElementNS(SVG_NS, "path");
+          node.dataset.link = key;
+          if (lane !== undefined) node.style.setProperty("--tg-link-color", "var(--tg-flow-" + ROUTE_TONES[lane] + ")");
+          links.appendChild(node);
+          entry = { node: node, d: "", length: 0 };
+          paths.set(key, entry);
+        }
+        if (entry.d !== d || !entry.length) {
+          entry.node.setAttribute("d", d);
+          entry.d = d;
+          entry.length = entry.node.getTotalLength();
+        }
+        if (entry.node.dataset.state !== state) entry.node.dataset.state = state;
+      }
     }
 
     function draw() {
       if (!paletteReady) refreshPalette();
       var width = layoutMobile ? MOBILE_WIDTH : WIDTH;
-      var height = layoutMobile ? (MOBILE_BOTTOM - MOBILE_TOP) : DESKTOP_HEIGHT;
-      var offset = layoutMobile ? MOBILE_TOP : DESKTOP_TOP;
-      context.setTransform(
-        canvas.width / width,
-        0,
-        0,
-        canvas.height / height,
-        0,
-        -offset * canvas.height / height
-      );
-      if (layoutMobile) drawMobile(); else drawDesktop();
+      var height = layoutMobile ? MOBILE_HEIGHT : HEIGHT;
+      context.setTransform(canvas.width / width, 0, 0, canvas.height / height, 0, 0);
+      context.clearRect(0, 0, width, height);
+      drawClient();
+      drawCore();
+      drawRoutes();
+      drawDcs();
     }
 
-    function spawnParticle() {
-      if (prefersReduced() || layoutMobile) return;
-      var now = clock;
-      if (now - lastSpawn < 0.22) return;
-      lastSpawn = now;
-      var activeLanes = view.lanes.filter(function (lane) {
-        return lane.counts && (lane.counts.selected || lane.counts.connecting || lane.counts.race);
-      });
-      if (activeLanes.length) {
-        var lane = activeLanes[Math.floor(Math.random() * activeLanes.length)];
-        var color = lane.counts && lane.counts.selected ? laneColor(lane) : palette.warning;
-        if (particles.length < 40) {
-          particles.push({
-            kind: "route", color: color, progress: 0, speed: 0.55 + Math.random() * 0.25,
-            x1: ROW_X + 12, x2: ROW_X + ROW_W - 12,
-            y1: rowTop(lane.index) + ROW_H - 8, y2: rowTop(lane.index) + ROW_H - 8
-          });
-        }
+    function canAnimate() {
+      return !!brush && !destroyed && inView && !document.hidden && !prefersReduced();
+    }
+
+    function emit(pulses, now) {
+      if (!canAnimate()) return;
+      var batches = [];
+      for (var [key, counts] of pulses) {
+        var flow = flows.get(key);
+        if (!flow) continue;
+        var segments = [paths.get("in"), paths.get("dispatch-" + flow.lane)];
+        if (flow.dc) segments.push(paths.get("out-" + flow.lane + "-" + flow.dc));
+        if (segments.some(function (path) { return !path || !path.length; })) continue;
+        var speed = flow.state === "confirmed" ? 0.31 : 0.18;
+        if (counts[0]) batches.push({ key: key, segments: segments, speed: speed, count: counts[0], reverse: false });
+        if (counts[1]) batches.push({ key: key, segments: segments.slice().reverse(), speed: speed, count: counts[1], reverse: true });
       }
-      var sessions = view.sessions.filter(function (session) {
-        return dcNumber(session.dc) !== null && laneIndex(session.selected_transport) >= 0;
-      });
-      if (sessions.length && particles.length < 40 && Math.random() < 0.7) {
-        var session = sessions[Math.floor(Math.random() * sessions.length)];
-        var sessionLane = laneIndex(session.selected_transport);
-        var points = dcPath(session, sessionLane);
-        if (points) {
-          particles.push({
-            kind: "dc", color: session.telegram_response_seen === true ? palette.confirmed : palette.accent,
-            progress: 0, speed: 0.45 + Math.random() * 0.2, points: points
-          });
+      for (var i = 0; i < 4; i += 1) {
+        for (var batch of batches) {
+          if (particles.length >= MAX_PARTICLES) return;
+          if (i >= batch.count) continue;
+          var tone = ROUTE_TONES[Math.floor(Math.random() * ROUTE_TONES.length)];
+          var size = 0.65 + Math.random() * 0.85;
+          particles.push({ key: batch.key, segments: batch.segments, reverse: batch.reverse,
+            speed: batch.speed, tone: tone, size: size, start: now + i * 85 });
         }
-      }
-      if (view.activeConnections > 0 && particles.length < 40 && Math.random() < 0.75) {
-        particles.push({
-          kind: "client", color: palette.accent, progress: 0, speed: 0.85,
-          x1: CLIENT.x + CLIENT.w, x2: CORE.x,
-          y1: 208, y2: 208
-        });
       }
     }
 
-    function tickParticles(delta) {
+    function clearParticles() {
+      if (brush) brush.clearRect(0, 0, layoutMobile ? MOBILE_WIDTH : WIDTH, layoutMobile ? MOBILE_HEIGHT : HEIGHT);
+    }
+
+    function paintParticles(now) {
+      clearParticles();
       for (var i = particles.length - 1; i >= 0; i -= 1) {
         var particle = particles[i];
-        particle.progress += delta * particle.speed;
-        if (!particle.trail) particle.trail = [];
-        particle.trail.push(particlePoint(particle));
-        if (particle.trail.length > 7) particle.trail.shift();
-        if (particle.progress < 1) continue;
-        if (particle.kind === "client") {
-          pulses.push({ x: CORE.x, y: 208, radius: 4, alpha: 0.5, color: particle.color, age: 0 });
-          burstSparks(CORE.x, 208, particle.color);
-        } else if (particle.kind === "route") {
-          pulses.push({ x: ROW_X + ROW_W - 12, y: particle.y1, radius: 3, alpha: 0.4, color: particle.color, age: 0 });
-          burstSparks(ROW_X + ROW_W - 12, particle.y1, particle.color);
-        } else {
-          var end = particle.points[particle.points.length - 1];
-          pulses.push({ x: end[0], y: end[1], radius: 3, alpha: 0.5, color: particle.color, age: 0 });
-          burstSparks(end[0], end[1], particle.color);
+        var flow = flows.get(particle.key);
+        if (!flow) {
+          particles.splice(i, 1);
+          continue;
         }
-        particles.splice(i, 1);
+        var distance = (now - particle.start) * particle.speed;
+        if (distance < 0) continue;
+        var path = null;
+        for (var segment of particle.segments) {
+          if (distance <= segment.length) {
+            path = segment;
+            break;
+          }
+          distance -= segment.length;
+        }
+        if (!path) {
+          particles.splice(i, 1);
+          continue;
+        }
+        var active = flow.state === "confirmed";
+        var head = path.node.getPointAtLength(particle.reverse ? path.length - distance : distance);
+        var color = palette[particle.tone];
+        var size = particle.size;
+        brush.beginPath();
+        var tail = (active ? 15 : 8) * size;
+        for (var j = 0; j <= 3; j += 1) {
+          var offset = Math.max(0, distance - tail + j * tail / 3);
+          var point = path.node.getPointAtLength(particle.reverse ? path.length - offset : offset);
+          if (!j) brush.moveTo(point.x, point.y); else brush.lineTo(point.x, point.y);
+        }
+        brush.lineCap = "round";
+        brush.strokeStyle = rgba(color, active ? 0.2 : 0.09);
+        brush.lineWidth = (active ? 5 : 3) * size;
+        brush.stroke();
+        brush.strokeStyle = rgba(color, active ? 0.91 : 0.42);
+        brush.lineWidth = (active ? 1.8 : 1) * size;
+        brush.stroke();
+        brush.fillStyle = rgba(color, active ? 1 : 0.54);
+        brush.beginPath();
+        brush.arc(head.x, head.y, (active ? 2.15 : 1.25) * size, 0, Math.PI * 2);
+        brush.fill();
       }
-      for (var s = sparks.length - 1; s >= 0; s -= 1) {
-        var spark = sparks[s];
-        spark.age += delta;
-        spark.x += spark.vx * delta;
-        spark.y += spark.vy * delta;
-        spark.vx *= 0.94;
-        spark.vy *= 0.94;
-        if (spark.age >= spark.life) sparks.splice(s, 1);
-      }
-      for (var j = pulses.length - 1; j >= 0; j -= 1) {
-        var pulse = pulses[j];
-        pulse.age += delta;
-        pulse.radius += delta * 18;
-        pulse.alpha -= delta * 1.4;
-        if (pulse.alpha <= 0 || pulse.age > 0.9) pulses.splice(j, 1);
-      }
-      corePulse = Math.max(0, corePulse - delta * 2.2);
-      for (var k = 0; k < dcPulse.length; k += 1) dcPulse[k] = Math.max(0, dcPulse[k] - delta * 2.4);
-      statePulse = Math.max(0, statePulse - delta * 2);
     }
 
     function updateAccessibility() {
@@ -1040,91 +779,128 @@
       var truncated = view.truncated ? " Показана ограниченная выборка сессий." : "";
       canvas.setAttribute("aria-label", "Схема Telegram-прокси: " + view.caption + ". Маршруты: " + routes + ". " + dcs + "." + race + truncated);
       canvas.dataset.state = view.state;
-      if (root) root.dataset.state = view.state;
-      var caption = root && root.querySelector("#tg-flow-caption");
-      if (caption && caption.textContent !== view.caption) caption.textContent = view.caption;
-    }
-
-    function setView(next) {
-      var previous = view;
-      view = next || api.summarizeTelegramFlow(null, "");
-      if (previous && previous.state !== view.state) { statePulse = 1; corePulse = 1; }
-      (view.dcActivity || []).forEach(function (activity, index) {
-        var old = previous && previous.dcActivity && previous.dcActivity[index];
-        if (old && (old.active !== activity.active || old.confirmed !== activity.confirmed || old.media !== activity.media)) dcPulse[index] = 1;
-      });
-      updateAccessibility();
     }
 
     function resize() {
       if (destroyed) return;
-      refreshPalette();
-      var rect = canvas.getBoundingClientRect();
-      var width = Math.max(1, rect.width);
-      var height = Math.max(1, rect.height);
-      layoutMobile = window.innerWidth <= 760;
-      pixelRatio = Math.min(2.5, Math.max(1, window.devicePixelRatio || 1));
-      var backingWidth = Math.round(width * pixelRatio);
-      var backingHeight = Math.round(height * pixelRatio);
-      if (canvas.width !== backingWidth) canvas.width = backingWidth;
-      if (canvas.height !== backingHeight) canvas.height = backingHeight;
+      var width = canvas.getBoundingClientRect().width;
+      if (!width) return;
+      var compact = width < MOBILE_BREAKPOINT;
+      var changed = layoutMobile !== compact;
+      layoutMobile = compact;
+      layout = compact ? MOBILE : DESKTOP;
+      canvas.classList.toggle("is-compact", compact);
+      var height = canvas.getBoundingClientRect().height;
+      var pixelRatio = Math.min(2.5, Math.max(1, window.devicePixelRatio || 1));
+      var backingWidth = Math.round(width * pixelRatio), backingHeight = Math.round(height * pixelRatio);
+      if (!changed && canvas.width === backingWidth && canvas.height === backingHeight && overlay.width === Math.round(width)) return;
+      stopLoop();
+      canvas.width = backingWidth;
+      canvas.height = backingHeight;
+      overlay.width = Math.round(width);
+      overlay.height = Math.round(height);
+      var logicalWidth = compact ? MOBILE_WIDTH : WIDTH;
+      var logicalHeight = compact ? MOBILE_HEIGHT : HEIGHT;
+      var core = layout.core;
+      atmosphere.orb.style.left = (core.x + (compact ? 39 : core.w / 2)) / logicalWidth * 100 + "%";
+      atmosphere.orb.style.top = (core.y + (compact ? 66 : 100)) / logicalHeight * 100 + "%";
+      atmosphere.orb.style.width = (compact ? 52 : 78) / logicalWidth * 100 + "%";
+      links.setAttribute("viewBox", "0 0 " + logicalWidth + " " + logicalHeight);
+      links.setAttribute("preserveAspectRatio", "none");
+      if (brush) brush.setTransform(overlay.width / logicalWidth, 0, 0, overlay.height / logicalHeight, 0, 0);
+      syncPaths();
       draw();
-      startLoop();
     }
 
     function updateFrame(now) {
       frameId = 0;
-      if (destroyed || !inView || document.hidden || prefersReduced()) { draw(); return; }
-      var delta = lastFrame ? Math.min(0.05, (now - lastFrame) / 1000) : 0.016;
-      lastFrame = now;
-      clock += delta;
+      if (!canAnimate()) { stopLoop(); return; }
       if (now - lastDraw >= 33) {
-        spawnParticle();
-        tickParticles(delta);
-        draw();
+        paintParticles(now);
         lastDraw = now;
       }
-      frameId = window.requestAnimationFrame(updateFrame);
+      startLoop();
     }
 
     function startLoop() {
-      if (destroyed || frameId || !inView || document.hidden || prefersReduced()) return;
-      lastFrame = 0;
-      frameId = window.requestAnimationFrame(updateFrame);
+      if (!frameId && particles.length && canAnimate()) frameId = window.requestAnimationFrame(updateFrame);
     }
 
     function stopLoop() {
       if (frameId) window.cancelAnimationFrame(frameId);
       frameId = 0;
+      particles.length = 0;
+      clearParticles();
     }
+
+    var cardKey = "";
 
     function update(nextSnapshot, error) {
       if (destroyed) return null;
+      if (snapshot?.process_started_at !== nextSnapshot?.process_started_at) previousBySession.clear();
       snapshot = nextSnapshot || null;
       maxConnections = Number(snapshot && snapshot.max_connections) || 0;
-      var next = api.summarizeTelegramFlow(snapshot, error || undefined);
-      setView(next);
-      refreshPalette();
-      if (prefersReduced() || !inView || document.hidden) draw();
-      else startLoop();
+      view = api.summarizeTelegramFlow(snapshot, error || undefined);
+      var before = flows;
+      flows = api.motionRoutes(view);
+      var state = "idle";
+      for (var flow of flows.values()) {
+        state = flow.state;
+        if (state === "confirmed") break;
+      }
+      stage.dataset.motion = state;
+      syncPaths();
+      particles = particles.filter(function (particle) { return flows.has(particle.key); });
+      clearParticles();
+      var sessions = view.state === "stale" ? [] : view.sessions;
+      var traffic = api.collectConfirmedTrafficDeltas(previousBySession, sessions);
+      var now = performance.now();
+      var pulses = new Map();
+      for (var [key, flow] of flows) {
+        if (!before.has(key)) pulses.set(key, flow.dc ? [1, 1] : [1, 0]);
+      }
+      for (var delta of traffic) {
+        var key = delta.laneIndex + ":" + delta.dc;
+        var count = delta.bytes >= 4096 ? 4 : delta.bytes >= 512 ? 3 : 1;
+        var counts = pulses.get(key) || [0, 0];
+        var direction = delta.direction === "response" ? 1 : 0;
+        counts[direction] = Math.max(counts[direction], count);
+        pulses.set(key, counts);
+      }
+      emit(pulses, now);
+      startLoop();
+
+      var key = JSON.stringify([view.state, view.caption, view.activeConnections, view.acceptedConnections,
+        view.mediaSessions, view.sessions.length, view.truncated, view.dcLabel, view.transportLabel,
+        view.lanes, view.dcActivity, maxConnections, snapshot?.last_success_dc, snapshot?.last_success_latency_ms]);
+      if (key !== cardKey) {
+        cardKey = key;
+        updateAccessibility();
+        draw();
+      }
       return view;
     }
 
+    function syncVisibility() {
+      var paused = !canAnimate();
+      stage.classList.toggle("is-motion-paused", paused);
+      if (paused) atmosphere.resetOrb();
+    }
+
     function onVisibility() {
-      if (document.hidden) stopLoop(); else { refreshPalette(); startLoop(); }
+      syncVisibility();
+      if (document.hidden) stopLoop();
     }
 
     function onIntersection(entries) {
       inView = Boolean(entries[0] && entries[0].isIntersecting);
-      if (inView) startLoop(); else stopLoop();
+      syncVisibility();
+      if (!inView) stopLoop();
     }
 
     function onMotionChange() {
-      stopLoop();
-      particles.length = 0;
-      pulses.length = 0;
-      sparks.length = 0;
-      if (prefersReduced()) draw(); else startLoop();
+      syncVisibility();
+      if (prefersReduced()) stopLoop();
     }
 
     var resizeObserver = typeof window.ResizeObserver === "function" ? new window.ResizeObserver(resize) : null;
@@ -1141,7 +917,7 @@
     window.addEventListener("resize", resize, { passive: true });
     document.addEventListener("visibilitychange", onVisibility);
     if (reduce && reduce.addEventListener) reduce.addEventListener("change", onMotionChange);
-    if (!intersectionObserver) startLoop();
+    syncVisibility();
 
     return {
       update: update,
@@ -1154,15 +930,22 @@
         if (destroyed) return;
         destroyed = true;
         stopLoop();
+        atmosphere.resetOrb();
         resizeObserver && resizeObserver.disconnect();
         intersectionObserver && intersectionObserver.disconnect();
         themeObserver && themeObserver.disconnect();
         window.removeEventListener("resize", resize);
         document.removeEventListener("visibilitychange", onVisibility);
         if (reduce && reduce.removeEventListener) reduce.removeEventListener("change", onMotionChange);
-        particles.length = 0;
-        pulses.length = 0;
-        sparks.length = 0;
+        previousBySession.clear();
+        paths.clear();
+        flows.clear();
+        links.remove();
+        overlay.remove();
+        atmosphere.field.remove();
+        atmosphere.orb.remove();
+        stage.classList.remove("is-motion-paused");
+        delete stage.dataset.motion;
       }
     };
   }

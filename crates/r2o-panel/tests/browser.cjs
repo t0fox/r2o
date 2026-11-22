@@ -876,10 +876,116 @@ esac
   });
   await evaluate("scrollTo(0, 0)");
   await delay(500);
+  assert.equal(await evaluate("document.querySelector('.tg-flow-canvas').classList.contains('is-compact')"), false,
+    "широкая карта располагает клиент, прокси, маршруты и DC в одном ряду");
   if (captureDir) {
     const screenshot = await call("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(captureDir, "r2o-panel-telegram-1280.png"), Buffer.from(screenshot.data, "base64"));
   }
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+  await evaluate("document.querySelector('.tg-flow-orb').scrollIntoView({ block: 'center', behavior: 'instant' })");
+  await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  await evaluate(`(() => {
+    const canvas = document.querySelector('.tg-flow-canvas');
+    const context = document.querySelector('.tg-flow-particles').getContext('2d');
+    const arc = context.arc;
+    window.routeMapSamples = 0;
+    window.routeMapSizes = new Set();
+    window.routeMapColors = new Set();
+    context.arc = function (...args) {
+      window.routeMapSamples += 1;
+      window.routeMapSizes.add(args[2]);
+      window.routeMapColors.add(this.fillStyle);
+      return arc.apply(this, args);
+    };
+    window.routeMapFixture = { active_connections: 10, accepted_connections: 993, max_connections: 64,
+      active_sessions: Array.from({ length: 10 }, (_, i) => ({ id: i + 1, dc: i === 9 ? 203 : 2,
+        is_media: i === 9, fallback_state: 'selected', fallback_transport: i === 0 ? 'cloudflare_worker' : 'cloudflare_proxy',
+        selected_transport: i === 0 ? 'cloudflare_worker' : 'cloudflare_proxy', stage: 'first_wss_binary_response',
+        telegram_response_seen: true, bytes_from_clients: 0, bytes_from_upstreams: 0 })) };
+    const random = Math.random;
+    const draws = [0.1, 0.15, 0.75, 0.95];
+    let draw = 0;
+    Math.random = () => draws[draw++ % draws.length];
+    try { canvas.closest('.tg-proxy').__flow.update(window.routeMapFixture) } finally { Math.random = random; }
+  })()`);
+  await waitFor(() => evaluate("window.routeMapSamples > 0 && !!document.querySelector('.tg-flow-links [data-link=out-2-2][data-state=confirmed]')"), "поток по SVG-линии подтверждённого маршрута DC2");
+  await waitFor(() => evaluate("window.routeMapColors.size > 1 && window.routeMapSizes.size > 1"),
+    "частицы различаются цветом и размером");
+  await waitFor(() => evaluate(`(() => {
+    const worker = document.querySelector('[data-link="out-1-2"]');
+    const proxy = document.querySelector('[data-link="out-2-2"]');
+    return worker && proxy && getComputedStyle(worker).stroke !== getComputedStyle(proxy).stroke;
+  })()`), "Worker и CF Proxy имеют собственные цвета линий");
+  const orbPoint = await evaluate(`(() => {
+    const rect = document.querySelector('.tg-flow-orb').getBoundingClientRect();
+    return { x: Math.round(rect.left + rect.width * .24), y: Math.round(rect.top + rect.height * .59) };
+  })()`);
+  await waitFor(() => evaluate(`document.elementFromPoint(${orbPoint.x}, ${orbPoint.y})?.classList.contains('tg-orbit-hit')`),
+    "ядро доступно курсору в видимой области");
+  await evaluate(`(() => {
+    const orb = document.querySelector('.tg-flow-orb');
+    window.orbPieces = [...orb.querySelectorAll('g rect')];
+    window.orbRotation = orb.querySelector('.tg-orbit-turn').getAnimations()[0];
+    window.orbPhase = window.orbRotation.currentTime;
+  })()`);
+  await call("Input.dispatchMouseEvent", { type: "mouseMoved", ...orbPoint });
+  await waitFor(() => evaluate(`(() => {
+    const pieces = [...document.querySelectorAll('.tg-orbit-label rect[transform]')];
+    const offsets = pieces.map(piece => piece.transform.baseVal.getItem(0).matrix);
+    return offsets.length > 30 && offsets.some(m => m.e < -20) && offsets.some(m => m.e > 20)
+      && offsets.some(m => m.f < -15) && offsets.some(m => m.f > 15)
+      && !!document.querySelector('.tg-orbit-turn rect[transform]');
+  })()`), "частицы букв и орбит разлетаются в разные стороны");
+  await call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 });
+  assert.equal(await evaluate("!!document.querySelector('.tg-orbit-label rect[transform]')"), true,
+    "после ухода курсора надпись продолжает движение из текущего положения");
+  await waitFor(() => evaluate("!document.querySelector('.tg-flow-orb g rect[transform]')"),
+    "ядро плавно собирается из тех же частиц");
+  assert.equal(await evaluate(`(() => {
+    const orb = document.querySelector('.tg-flow-orb');
+    const pieces = [...orb.querySelectorAll('g rect')];
+    return pieces.length === window.orbPieces.length && pieces.every((piece, i) => piece === window.orbPieces[i])
+      && orb.querySelector('.tg-orbit-turn').getAnimations()[0] === window.orbRotation
+      && window.orbRotation.currentTime > window.orbPhase + 200;
+  })()`), true, "у ядра сохраняются частицы и фаза вращения");
+
+  const pulseDuration = await evaluate(`['in', 'dispatch-2', 'out-2-2'].reduce((ms, link) =>
+    ms + document.querySelector('[data-link="' + link + '"]').getTotalLength() / .31, 120)`);
+  await delay(pulseDuration);
+  await evaluate(`(() => {
+    const path = document.querySelector('[data-link="out-2-2"]');
+    const point = path.getPointAtLength;
+    window.routeOffsets = [];
+    path.getPointAtLength = function (offset) {
+      window.routeOffsets.push(offset);
+      return point.call(this, offset);
+    };
+    window.routePulse = field => {
+      window.routeOffsets.length = 0;
+      window.routeMapFixture.active_sessions[1][field] += 64;
+      path.closest('.tg-proxy').__flow.update(window.routeMapFixture);
+    };
+    window.routePulse('bytes_from_upstreams');
+  })()`);
+  await waitFor(() => evaluate("window.routeOffsets.length >= 10 && window.routeOffsets.at(-1) < window.routeOffsets[0]"),
+    "ответ идёт от DC к клиенту");
+  await delay(pulseDuration);
+  await evaluate("window.routePulse('bytes_from_clients')");
+  await waitFor(() => evaluate("window.routeOffsets.length >= 10 && window.routeOffsets.at(-1) > window.routeOffsets[0]"),
+    "запрос идёт от клиента к DC");
+  if (captureDir) {
+    const clip = await evaluate(`(() => {
+      const r = document.querySelector('.tg-flow-stage').getBoundingClientRect();
+      return { x: r.x + scrollX, y: r.y + scrollY, width: r.width, height: r.height, scale: 1 };
+    })()`);
+    const screenshot = await call("Page.captureScreenshot", { format: "png", clip, captureBeyondViewport: true });
+    fs.writeFileSync(path.join(captureDir, "telegram-route-map-desktop.png"), Buffer.from(screenshot.data, "base64"));
+  }
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+  const samplesBefore = await evaluate("window.routeMapSamples");
+  await delay(240);
+  assert.equal(await evaluate("window.routeMapSamples"), samplesBefore, "настройка уменьшенного движения останавливает поток частиц");
 
   await call("Emulation.setDeviceMetricsOverride", {
     width: 390,
@@ -893,7 +999,7 @@ esac
     overflow: document.documentElement.scrollWidth > innerWidth,
     stats: getComputedStyle(document.querySelector('.tg-stats')).gridTemplateColumns.split(' ').length,
     routes: getComputedStyle(document.querySelector('.tg-route-grid')).gridTemplateColumns.split(' ').length,
-    canvas: !!document.querySelector('.tg-flow-canvas')
+    canvas: !!document.querySelector('.tg-flow-canvas.is-compact')
   }))()`);
   assert.equal(telegramMobile.overflow, false, "Telegram на телефоне: нет горизонтальной прокрутки");
   assert.equal(telegramMobile.stats, 2, "Telegram на телефоне: две колонки статистики");
@@ -902,6 +1008,14 @@ esac
   if (captureDir) {
     const screenshot = await call("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(captureDir, "r2o-panel-telegram-390.png"), Buffer.from(screenshot.data, "base64"));
+    const clip = await evaluate(`(() => {
+      const canvas = document.querySelector('.tg-flow-canvas');
+      canvas.closest('.tg-proxy').__flow.update(window.routeMapFixture);
+      const r = canvas.getBoundingClientRect();
+      return { x: r.x + scrollX, y: r.y + scrollY, width: r.width, height: r.height, scale: 1 };
+    })()`);
+    const map = await call("Page.captureScreenshot", { format: "png", clip, captureBeyondViewport: true });
+    fs.writeFileSync(path.join(captureDir, "telegram-route-map-mobile.png"), Buffer.from(map.data, "base64"));
   }
   await call("Emulation.setDeviceMetricsOverride", {
     width: 1280,

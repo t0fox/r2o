@@ -109,15 +109,15 @@
   --focus: #9fdfe1;
   --tg-flow-line: #2e3a44;
   --tg-flow-text: #e7ecef;
-  --tg-flow-muted: #74818b;
+  --tg-flow-muted: #94a3ad;
   --tg-flow-accent: #7fd0d4;
-  --tg-flow-accent-2: #d7a45b;
   --tg-flow-warning: #c69b59;
   --tg-flow-confirmed: #7faf84;
   --tg-flow-failure: #b96a6a;
   --tg-flow-background: #0e1317;
   --tg-flow-surface: #11161a;
   --tg-flow-direct: #b98a52;
+  --tg-flow-worker: #b7a1ec;
   --tg-flow-cloudflare: #7fd0d4;
   --tg-flow-tcp: #6f98b8;
   --sans: "Manrope", ui-sans-serif, "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -1559,22 +1559,62 @@ main { min-width: 0; }
   gap: 10px; margin-bottom: 10px;
 }
 .tg-flow-head h4 { margin: 0; color: var(--ink-2); font-size: .72rem; letter-spacing: .05em; text-transform: uppercase; }
-.tg-flow-head span { color: var(--ink-4); font-size: .6rem; }
 .tg-flow-stage {
   position: relative; overflow: hidden;
   border: 1px solid var(--line-soft); border-radius: 11px;
   background: var(--bg-deep);
 }
-.tg-flow-stage::before {
-  content: ""; position: absolute; inset: 0; pointer-events: none;
-  background-image:
-    linear-gradient(rgba(210, 220, 230, .035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(210, 220, 230, .035) 1px, transparent 1px);
-  background-size: 38px 38px;
-  mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, #000, transparent 85%);
+.tg-flow-canvas { display: block; width: 100%; height: auto; aspect-ratio: 960 / 310; }
+.tg-flow-canvas.is-compact { aspect-ratio: 360 / 692; }
+.tg-flow-canvas { position: relative; z-index: 1; }
+.tg-flow-links, .tg-flow-particles {
+  position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
 }
-.tg-flow-canvas { display: block; width: 100%; height: auto; aspect-ratio: 960 / 264; }
-.tg-flow-caption { margin: 8px 0 0; color: var(--ink-3); font-size: .66rem; text-align: center; }
+.tg-flow-particles { z-index: 3; }
+.tg-flow-signal-field {
+  position: absolute; inset: -24px; margin: 0; pointer-events: none; user-select: none;
+  color: var(--tg-flow-accent); opacity: .075; font: 400 9px/19px var(--mono);
+  letter-spacing: 4px; mask-image: linear-gradient(120deg, transparent 5%, #000 46%, transparent 94%);
+}
+.tg-flow-orb { position: absolute; z-index: 2; transform: translate(-50%, -50%); overflow: visible; }
+.tg-flow-orb > * { pointer-events: none; }
+.tg-flow-orb > .tg-orbit-hit { fill: transparent; pointer-events: all; }
+.tg-orbit-fill { fill: var(--tg-flow-accent); fill-opacity: .025; }
+.tg-orbit-edge { fill: var(--tg-flow-accent); opacity: .48; }
+.tg-orbit-turn {
+  fill: var(--tg-flow-accent); opacity: .86; transform-box: view-box; transform-origin: center;
+  animation: tg-orbit-rotate 20s linear infinite;
+}
+.tg-orbit-cross { opacity: .6; animation-duration: 26s; animation-direction: reverse; }
+.tg-orbit-label { fill: var(--tg-flow-text); }
+.tg-flow-stage:is([data-motion="confirmed"], [data-motion="discovery"]) .tg-flow-signal-field {
+  opacity: .23; animation: tg-signal-drift 18s ease-in-out infinite alternate;
+}
+.tg-flow-stage:not(:is([data-motion="confirmed"], [data-motion="discovery"])) .tg-orbit-turn,
+.tg-flow-stage.is-motion-paused :is(.tg-flow-signal-field, .tg-orbit-turn) { animation-play-state: paused; }
+@keyframes tg-signal-drift { to { transform: translate3d(20px, 14px, 0); } }
+@keyframes tg-orbit-rotate { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .tg-flow-signal-field, .tg-orbit-turn { animation: none !important; }
+}
+.tg-flow-links path {
+  fill: none; stroke: var(--tg-flow-line); stroke-width: 1.25; stroke-linecap: round;
+  stroke-linejoin: round; opacity: .75; transition: stroke .22s ease, opacity .22s ease;
+}
+.tg-flow-links path[data-state="confirmed"] {
+  stroke: var(--tg-link-color, var(--tg-flow-accent)); opacity: .65; animation: tg-link-in .25s ease-out;
+}
+.tg-flow-links path[data-state="discovery"] { stroke: var(--tg-link-color, var(--tg-flow-accent)); stroke-dasharray: 2 4; opacity: .38; }
+.tg-flow-links path[data-state="failed"] { stroke: var(--tg-flow-failure); animation: tg-link-fault .9s ease-out both; }
+@keyframes tg-link-in { from { opacity: .12; } }
+@keyframes tg-link-fault { from { opacity: 1; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .tg-flow-links path { animation: none; transition: none; }
+}
+.tg-flow-caption { margin: 10px 0 0; color: var(--ink-2); }
+.tg-flow-details { margin-top: 6px; font-size: .74rem; color: var(--ink-2); }
+.tg-flow-details summary { cursor: pointer; width: fit-content; max-width: 100%; }
+.tg-flow-sessions { display: grid; gap: 4px; margin: 6px 0 0; padding-inline-start: 1rem; overflow-wrap: anywhere; }
 
 .tg-routes {
   padding: 14px; border: 1px solid var(--line-soft); border-radius: 14px;
@@ -1666,9 +1706,7 @@ main { min-width: 0; }
   .tg-actions { justify-content: flex-start; }
   .tg-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
   .tg-route-grid { grid-template-columns: 1fr; }
-  .tg-routes-head span, .tg-flow-head span { display: none; }
-  .tg-flow-stage { overflow: hidden; }
-  .tg-flow-canvas { width: 100%; aspect-ratio: 420 / 590; }
+  .tg-routes-head span { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .tg-proxy *, .tg-proxy *::before, .tg-proxy *::after {
@@ -2547,7 +2585,7 @@ body[data-stale="true"] .lamp::after { opacity: 0; }
 .tg-stat { margin: 0; border: 0; border-radius: 0; background: transparent; border-inline-end: 1px solid var(--line-soft); }
 .tg-stat:last-child { border: 0; }
 .tg-stat:hover { transform: none; border-color: var(--line-soft); }
-.tg-stat-label, .tg-flow-head span { color: var(--ink-2); }
+.tg-stat-label { color: var(--ink-2); }
 .tg-flow-caption { font-size: .74rem; }
 .tg-check-details { margin-top: 0; }
 .upd-knob { pointer-events: none; }
