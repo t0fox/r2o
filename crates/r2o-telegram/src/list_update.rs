@@ -220,7 +220,7 @@ pub const SOURCES: &[ListSource] = &[
         name: "meta-rezmoss-ip",
         kind: ListKind::Cidr,
         parts: &[
-            "https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/meta/meta.netset",
+            "https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/meta/meta_ips_merged.txt",
         ],
         min_lines: 3,
         max_lines: 2048,

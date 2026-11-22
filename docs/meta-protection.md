@@ -9,7 +9,7 @@
 | v2fly/domain-list-community | Список Meta и его включения Facebook, Instagram, Messenger, Oculus, Threads и WhatsApp |
 | tickcount/iplists | Домены Meta и дополнительный список CIDR |
 | itdoginfo/allow-domains | Домены Meta и справочные сети IPv4/IPv6 |
-| rezmoss/cloud-provider-ip-addresses | Справочные CIDR Meta в формате netset |
+| rezmoss/cloud-provider-ip-addresses | Справочные CIDR Meta из плоского текстового экспорта |
 | amartinawi/whatsapp-domains | Имена WhatsApp. Шаблоны отбрасываются |
 | Dushnilin/tachyon-lists | Домены Meta и Quest, справочные CIDR |
 | ipverse/as-ip-blocks | Объявленные сети AS32934, AS63293 и AS54115 отдельно для IPv4 и IPv6 |

@@ -478,10 +478,11 @@ fn control_routes_reject_get() {
 
 #[test]
 fn root_serves_panel_layout_without_non_d2o_settings_controls() {
-    let (status, content_type, body) = request(
-        &Config::default(),
-        "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    );
+    let temp = TempDir::new();
+    let mut config = Config::default();
+    config.asset_dir = temp.file("missing-assets");
+    let (status, content_type, body) =
+        request(&config, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(status, 200);
     assert!(content_type.starts_with("text/html"));
     assert!(body.contains("<!doctype html") || body.contains("<!DOCTYPE html"));
@@ -1335,7 +1336,9 @@ fn status_merges_independent_controller_live_snapshots() {
 
 #[test]
 fn static_assets_use_etag_and_return_not_modified() {
-    let config = Config::default();
+    let temp = TempDir::new();
+    let mut config = Config::default();
+    config.asset_dir = temp.file("missing-assets");
     let first = handle_request(
         &config,
         b"GET /assets/panel.js HTTP/1.1\r\nHost: localhost\r\n\r\n",

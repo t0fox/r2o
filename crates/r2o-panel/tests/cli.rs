@@ -85,6 +85,8 @@ fn cli_starts_http_panel_writes_health_and_stops_cleanly() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-panel"))
         .args(["serve", "--listen", &address.to_string(), "--health-file"])
         .arg(&health)
+        .arg("--config")
+        .arg(temp.file("missing-config"))
         .arg("--state-dir")
         .arg(temp.file("state"))
         .arg("--assets")

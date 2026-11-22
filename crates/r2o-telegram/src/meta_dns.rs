@@ -38,6 +38,10 @@ pub trait MetaNetwork: Send + Sync {
 }
 
 pub trait Ndm: Send {
+    fn requires_exclusive_hostname(&self) -> bool {
+        false
+    }
+
     fn supports_address(&self, _address: IpAddr) -> bool {
         true
     }
@@ -241,6 +245,10 @@ impl Default for SystemNdm {
 }
 
 impl Ndm for SystemNdm {
+    fn requires_exclusive_hostname(&self) -> bool {
+        matches!(self.backend, NdmBackend::Ndmc(_))
+    }
+
     fn supports_address(&self, address: IpAddr) -> bool {
         // Синтаксис статического AAAA в ndmc зависит от прошивки.
         address.is_ipv4() || matches!(self.backend, NdmBackend::Dnsmasq)
@@ -756,6 +764,13 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
 
         let mut add_failed = false;
         for (host, addresses) in &filtered {
+            // На Keenetic не меняем имя, для которого есть пользовательская запись.
+            if view.ndm.requires_exclusive_hostname()
+                && configured_host_addresses(view.config()?, host)
+                    .any(|ip| !next.contains(&(host.clone(), ip.to_string())))
+            {
+                continue;
+            }
             for address in addresses {
                 if !view.ndm.supports_address(*address) {
                     continue;
@@ -1001,13 +1016,23 @@ pub(crate) fn is_meta_ip(ranges: &[(IpAddr, u8)], address: IpAddr) -> bool {
 }
 
 fn config_has_pair(config: &str, host: &str, address: IpAddr) -> bool {
-    config.lines().any(|line| {
+    configured_host_addresses(config, host).any(|found| found == address)
+}
+
+fn configured_host_addresses<'a>(
+    config: &'a str,
+    host: &'a str,
+) -> impl Iterator<Item = IpAddr> + 'a {
+    config.lines().filter_map(move |line| {
         let mut fields = line.split_ascii_whitespace();
-        matches!(
-            (fields.next(), fields.next(), fields.next(), fields.next()),
-            (Some("ip"), Some("host"), Some(found_host), Some(found_ip))
-                if found_host == host && found_ip.parse::<IpAddr>().ok() == Some(address)
-        )
+        let (Some("ip"), Some("host"), Some(name), Some(address)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        name.eq_ignore_ascii_case(host)
+            .then(|| address.parse().ok())
+            .flatten()
     })
 }
 
@@ -1900,6 +1925,7 @@ mod tests {
     #[derive(Default)]
     struct FakeNdm {
         records: BTreeSet<(String, IpAddr)>,
+        exclusive_hostname: bool,
         fail_add: bool,
         empty_config: bool,
         saves: usize,
@@ -1907,6 +1933,10 @@ mod tests {
     }
 
     impl Ndm for FakeNdm {
+        fn requires_exclusive_hostname(&self) -> bool {
+            self.exclusive_hostname
+        }
+
         fn running_config(&mut self) -> Result<String, String> {
             if self.empty_config {
                 return Ok(String::new());
@@ -2455,6 +2485,30 @@ esac
         );
         manager.remove_owned().unwrap();
         assert!(manager.ndm.records.is_empty());
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn keenetic_user_hostname_is_preserved_even_when_the_address_differs() {
+        let paths = paths("keenetic-user-override");
+        let user = ("WWW.FACEBOOK.COM".into(), "203.0.113.5".parse().unwrap());
+        let ndm = FakeNdm {
+            records: BTreeSet::from([user.clone()]),
+            exclusive_hostname: true,
+            ..FakeNdm::default()
+        };
+        let mut network = FakeNetwork::with_answers(BTreeMap::from([answer(
+            "www.facebook.com",
+            &["157.240.9.180"],
+        )]));
+        network.default_verified = false;
+        network
+            .verified
+            .insert(("www.facebook.com".into(), "157.240.9.180".parse().unwrap()));
+        let mut manager = manager(network, ndm, paths.clone());
+        manager.refresh().await.unwrap();
+        assert_eq!(manager.ndm.records, BTreeSet::from([user]));
+        assert!(read_manifest(&paths.manifest).unwrap().is_empty());
         std::fs::remove_dir_all(paths.r2o_dir).unwrap();
     }
 
