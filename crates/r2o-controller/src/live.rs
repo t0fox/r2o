@@ -728,10 +728,12 @@ fn r2o_live_dns_services(
                 })
                 .map(|binding| binding.plan_id.clone())
                 .unwrap_or_default();
-            let detected_reason = if resolved_ip.is_empty() {
-                "Конфигурация найдена; ожидается наблюдение реального адреса endpoint."
+            let detected_reason = if !resolved_ip.is_empty() {
+                "Адрес DNS-сервера найден. Проверка ожидает очереди."
+            } else if service.bootstrap_dns.is_empty() {
+                "Для проверки нужен IP DNS-сервера. Bootstrap-адрес отсутствует или не распознан."
             } else {
-                "Адрес endpoint обнаружен; автоматическая проверка ожидает очереди."
+                "Проверка через настроенный bootstrap-резолвер ожидает очереди."
             };
 
             let task = tasks
@@ -2101,6 +2103,12 @@ mod tests {
         assert_eq!(section[0]["protocol"], "doh");
         assert_eq!(section[0]["path"], "/dns-query");
         assert_eq!(section[0]["state"], "detected");
+        assert!(
+            section[0]["status_reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("Для проверки нужен IP DNS-сервера.")
+        );
         assert_eq!(section[0]["known_plan_id"], "plan-dns");
         assert_eq!(section[0]["resolved_ip"], "");
         assert_eq!(section[0]["plan_applied_at"], Value::Null);

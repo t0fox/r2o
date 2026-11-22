@@ -512,7 +512,20 @@ pub fn dns_response_address(
     None
 }
 
-/// C `dns_query_one`: UDP/53, один A или AAAA запрос, SO_RCVTIMEO 400 мс,
+fn bootstrap_endpoint(value: &str) -> Option<SocketAddr> {
+    let ip = value
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(value);
+    if let Ok(ip) = ip.parse::<IpAddr>() {
+        return Some(SocketAddr::new(ip, 53));
+    }
+    let endpoint = value.parse::<SocketAddr>().ok()?;
+    (endpoint.port() != 0 && !matches!(endpoint, SocketAddr::V6(addr) if addr.scope_id() != 0))
+        .then_some(endpoint)
+}
+
+/// C `dns_query_one`: один UDP-запрос A или AAAA, SO_RCVTIMEO 400 мс,
 /// SO_MARK при mark != 0.
 #[cfg(unix)]
 pub fn dns_query_one(host: &str, server: &str, qtype: u16, mark: u32) -> Option<std::net::IpAddr> {
@@ -520,9 +533,8 @@ pub fn dns_query_one(host: &str, server: &str, qtype: u16, mark: u32) -> Option<
     use std::time::Duration;
 
     let qname = dns_name_encode(host)?;
-    let server_ip: std::net::IpAddr = server.parse().ok()?;
-    let peer = std::net::SocketAddr::new(server_ip, 53);
-    let bind = if server_ip.is_ipv4() {
+    let peer = bootstrap_endpoint(server)?;
+    let bind = if peer.is_ipv4() {
         std::net::SocketAddr::from(([0, 0, 0, 0], 0))
     } else {
         std::net::SocketAddr::from(([0u16; 8], 0))
@@ -823,40 +835,27 @@ pub fn parse_https_dns_proxy(text: &str) -> Vec<DnsService> {
     items
 }
 
-/// C `dnsproxy_bootstrap_add`: numeric IP или `IP:53`/`[IPv6]:53`, дедуп.
-fn add_bootstrap_ip(out: &mut String, value: &str) {
-    let host = if let Some(rest) = value.strip_prefix('[') {
-        let Some(close) = rest.find(']') else {
-            return;
-        };
-        let after = &rest[close + 1..];
-        if !after.is_empty() && after != ":53" {
-            return;
-        }
-        &rest[..close]
-    } else if let Some((host, port)) = value.rsplit_once(':') {
-        if value.contains('.') && port == "53" {
-            host
-        } else {
-            value
-        }
-    } else {
-        value
-    };
-    if host.is_empty() || host.len() >= 64 || host.parse::<IpAddr>().is_err() {
+/// Сохраняет настроенный порт, а запись с портом 53 хранит как IP.
+fn add_bootstrap_endpoint(out: &mut String, value: &str) {
+    let Some(endpoint) = bootstrap_endpoint(value) else {
         return;
-    }
-    if out.split(',').any(|known| known == host) {
+    };
+    let address = if endpoint.port() == 53 {
+        endpoint.ip().to_string()
+    } else {
+        endpoint.to_string()
+    };
+    if out.split(',').any(|known| known == address) {
         return;
     }
     let separator = usize::from(!out.is_empty());
-    if out.len() + separator + host.len() >= DNS_BOOTSTRAP_MAX {
+    if out.len() + separator + address.len() >= DNS_BOOTSTRAP_MAX {
         return;
     }
     if separator != 0 {
         out.push(',');
     }
-    out.push_str(host);
+    out.push_str(&address);
 }
 
 /// C `read_dnsproxy`: `/etc/config/dnsproxy`.
@@ -887,7 +886,7 @@ pub fn parse_dnsproxy(text: &str) -> Vec<DnsService> {
             continue;
         }
         if servers && let Some(value) = uci_value(line, "list", "bootstrap") {
-            add_bootstrap_ip(&mut bootstrap, &value);
+            add_bootstrap_endpoint(&mut bootstrap, &value);
         }
     }
     for key in ["upstream", "fallback"] {
@@ -935,7 +934,7 @@ pub fn parse_doqd(text: &str, source: &str) -> Vec<DnsService> {
     let mut bootstrap = String::new();
     for (key, value) in directives() {
         if key == "bootstrap" {
-            add_bootstrap_ip(&mut bootstrap, value);
+            add_bootstrap_endpoint(&mut bootstrap, value);
         }
     }
     let mut items = Vec::new();
@@ -1432,6 +1431,48 @@ config dnsproxy 'global'
         assert_eq!(services[1].host, "dot.example");
         assert_eq!(services[1].port, 853);
         assert_eq!(services[1].bootstrap_dns, "1.1.1.1,2001:db8::1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dnsproxy_использует_настроенный_порт_bootstrap() {
+        use std::net::{IpAddr, UdpSocket};
+        use std::time::Duration;
+
+        for host in ["127.0.0.1", "::1"] {
+            let server = UdpSocket::bind((host, 0)).unwrap();
+            server
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let endpoint = server.local_addr().unwrap();
+            assert_ne!(endpoint.port(), 53);
+            let services = super::parse_dnsproxy(&format!(
+                "config dnsproxy 'servers'\n\
+                 list bootstrap '{endpoint}'\n\
+                 list bootstrap '{endpoint}'\n\
+                 list bootstrap '[::1]:0'\n\
+                 list bootstrap '127.0.0.1:65536'\n\
+                 list upstream 'https://bootstrap.example/dns-query'\n"
+            ));
+            let service = &services[0];
+            assert_eq!(service.bootstrap_dns, endpoint.to_string());
+            let responder = std::thread::spawn(move || {
+                let mut query = [0; 512];
+                let (length, client) = server.recv_from(&mut query).unwrap();
+                let id = u16::from_be_bytes(query[..2].try_into().unwrap());
+                let (response, qname) = a_response(id, false, 0, 1);
+                assert_eq!(&query[12..length - 4], qname);
+                server.send_to(&response, client).unwrap();
+            });
+            let result = super::dns_resolve_bootstrap_for_family(
+                &service.host,
+                &service.bootstrap_dns,
+                0,
+                Some(4),
+            );
+            responder.join().unwrap();
+            assert_eq!(result, Some(IpAddr::from([203, 0, 113, 7])));
+        }
     }
 
     #[test]
