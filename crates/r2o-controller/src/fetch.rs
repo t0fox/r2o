@@ -1843,15 +1843,17 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     let dot = r2o_fetch_dot_query();
     let doh = r2o_fetch_doh_query();
     let dot_query = dot.as_ref().map(|query| query.body.as_slice());
-    let doh_query = doh.as_ref().map(|query| query.body.as_slice());
+    let doh_query = doh.as_ref().map(|query| &query.body);
+    let doh_path = doh_query
+        .map(|query| query.request_path(&options.path))
+        .transpose()?;
     let pin = dot
         .as_ref()
-        .or(doh.as_ref())
-        .and_then(|query| query.spki_pin);
+        .map(|query| query.spki_pin)
+        .or_else(|| doh.as_ref().map(|query| query.spki_pin))
+        .flatten();
     let dns_probe = dot_query.is_some() || doh_query.is_some();
-    let (mut connection, socket) = if let Some(query) =
-        doh_query.as_deref().filter(|_| ech.is_none())
-    {
+    let (mut connection, socket) = if let Some(query) = doh_query.filter(|_| ech.is_none()) {
         let session = crate::dns_health::connect_doh_tls(
             socket,
             &options.name,
@@ -1871,8 +1873,13 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                         .ok_or("срок HTTP-шага слишком велик")?,
                     None => deadline,
                 };
-                let exchange =
-                    stream.exchange(&options.name, options.port, &options.path, query, deadline);
+                let exchange = stream.exchange(
+                    &options.name,
+                    options.port,
+                    doh_path.as_deref().unwrap_or(&options.path),
+                    query,
+                    deadline,
+                );
                 let health = exchange.health;
                 let local_port = health
                     .local_endpoint
@@ -2118,7 +2125,10 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         });
     }
 
-    let mut request_path = options.path.clone();
+    let mut request_path = doh_path.map_or_else(|| options.path.clone(), |path| path.into_owned());
+    let authority = doh_query
+        .map(|_| crate::dns_health::doh_authority(&options.name, options.port))
+        .transpose()?;
     let root_probe = options.path == "/";
     let mut redirects = 0;
     // C `d2k_verify_doh_on`: DoH-запрос того же потока. Обычный GET его не
@@ -2127,7 +2137,10 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     // ресурсный путь. В R2O корневой зонд представлен как "/", поэтому
     // Gateway-протокол проверяется для этого же пути.
     let voice_websocket = r2o_is_discord_voice_websocket(&options.name, options.port);
-    if root_probe && (options.name.eq_ignore_ascii_case("gateway.discord.gg") || voice_websocket) {
+    if !dns_probe
+        && root_probe
+        && (options.name.eq_ignore_ascii_case("gateway.discord.gg") || voice_websocket)
+    {
         let gateway_deadline = match phase_timeout {
             Some(timeout) => Instant::now()
                 .checked_add(timeout)
@@ -2203,10 +2216,10 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             None => deadline,
         };
         let request = build_request(
-            &options.name,
+            authority.as_deref().unwrap_or(&options.name),
             &request_path,
             r2o_encoding,
-            doh_query.as_deref(),
+            doh_query,
         );
         set_deadline(&stream.sock.socket, response_deadline)?;
         stream
@@ -2461,22 +2474,18 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             }
         }
         let doh_probe = doh_query.is_some();
-        let dns_reply = if let Some(query) = doh_query.as_ref() {
-            let id = query
-                .get(..2)
-                .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
-                .unwrap_or(0);
-            let type_ok = header_value(headers, b"content-type").is_some_and(|value| {
-                trim_ascii(value.split(|byte| *byte == b';').next().unwrap_or_default())
-                    .eq_ignore_ascii_case(b"application/dns-message")
-            });
+        let dns_reply = if let Some(query) = doh_query {
+            let mut types = header_values(headers, b"content-type");
+            let type_ok = types.next().is_some_and(|value| query.accepts_type(value))
+                && types.next().is_none();
             complete
                 && parser.status() == 200
                 && type_ok
                 && peer_name_ok == Some(true)
-                && r2o_doh_body_tap
-                    .as_ref()
-                    .is_some_and(|tap| crate::dns_health::dns_probe_reply(tap.prefix(), id))
+                && r2o_doh_body_tap.as_ref().is_some_and(|tap| {
+                    tap.prefix().len() as u64 == parser.body_bytes()
+                        && query.validate_reply(tap.prefix())
+                })
         } else {
             false
         };
@@ -3721,30 +3730,32 @@ fn r2o_gateway_websocket_exchange(
 }
 
 #[derive(Clone)]
-struct DnsTcpQuery {
-    body: Vec<u8>,
+struct DnsTcpQuery<T> {
+    body: T,
     spki_pin: Option<[u8; 32]>,
 }
 
 thread_local! {
-    /// DoH-запрос текущего потока зонда. Ставится перед проверкой DNS-endpoint
-    /// и снимается сразу после: тот же `fetch`, но POST `application/dns-message`.
-    static DOH_QUERY: std::cell::RefCell<Option<DnsTcpQuery>> = const {
+    /// DoH-запрос текущего потока зонда, привязанный к профилю DNS-службы.
+    static DOH_QUERY: std::cell::RefCell<Option<DnsTcpQuery<crate::dns_health::DohQuery>>> = const {
         std::cell::RefCell::new(None)
     };
     /// DoT-кадр (2-байтная длина + DNS message) текущего потока зонда.
-    static DOT_QUERY: std::cell::RefCell<Option<DnsTcpQuery>> = const {
+    static DOT_QUERY: std::cell::RefCell<Option<DnsTcpQuery<Vec<u8>>>> = const {
         std::cell::RefCell::new(None)
     };
 }
 
 /// C `d2k_verify_doh_on`: включить DoH-запрос для следующего `fetch` в этом
 /// потоке. `None` — обычный GET.
-pub fn r2o_fetch_doh_query_set(query: Option<Vec<u8>>, spki_pin: Option<[u8; 32]>) {
+pub fn r2o_fetch_doh_query_set(
+    query: Option<crate::dns_health::DohQuery>,
+    spki_pin: Option<[u8; 32]>,
+) {
     DOH_QUERY.with(|slot| *slot.borrow_mut() = query.map(|body| DnsTcpQuery { body, spki_pin }));
 }
 
-fn r2o_fetch_doh_query() -> Option<DnsTcpQuery> {
+fn r2o_fetch_doh_query() -> Option<DnsTcpQuery<crate::dns_health::DohQuery>> {
     DOH_QUERY.with(|slot| slot.borrow().clone())
 }
 
@@ -3753,7 +3764,7 @@ pub fn r2o_fetch_dot_query_set(query: Option<Vec<u8>>, spki_pin: Option<[u8; 32]
     DOT_QUERY.with(|slot| *slot.borrow_mut() = query.map(|body| DnsTcpQuery { body, spki_pin }));
 }
 
-fn r2o_fetch_dot_query() -> Option<DnsTcpQuery> {
+fn r2o_fetch_dot_query() -> Option<DnsTcpQuery<Vec<u8>>> {
     DOT_QUERY.with(|slot| slot.borrow().clone())
 }
 
@@ -3761,22 +3772,12 @@ fn build_request(
     name: &str,
     path: &str,
     encoding: R2oFetchEncoding,
-    doh_query: Option<&[u8]>,
+    doh_query: Option<&crate::dns_health::DohQuery>,
 ) -> Vec<u8> {
-    let mut request = Vec::with_capacity(name.len() + path.len() + 256);
     if let Some(query) = doh_query {
-        request.extend_from_slice(b"POST ");
-        request.extend_from_slice(path.as_bytes());
-        request.extend_from_slice(b" HTTP/1.1\r\nHost: ");
-        request.extend_from_slice(name.as_bytes());
-        request.extend_from_slice(
-            b"\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: ",
-        );
-        request.extend_from_slice(query.len().to_string().as_bytes());
-        request.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
-        request.extend_from_slice(query);
-        return request;
+        return query.http1_request(name, path, "keep-alive");
     }
+    let mut request = Vec::with_capacity(name.len() + path.len() + 256);
     request.extend_from_slice(b"GET ");
     request.extend_from_slice(path.as_bytes());
     request.extend_from_slice(b" HTTP/1.1\r\nHost: ");
@@ -5272,7 +5273,7 @@ mod tests {
             "dns.example",
             "/dns-query",
             R2oFetchEncoding::Identity,
-            Some(&query),
+            Some(&crate::dns_health::DohQuery::Message(query.clone())),
         );
         assert!(request.starts_with(b"POST /dns-query HTTP/1.1\r\nHost: dns.example\r\n"));
         assert!(
@@ -5294,10 +5295,13 @@ mod tests {
         assert!(request.ends_with(&query));
         // Потокобезопасный setter нужен потому, что fetch идёт в worker'е
         // Discovery; после запроса он обязан сброситься.
-        r2o_fetch_doh_query_set(Some(query.clone()), None);
+        r2o_fetch_doh_query_set(
+            Some(crate::dns_health::DohQuery::Message(query.clone())),
+            None,
+        );
         assert_eq!(
             r2o_fetch_doh_query().map(|query| query.body),
-            Some(query.clone())
+            Some(crate::dns_health::DohQuery::Message(query.clone()))
         );
         let mut options = FetchOptions {
             name: "dns.example".into(),
@@ -5405,7 +5409,10 @@ mod tests {
             wire_len: None,
             mark: None,
         };
-        r2o_fetch_doh_query_set(Some(query.clone()), None);
+        r2o_fetch_doh_query_set(
+            Some(crate::dns_health::DohQuery::Message(query.clone())),
+            None,
+        );
         let result = r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots);
         r2o_fetch_doh_query_set(None, None);
         let request = request_receiver.recv().expect("получить DoH-запрос");
@@ -5455,7 +5462,7 @@ mod tests {
             wire_len: None,
             mark: None,
         };
-        r2o_fetch_doh_query_set(Some(query), None);
+        r2o_fetch_doh_query_set(Some(crate::dns_health::DohQuery::Message(query)), None);
         let result =
             r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots_invalid);
         r2o_fetch_doh_query_set(None, None);
@@ -5468,7 +5475,7 @@ mod tests {
 
     #[test]
     fn doh_http2_health_and_connected_fetch_require_the_dns_reply() {
-        use crate::dns_health::{DNS_QUERY_ID_DOH, DnsHealthFailure, dns_query_message};
+        use crate::dns_health::{DNS_QUERY_ID_DOH, DnsHealthFailure, DohQuery, dns_query_message};
         use bytes::Bytes;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
         use sha2::{Digest, Sha256};
@@ -5499,6 +5506,7 @@ mod tests {
         dns_reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 8]);
         let mut wrong_id = dns_reply.clone();
         wrong_id[1] ^= 1;
+        let json_reply = r#"{"Status":0,"TC":false,"Question":[{"name":"example.com.","type":1}],"Answer":[{"name":"example.com.","type":1,"data":"192.0.2.8"}]}"#;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -5515,13 +5523,22 @@ mod tests {
                         let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                         let (connection, _) = listener.accept().await.unwrap();
                         assert!(acceptor.accept(connection).await.is_err());
-                        for (status, body) in [
-                            (200, dns_reply.clone()),
-                            (200, wrong_id.clone()),
-                            (403, Vec::new()),
-                            (200, vec![0; crate::dns_health::DOH_BODY_MAX + 1]),
-                            (200, dns_reply),
-                            (200, wrong_id),
+                        for (json, status, body) in [
+                            (false, 200, dns_reply.clone()),
+                            (false, 200, wrong_id.clone()),
+                            (false, 403, Vec::new()),
+                            (false, 200, vec![0; crate::dns_health::DOH_BODY_MAX + 1]),
+                            (false, 200, dns_reply),
+                            (false, 200, wrong_id),
+                            (true, 200, json_reply.as_bytes().to_vec()),
+                            (true, 200, json_reply.as_bytes().to_vec()),
+                            (
+                                true,
+                                200,
+                                json_reply
+                                    .replacen("example.com.", "wrong.example.", 1)
+                                    .into_bytes(),
+                            ),
                         ] {
                             let (socket, _) = listener.accept().await.unwrap();
                             let tls = acceptor.accept(socket).await.unwrap();
@@ -5529,17 +5546,36 @@ mod tests {
                             let mut connection = h2::server::handshake(tls).await.unwrap();
                             let (request, mut respond) =
                                 connection.accept().await.unwrap().unwrap();
-                            assert_eq!(request.method(), http::Method::POST);
                             assert_eq!(
                                 request.uri().authority().unwrap().as_str(),
                                 format!("localhost:{}", address.port())
                             );
-                            assert_eq!(request.uri().path_and_query().unwrap().as_str(), path);
-                            assert_eq!(
-                                request.headers()[http::header::CONTENT_TYPE],
-                                "application/dns-message"
-                            );
-                            let expected = expected_query.clone();
+                            let expected = if json {
+                                assert_eq!(request.method(), http::Method::GET);
+                                assert_eq!(
+                                    request.uri().path_and_query().unwrap().as_str(),
+                                    format!("{path}&name=example.com&type=1")
+                                );
+                                assert_eq!(
+                                    request.headers()[http::header::ACCEPT],
+                                    "application/dns-json"
+                                );
+                                assert!(
+                                    request
+                                        .headers()
+                                        .get(http::header::CONTENT_LENGTH)
+                                        .is_none()
+                                );
+                                Vec::new()
+                            } else {
+                                assert_eq!(request.method(), http::Method::POST);
+                                assert_eq!(request.uri().path_and_query().unwrap().as_str(), path);
+                                assert_eq!(
+                                    request.headers()[http::header::CONTENT_TYPE],
+                                    "application/dns-message"
+                                );
+                                expected_query.clone()
+                            };
                             let reply_task = tokio::spawn(async move {
                                 let mut received = Vec::new();
                                 let mut stream = request.into_body();
@@ -5549,7 +5585,14 @@ mod tests {
                                 assert_eq!(received, expected);
                                 let response = http::Response::builder()
                                     .status(status)
-                                    .header(http::header::CONTENT_TYPE, "application/dns-message")
+                                    .header(
+                                        http::header::CONTENT_TYPE,
+                                        if json {
+                                            "application/dns-json"
+                                        } else {
+                                            "application/dns-message"
+                                        },
+                                    )
                                     .body(())
                                     .unwrap();
                                 respond
@@ -5608,10 +5651,26 @@ mod tests {
             wire_len: None,
             mark: None,
         };
-        for valid in [true, false] {
+        let mut json_service = r2k_core::dns_config::parse_keenetic(&format!(
+            "proxy-https:\nserver-https:\n  uri: https://localhost:{}{path}\n  format: json\n",
+            address.port(),
+        ))
+        .remove(0);
+        json_service.host = address.ip().to_string();
+        for (query, valid) in [
+            (DohQuery::Message(query.clone()), true),
+            (DohQuery::Message(query.clone()), false),
+            (DohQuery::Json, true),
+            (DohQuery::Json, false),
+        ] {
+            if query == DohQuery::Json && valid {
+                let result = probe(&json_service);
+                assert!(result.dns_reply, "{result:?}");
+                assert!(result.reason.contains("JSON (HTTP/2)"));
+            }
             let socket = TcpStream::connect(address).unwrap();
             let local_port = socket.local_addr().unwrap().port();
-            r2o_fetch_doh_query_set(Some(query.clone()), Some(pin));
+            r2o_fetch_doh_query_set(Some(query), Some(pin));
             let fetch = r2o_fetch_connected_stream_with_roots_and_encoding(
                 &options,
                 socket,
@@ -5631,7 +5690,10 @@ mod tests {
             assert_eq!(fetch.application_verified, valid);
         }
         let socket = TcpStream::connect(address).unwrap();
-        r2o_fetch_doh_query_set(Some(query), Some([0; 32]));
+        r2o_fetch_doh_query_set(
+            Some(crate::dns_health::DohQuery::Message(query)),
+            Some([0; 32]),
+        );
         let rejected = r2o_fetch_connected_stream_with_roots_and_encoding(
             &options,
             socket,

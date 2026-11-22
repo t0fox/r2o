@@ -13820,7 +13820,11 @@ fn r2o_dns_unique_service<'a>(
 #[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 enum R2oDnsTcpTrial {
-    Doh(String, Vec<u8>, Option<[u8; 32]>),
+    Doh(
+        String,
+        r2o_controller::dns_health::DohQuery,
+        Option<[u8; 32]>,
+    ),
     Dot(Vec<u8>, Option<[u8; 32]>),
 }
 
@@ -13846,9 +13850,7 @@ fn r2o_dns_tcp_trial(
     Ok(Some(if service.protocol == "doh" {
         R2oDnsTcpTrial::Doh(
             service.path.clone(),
-            r2o_controller::dns_health::dns_query_message(
-                r2o_controller::dns_health::DNS_QUERY_ID_DOH,
-            ),
+            r2o_controller::dns_health::DohQuery::for_service(service),
             pin,
         )
     } else {
@@ -35506,7 +35508,7 @@ mod tests {
         assert_eq!(state.live[0].checked_at, Some(42));
         assert_eq!(state.live[0].generation, generation);
 
-        state.set_services(services("json"));
+        state.set_services(services("unknown"));
         assert_ne!(state.live[0].generation, generation);
         let mut health = super::R2oDnsHealth::new();
         health.start_due(&mut state, None);
@@ -38935,8 +38937,10 @@ mod tests {
         assert_eq!(path, "/dns-query?token=secret");
         assert_eq!(
             query,
-            r2o_controller::dns_health::dns_query_message(
-                r2o_controller::dns_health::DNS_QUERY_ID_DOH
+            r2o_controller::dns_health::DohQuery::Message(
+                r2o_controller::dns_health::dns_query_message(
+                    r2o_controller::dns_health::DNS_QUERY_ID_DOH
+                )
             )
         );
         let collision = DnsService {
@@ -38951,6 +38955,17 @@ mod tests {
             super::r2o_dns_tcp_trial(&with_spki, &target),
             Ok(Some(R2oDnsTcpTrial::Doh(_, _, Some(pin)))) if pin == [0; 32]
         ));
+        let json = r2k_core::dns_config::parse_keenetic(
+            "proxy-https:\nserver-https:\n  uri: https://dns.example/resolve?profile=one\n  format: json\n",
+        );
+        assert_eq!(
+            super::r2o_dns_tcp_trial(&json, &target),
+            Ok(Some(R2oDnsTcpTrial::Doh(
+                "/resolve?profile=one".into(),
+                r2o_controller::dns_health::DohQuery::Json,
+                None
+            )))
+        );
         let pinned = DnsService {
             host: "198.51.100.81".into(),
             ..services[0].clone()

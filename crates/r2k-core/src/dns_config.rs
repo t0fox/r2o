@@ -76,6 +76,14 @@ impl DnsService {
         }
     }
 
+    pub fn uses_doh_json(&self) -> bool {
+        self.protocol == "doh"
+            && self
+                .keenetic
+                .as_deref()
+                .is_some_and(|policy| policy.doh_format == "json")
+    }
+
     pub fn spki_pin(&self) -> Result<Option<[u8; 32]>, &'static str> {
         use base64::Engine;
 
@@ -107,7 +115,7 @@ impl DnsService {
 
     pub fn verification_limitation(&self) -> Option<&'static str> {
         let policy = self.keenetic.as_deref()?;
-        if !policy.doh_format.is_empty() && policy.doh_format != "dnsm" {
+        if !policy.doh_format.is_empty() && policy.doh_format != "dnsm" && !self.uses_doh_json() {
             Some("Настроен другой формат DoH, для него нужна отдельная проверка DNS-ответа")
         } else if !policy.interface.is_empty() {
             Some("Сервис привязан к интерфейсу Keenetic, проверка должна пройти по этому маршруту")
@@ -1367,10 +1375,9 @@ server-https:
         assert_eq!(services[4].path, "/dns-query?profile=two");
         assert_eq!(services[4].source, "keenetic-filter");
         assert_eq!(services[5].host, services[3].host);
-        for (service, explanation) in
-            services[5..]
-                .iter()
-                .zip(["формат", "SPKI", "интерфейсу", "домена"])
+        assert!(services[5].uses_doh_json());
+        assert_eq!(services[5].verification_limitation(), None);
+        for (service, explanation) in services[6..].iter().zip(["SPKI", "интерфейсу", "домена"])
         {
             assert!(
                 service

@@ -15,6 +15,181 @@ use std::time::{Duration, Instant};
 pub const DOH_HEADER_MAX: usize = 8192;
 pub const DOH_BODY_MAX: usize = 4096;
 const DOH_RESPONSE_MAX: usize = DOH_HEADER_MAX + DOH_BODY_MAX * 2;
+const DNS_PROBE_NAME: &str = "example.com";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DohQuery {
+    Message(Vec<u8>),
+    Json,
+}
+
+impl DohQuery {
+    pub fn for_service(service: &DnsService) -> Self {
+        if service.uses_doh_json() {
+            Self::Json
+        } else {
+            Self::Message(dns_query_message(DNS_QUERY_ID_DOH))
+        }
+    }
+
+    pub fn request_path<'a>(
+        &self,
+        path: &'a str,
+    ) -> Result<std::borrow::Cow<'a, str>, &'static str> {
+        let path = if path.is_empty() { "/" } else { path };
+        if matches!(self, Self::Message(_)) {
+            return Ok(path.into());
+        }
+        if !path.starts_with('/') || path.contains('#') {
+            return Err("DoH JSON: неверный путь DNS-сервера");
+        }
+        let uri = path
+            .parse::<http::uri::PathAndQuery>()
+            .map_err(|_| "DoH JSON: неверный путь DNS-сервера")?;
+        let parameters = uri.query().unwrap_or_default();
+        if parameters.split('&').any(|part| {
+            let key = part.split('=').next().unwrap_or_default();
+            ["name", "type"]
+                .iter()
+                .any(|reserved| doh_parameter_matches(key, reserved))
+        }) {
+            return Err("DoH JSON: в URL уже заданы параметры DNS-запроса");
+        }
+        let separator = if uri.query().is_none() {
+            "?"
+        } else if path.ends_with(['?', '&']) {
+            ""
+        } else {
+            "&"
+        };
+        Ok(format!("{path}{separator}name={DNS_PROBE_NAME}&type=1").into())
+    }
+
+    pub(crate) fn accepts_type(&self, value: &[u8]) -> bool {
+        let media = trim_http_value(value.split(|byte| *byte == b';').next().unwrap_or_default());
+        match self {
+            Self::Message(_) => media.eq_ignore_ascii_case(b"application/dns-message"),
+            Self::Json => {
+                media.eq_ignore_ascii_case(b"application/dns-json")
+                    || media.eq_ignore_ascii_case(b"application/json")
+            }
+        }
+    }
+
+    pub(crate) fn validate_reply(&self, body: &[u8]) -> bool {
+        if body.len() > DOH_BODY_MAX {
+            return false;
+        }
+        match self {
+            Self::Message(query) => query
+                .get(..2)
+                .is_some_and(|id| dns_probe_reply(body, u16::from_be_bytes([id[0], id[1]]))),
+            Self::Json => doh_json_reply(body),
+        }
+    }
+
+    pub(crate) fn http1_request(&self, authority: &str, path: &str, connection: &str) -> Vec<u8> {
+        match self {
+            Self::Message(message) => {
+                let mut request = format!(
+                    "POST {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
+                    message.len()
+                ).into_bytes();
+                request.extend_from_slice(message);
+                request
+            }
+            Self::Json => format!(
+                "GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/dns-json\r\nConnection: {connection}\r\n\r\n"
+            ).into_bytes(),
+        }
+    }
+}
+
+fn doh_parameter_matches(key: &str, name: &str) -> bool {
+    let mut bytes = key.bytes();
+    fn hex(byte: u8) -> Option<u8> {
+        char::from(byte).to_digit(16).map(|value| value as u8)
+    }
+    name.bytes().all(|expected| {
+        let actual = match bytes.next() {
+            Some(b'%') => bytes
+                .next()
+                .and_then(hex)
+                .zip(bytes.next().and_then(hex))
+                .map(|(high, low)| high * 16 + low),
+            value => value,
+        };
+        actual == Some(expected)
+    }) && bytes.next().is_none()
+}
+
+fn doh_json_reply(body: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Question<'a> {
+        name: &'a str,
+        #[serde(rename = "type")]
+        kind: u16,
+    }
+    #[derive(serde::Deserialize)]
+    struct Answer<'a> {
+        name: &'a str,
+        #[serde(rename = "type")]
+        kind: u16,
+        data: &'a str,
+    }
+    #[derive(serde::Deserialize)]
+    struct Response<'a> {
+        #[serde(rename = "Status")]
+        status: u32,
+        #[serde(rename = "TC")]
+        truncated: bool,
+        #[serde(rename = "Question", borrow)]
+        questions: Vec<Question<'a>>,
+        #[serde(rename = "Answer", default, borrow)]
+        answers: Vec<Answer<'a>>,
+    }
+    fn same_name(a: &str, b: &str) -> bool {
+        a.strip_suffix('.')
+            .unwrap_or(a)
+            .eq_ignore_ascii_case(b.strip_suffix('.').unwrap_or(b))
+    }
+    fn valid_name(name: &str) -> bool {
+        let name = name.strip_suffix('.').unwrap_or(name);
+        name.len() <= 253
+            && name.split('.').all(|label| {
+                (1..=63).contains(&label.len())
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+    }
+    let Ok(response) = serde_json::from_slice::<Response<'_>>(body) else {
+        return false;
+    };
+    if response.status != 0
+        || response.truncated
+        || !matches!(response.questions.as_slice(), [question] if question.kind == 1 && same_name(question.name, DNS_PROBE_NAME))
+    {
+        return false;
+    }
+    let mut name = DNS_PROBE_NAME;
+    for _ in &response.answers {
+        if response.answers.iter().any(|record| {
+            record.kind == 1
+                && same_name(record.name, name)
+                && record.data.parse::<std::net::Ipv4Addr>().is_ok()
+        }) {
+            return true;
+        }
+        let Some(alias) = response.answers.iter().find(|record| {
+            record.kind == 5 && same_name(record.name, name) && valid_name(record.data)
+        }) else {
+            return false;
+        };
+        name = alias.data;
+    }
+    false
+}
 const DNS_FRAME_MAX: usize = 4096;
 /// C `dns_query[2..4]` для DoH: `0x5a71`.
 pub const DNS_QUERY_ID_DOH: u16 = 0x5a71;
@@ -274,7 +449,7 @@ fn trim_http_value(value: &[u8]) -> &[u8] {
     &value[start..end]
 }
 
-fn doh_parse_headers(data: &[u8]) -> Option<DohHeaders> {
+fn doh_parse_headers(data: &[u8], query: &DohQuery) -> Option<DohHeaders> {
     if data.is_empty() || data.len() > DOH_HEADER_MAX {
         return None;
     }
@@ -306,10 +481,8 @@ fn doh_parse_headers(data: &[u8]) -> Option<DohHeaders> {
             return None;
         }
         let value = trim_http_value(value.as_bytes());
-        if name.eq_ignore_ascii_case("content-type") {
-            let value = value.split(|byte| *byte == b';').next().unwrap_or_default();
-            let value = trim_http_value(value);
-            if content_type_ok || !value.eq_ignore_ascii_case(b"application/dns-message") {
+        if status == 200 && name.eq_ignore_ascii_case("content-type") {
+            if content_type_ok || !query.accepts_type(value) {
                 return None;
             }
             content_type_ok = true;
@@ -416,7 +589,7 @@ fn doh_decode_chunked(raw: &[u8], body: &mut [u8]) -> Result<Option<usize>, ()> 
     }
 }
 
-fn doh_response_parse(response: &[u8], dns_id: u16) -> DohResponse {
+fn doh_response_parse(response: &[u8], query: &DohQuery) -> DohResponse {
     let Some(sep) = doh_header_end(response) else {
         return DohResponse {
             state: if response.len() >= DOH_HEADER_MAX {
@@ -445,7 +618,7 @@ fn doh_response_parse(response: &[u8], dns_id: u16) -> DohResponse {
     if sep > DOH_HEADER_MAX {
         return invalid_doh("DoH: некорректные HTTP заголовки");
     }
-    let Some(headers) = doh_parse_headers(&response[..sep]) else {
+    let Some(headers) = doh_parse_headers(&response[..sep], query) else {
         return invalid_doh("DoH: некорректные HTTP заголовки");
     };
     if headers.status != 200 {
@@ -491,11 +664,11 @@ fn doh_response_parse(response: &[u8], dns_id: u16) -> DohResponse {
             };
         }
         let body = &response[body_offset..body_offset + headers.body_len];
-        return finish_doh(body, headers, dns_id);
+        return finish_doh(body, headers, query);
     }
     let mut body = [0u8; DOH_BODY_MAX];
     match doh_decode_chunked(&response[body_offset..], &mut body) {
-        Ok(Some(length)) => finish_doh(&body[..length], headers, dns_id),
+        Ok(Some(length)) => finish_doh(&body[..length], headers, query),
         Ok(None) => DohResponse {
             state: DohState::NeedMore,
             #[cfg(test)]
@@ -533,8 +706,8 @@ fn invalid_doh(reason: &str) -> DohResponse {
     }
 }
 
-fn finish_doh(body: &[u8], headers: DohHeaders, dns_id: u16) -> DohResponse {
-    if !dns_probe_reply(body, dns_id) {
+fn finish_doh(body: &[u8], headers: DohHeaders, query: &DohQuery) -> DohResponse {
+    if !query.validate_reply(body) {
         return DohResponse {
             state: DohState::Invalid,
             #[cfg(test)]
@@ -568,7 +741,11 @@ fn finish_doh(body: &[u8], headers: DohHeaders, dns_id: u16) -> DohResponse {
         #[cfg(test)]
         chunked: headers.chunked,
         dns_reply: true,
-        reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
+        reason: match query {
+            DohQuery::Message(_) => "DoH: корректный RFC 8484 DNS-ответ",
+            DohQuery::Json => "DoH JSON: получен корректный DNS-ответ",
+        }
+        .into(),
     }
 }
 
@@ -870,7 +1047,7 @@ fn doh_validate(service: &DnsService) -> Result<(), String> {
     Ok(())
 }
 
-fn doh_authority(host: &str, port: u16) -> Result<String, String> {
+pub(crate) fn doh_authority(host: &str, port: u16) -> Result<String, String> {
     if host.is_empty() {
         return Err("DoH: недопустимый Host".into());
     }
@@ -961,7 +1138,7 @@ impl DohHttp2 {
         name: &str,
         port: u16,
         path: &str,
-        query: &[u8],
+        query: &DohQuery,
         deadline: Instant,
     ) -> DohHttp2Result {
         use bytes::Bytes;
@@ -996,13 +1173,18 @@ impl DohHttp2 {
                     .path_and_query(path)
                     .build()
                     .map_err(|error| (DnsHealthFailure::Configuration, error.to_string()))?;
-                let request = http::Request::post(uri)
-                    .version(http::Version::HTTP_2)
-                    .header(http::header::ACCEPT, "application/dns-message")
-                    .header(http::header::CONTENT_TYPE, "application/dns-message")
-                    .header(http::header::CONTENT_LENGTH, query.len())
-                    .body(())
-                    .map_err(|error| (DnsHealthFailure::Configuration, error.to_string()))?;
+                let request = match query {
+                    DohQuery::Message(message) => http::Request::post(uri)
+                        .header(http::header::ACCEPT, "application/dns-message")
+                        .header(http::header::CONTENT_TYPE, "application/dns-message")
+                        .header(http::header::CONTENT_LENGTH, message.len()),
+                    DohQuery::Json => {
+                        http::Request::get(uri).header(http::header::ACCEPT, "application/dns-json")
+                    }
+                }
+                .version(http::Version::HTTP_2)
+                .body(())
+                .map_err(|error| (DnsHealthFailure::Configuration, error.to_string()))?;
                 let (sender, connection) = h2::client::Builder::new()
                     .enable_push(false)
                     .header_table_size(0)
@@ -1015,11 +1197,14 @@ impl DohHttp2 {
 
                 let mut sender = sender.ready().await.map_err(h2_error)?;
                 let sent = Instant::now();
-                let (response, mut stream) =
-                    sender.send_request(request, false).map_err(h2_error)?;
-                stream
-                    .send_data(Bytes::copy_from_slice(query), true)
+                let (response, mut stream) = sender
+                    .send_request(request, matches!(query, DohQuery::Json))
                     .map_err(h2_error)?;
+                if let DohQuery::Message(message) = query {
+                    stream
+                        .send_data(Bytes::copy_from_slice(message), true)
+                        .map_err(h2_error)?;
+                }
                 let response = response.await.map_err(h2_error)?;
                 health.http_status = i32::from(response.status().as_u16());
                 if response.status() != http::StatusCode::OK {
@@ -1031,11 +1216,7 @@ impl DohHttp2 {
                 if !response
                     .headers()
                     .get(http::header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.split(';').next())
-                    .is_some_and(|media| {
-                        media.trim().eq_ignore_ascii_case("application/dns-message")
-                    })
+                    .is_some_and(|value| query.accepts_type(value.as_bytes()))
                 {
                     return Err(invalid("неверный Content-Type"));
                 }
@@ -1060,10 +1241,7 @@ impl DohHttp2 {
                 if content_length.is_some_and(|length| length != body.len()) {
                     return Err(invalid("Content-Length не совпадает с DNS-ответом"));
                 }
-                let query_id = query
-                    .get(..2)
-                    .ok_or_else(|| invalid("некорректный DNS-запрос"))?;
-                if !dns_probe_reply(&body, u16::from_be_bytes([query_id[0], query_id[1]])) {
+                if !query.validate_reply(&body) {
                     return Err(invalid("некорректный DNS-ответ"));
                 }
                 Ok(sent.elapsed().as_millis() as u64)
@@ -1074,7 +1252,11 @@ impl DohHttp2 {
             Ok(Ok(rtt)) => {
                 health.dns_reply = true;
                 health.answer_rtt_ms = Some(rtt);
-                health.reason = "DoH (HTTP/2): получен корректный DNS-ответ".into();
+                health.reason = match query {
+                    DohQuery::Message(_) => "DoH (HTTP/2): получен корректный DNS-ответ",
+                    DohQuery::Json => "DoH JSON (HTTP/2): получен корректный DNS-ответ",
+                }
+                .into();
                 health
             }
             Ok(Err((kind, reason))) => health.fail(kind, format!("DoH (HTTP/2): {reason}")),
@@ -1107,6 +1289,11 @@ fn probe_doh(
     if let Err(reason) = doh_validate(service) {
         return result.fail(DnsHealthFailure::Configuration, reason);
     }
+    let query = DohQuery::for_service(service);
+    let path = match query.request_path(&service.path) {
+        Ok(path) => path,
+        Err(reason) => return result.fail(DnsHealthFailure::Configuration, reason),
+    };
     let address = match resolve_service(service) {
         Ok(address) => address,
         Err(reason) => return result.fail(DnsHealthFailure::Configuration, reason),
@@ -1127,12 +1314,6 @@ fn probe_doh(
     } else {
         service.sni.as_str()
     };
-    let path = if service.path.is_empty() {
-        "/"
-    } else {
-        service.path.as_str()
-    };
-    let message = dns_query_message(DNS_QUERY_ID_DOH);
     let mut stream = match connect_doh_tls(stream, name, false, None, deadline, roots, pin) {
         Ok(DohTls::Http1(tls)) => {
             result.tls_handshake = true;
@@ -1140,7 +1321,7 @@ fn probe_doh(
         }
         Ok(DohTls::Http2(tls)) => {
             return tls
-                .exchange(name, service.port, path, &message, deadline)
+                .exchange(name, service.port, &path, &query, deadline)
                 .health;
         }
         Err((kind, reason)) => return result.fail(kind, format!("DoH: {reason}")),
@@ -1149,14 +1330,10 @@ fn probe_doh(
         Ok(authority) => authority,
         Err(reason) => return result.fail(DnsHealthFailure::Configuration, reason),
     };
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        message.len()
-    );
+    let request = query.http1_request(&authority, &path, "close");
     let sent = Instant::now();
     if let Err(error) = set_tcp_timeout(&stream.sock, deadline)
-        .and_then(|()| stream.write_all(request.as_bytes()))
-        .and_then(|()| stream.write_all(&message))
+        .and_then(|()| stream.write_all(&request))
         .and_then(|()| stream.flush())
     {
         return result.fail(
@@ -1166,7 +1343,7 @@ fn probe_doh(
     }
     let mut response = Vec::with_capacity(DOH_RESPONSE_MAX);
     let parsed = loop {
-        let parsed = doh_response_parse(&response, DNS_QUERY_ID_DOH);
+        let parsed = doh_response_parse(&response, &query);
         let waiting_body = parsed.state == DohState::Invalid
             && parsed.status == 200
             && parsed.body_expected > 0
@@ -1772,7 +1949,7 @@ mod tests {
     }
 
     fn doh_output(name: &str, response: &[u8]) -> String {
-        let parsed = doh_response_parse(response, 0x1234);
+        let parsed = doh_response_parse(response, &DohQuery::Message(dns_query_message(0x1234)));
         let state = match parsed.state {
             DohState::NeedMore => 0,
             DohState::Complete => 1,
@@ -1999,6 +2176,113 @@ mod tests {
         assert!(!missing.tcp_reachable);
         assert_eq!(missing.failure, Some(DnsHealthFailure::Configuration));
         assert!(missing.reason.contains("bootstrap"));
+    }
+
+    #[test]
+    fn doh_json_requires_matching_question_and_an_address_on_its_answer_chain() {
+        let query = DohQuery::Json;
+        let reply = r#"{"Status":0,"TC":false,"Question":[{"name":"Example.COM.","type":1}],"Answer":[{"name":"example.com.","type":5,"data":"target.example."},{"name":"target.example.","type":1,"data":"192.0.2.8"}]}"#;
+        assert!(query.validate_reply(reply.as_bytes()));
+        for (from, to) in [
+            ("Example.COM.", "wrong.example."),
+            ("\"type\":1", "\"type\":28"),
+            ("\"Status\":0", "\"Status\":3"),
+            ("\"TC\":false", "\"TC\":true"),
+            ("\"data\":\"target.example.\"", "\"data\":\"example.com.\""),
+            ("192.0.2.8", "invalid"),
+        ] {
+            assert!(!query.validate_reply(reply.replace(from, to).as_bytes()));
+        }
+        assert!(!query.validate_reply(&vec![b' '; DOH_BODY_MAX + 1]));
+        assert_eq!(
+            query.request_path("/resolve?profile=a%2Fb").unwrap(),
+            "/resolve?profile=a%2Fb&name=example.com&type=1"
+        );
+        assert_eq!(
+            query.request_path("/resolve?").unwrap(),
+            "/resolve?name=example.com&type=1"
+        );
+        for path in [
+            "/resolve?%6eame=bad.example",
+            "/resolve?type=28",
+            "/resolve#fragment",
+        ] {
+            assert!(query.request_path(path).is_err());
+        }
+    }
+
+    #[test]
+    fn loopback_doh_json_http1_distinguishes_a_refusal_from_a_dns_answer() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+
+        let (config, cert) = test_server_config();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let config = Arc::new(config);
+            for (status, mime, body) in [
+                (
+                    "200 OK",
+                    "application/json",
+                    r#"{"Status":0,"TC":false,"Question":[{"name":"example.com.","type":1}],"Answer":[{"name":"example.com.","type":1,"data":"192.0.2.8"}]}"#,
+                ),
+                ("403 Forbidden", "text/html", "Denied"),
+            ] {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut tls = rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(Arc::clone(&config)).unwrap(),
+                    socket,
+                );
+                let mut reader = BufReader::new(&mut tls);
+                let mut request = Vec::new();
+                while let Some(line) = reader.by_ref().lines().next() {
+                    let line = line.unwrap();
+                    if line.is_empty() {
+                        break;
+                    }
+                    request.push(line);
+                }
+                assert_eq!(
+                    request[0],
+                    "GET /resolve?profile=a%2Fb&name=example.com&type=1 HTTP/1.1"
+                );
+                assert!(
+                    request
+                        .iter()
+                        .any(|header| header == "Accept: application/dns-json")
+                );
+                assert!(
+                    !request
+                        .iter()
+                        .any(|header| header.starts_with("Content-Length:"))
+                );
+                write!(tls, "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                tls.flush().unwrap();
+            }
+        });
+        let mut service = r2k_core::dns_config::parse_keenetic(&format!(
+            "proxy-https:\nserver-https:\n  uri: https://localhost:{port}/resolve?profile=a%2Fb\n  format: json\n"
+        )).remove(0);
+        service.host = "127.0.0.1".into();
+        let mut roots = RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let roots = Arc::new(roots);
+        for (status, failure) in [(200, None), (403, Some(DnsHealthFailure::Server))] {
+            let result = probe_dns_health_with_roots(
+                &service,
+                None,
+                Duration::from_secs(3),
+                Arc::clone(&roots),
+            );
+            assert_eq!(result.http_status, status, "{result:?}");
+            assert_eq!(result.failure, failure, "{result:?}");
+            assert_eq!(result.dns_reply, failure.is_none());
+        }
+        server.join().unwrap();
     }
 
     #[test]
@@ -2350,7 +2634,7 @@ mod tests {
                 .to_vec();
         response.extend_from_slice(format!("{}\r\n\r\n", body.len()).as_bytes());
         response.extend_from_slice(&body);
-        let parsed = doh_response_parse(&response, 0x1234);
+        let parsed = doh_response_parse(&response, &DohQuery::Message(dns_query_message(0x1234)));
         assert_eq!(parsed.state, DohState::Complete);
         assert!(parsed.dns_reply);
         assert_eq!(parsed.body_bytes, body.len());
@@ -2359,13 +2643,13 @@ mod tests {
         chunked.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
         chunked.extend_from_slice(&body);
         chunked.extend_from_slice(b"\r\n0\r\n\r\n");
-        let parsed = doh_response_parse(&chunked, 0x1234);
+        let parsed = doh_response_parse(&chunked, &DohQuery::Message(dns_query_message(0x1234)));
         assert_eq!(parsed.state, DohState::Complete);
         assert!(parsed.dns_reply);
 
         let bad_type = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1\r\n\r\nx";
         assert_eq!(
-            doh_response_parse(bad_type, 0x1234).state,
+            doh_response_parse(bad_type, &DohQuery::Message(dns_query_message(0x1234))).state,
             DohState::Invalid
         );
         let too_big = format!(
@@ -2373,7 +2657,11 @@ mod tests {
             DOH_BODY_MAX + 1
         );
         assert_eq!(
-            doh_response_parse(too_big.as_bytes(), 0x1234).state,
+            doh_response_parse(
+                too_big.as_bytes(),
+                &DohQuery::Message(dns_query_message(0x1234))
+            )
+            .state,
             DohState::Invalid
         );
     }
