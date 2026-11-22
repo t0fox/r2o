@@ -70,6 +70,48 @@ valid_ipv4() (
     done
 )
 
+plain_dns_targets() (
+    set -f
+    set -- ${DNS_DISCOVERY_ENDPOINTS:-}
+    [ "$#" -le 16 ] || return 1
+    for endpoint do
+        port=${endpoint##*:}
+        case "$port" in ''|0|0*|??????*) return 1 ;; esac
+        number "$port" 65535 || return 1
+        case "$endpoint" in
+            \[*\]:*)
+                ip=${endpoint%:*}
+                ip=${ip#\[}
+                ip=${ip%\]}
+                case "$ip" in ::|::1|[fF][fF]*) return 1 ;; esac
+                printf '%s\n' "$ip" | awk '
+                    function groups(value, parts, n, i) {
+                        if (value == "") return 0
+                        n = split(value, parts, ":")
+                        for (i = 1; i <= n; ++i)
+                            if (parts[i] !~ /^[0-9a-fA-F]+$/ || length(parts[i]) > 4) return -1
+                        return n
+                    }
+                    {
+                        separator = index($0, "::")
+                        if (!separator) exit (groups($0) != 8)
+                        left = groups(substr($0, 1, separator - 1))
+                        right = groups(substr($0, separator + 2))
+                        exit (left < 0 || right < 0 || left + right >= 8)
+                    }' || return 1
+                printf 'ip6 %s %s\n' "$ip" "$port"
+                ;;
+            *:*)
+                ip=${endpoint%:*}
+                valid_ipv4 "$ip" || return 1
+                case "$ip" in .*|*.|*..*|0*|*.0[0-9]*|127.*|22[4-9].*|23[0-9].*|255.255.255.255) return 1 ;; esac
+                printf 'ip %s %s\n' "$ip" "$port"
+                ;;
+            *) return 1 ;;
+        esac
+    done
+)
+
 # D2O excludes its configured IPv4 update relay from NFQUEUE. Keep that path
 # when an existing configuration carries the same D2K_GATE setting.
 GATE_IP=
@@ -123,6 +165,16 @@ else
     [ "$PROBE_MARK" -ne "$measure_mark_value" ] || { echo "PROBE_MARK должен отличаться от MEASURE_MARK" >&2; exit 2; }
     measure_mark_value=$(printf '%s' "$measure_mark_value" | sed 's/^0*//')
     MEASURE_MARK=$(printf '0x%x' "$measure_mark_value") || exit 2
+fi
+PLAIN_DNS_TARGETS=
+if [ -n "${DNS_DISCOVERY_ENDPOINTS:-}" ] && [ "$PROBE_MARK" -ne 0 ] &&
+    [ "$PROBE_MARK" -ne "$MARK" ] && [ -n "$MEASURE_MARK" ]; then
+    if ! PLAIN_DNS_TARGETS=$(plain_dns_targets); then
+        echo "DNS Discovery выключен: DNS_DISCOVERY_ENDPOINTS требует до 16 числовых IP:порт" >&2
+        PLAIN_DNS_TARGETS=
+    else
+        PLAIN_DNS_TARGETS=$(printf '%s\n' "$PLAIN_DNS_TARGETS" | sort -u) || exit 2
+    fi
 fi
 
 case "$BACKEND" in
@@ -204,6 +256,19 @@ nft_up() {
     nft_voice=$(printf '%s' "$VOICE_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
     nft_keepalive=$(printf '%s' "$HTTP_KEEPALIVE_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
     nft_dns=$(printf '%s' "$DNS_PORTS" | sed -e 's/:/-/g' -e 's/,/, /g')
+    nft_plain_dns=$(
+        while read -r family ip port; do
+            case "$family" in
+                ip) queue=$QUEUE4 ;;
+                ip6) [ "$IPV6_ENABLED" = 1 ] || continue; queue=$QUEUE6 ;;
+                *) continue ;;
+            esac
+            printf '        meta mark %s %s daddr %s udp dport %s ct direction original queue num %s bypass\n' \
+                "$PROBE_MARK" "$family" "$ip" "$port" "$queue"
+        done <<EOF
+$PLAIN_DNS_TARGETS
+EOF
+    )
     nft_gate_out=
     nft_gate_in=
     if [ -n "$GATE_IP" ]; then
@@ -237,8 +302,9 @@ table inet r2o {
         ip6 daddr ff00::/8 return
         meta mark $MARK return
         ${MEASURE_MARK:+meta mark $MEASURE_MARK return}
-        meta l4proto { tcp, udp } th dport { $nft_dns } return
         ct status dnat return
+$nft_plain_dns
+        meta l4proto { tcp, udp } th dport { $nft_dns } return
         $nft_gate_out
         meta nfproto ipv4 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto udp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE4 bypass
@@ -537,8 +603,15 @@ dns_excl_rule() {
                     xt "$dns_tool" -t mangle -D "$4" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN || break
                 done
             else
+                dns_insert=1
+                if [ "$4" = R2O_OUT ] && [ -n "$PLAIN_DNS_TARGETS" ]; then
+                    dns_family=ip
+                    [ "$dns_tool" != ip6tables ] || dns_family=ip6
+                    dns_insert=$(printf '%s\n' "$PLAIN_DNS_TARGETS" | awk -v family="$dns_family" '
+                        $1 == family { ++count } END { print count + 1 }')
+                fi
                 xt "$dns_tool" -t mangle -C "$4" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN ||
-                    xt "$dns_tool" -t mangle -I "$4" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN
+                    xt "$dns_tool" -t mangle -I "$4" "$dns_insert" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN
             fi
         done
     done
@@ -647,6 +720,7 @@ xt_family_up() {
         return 1
     fi
     xt "$tool" -t mangle -N R2O_IN || return 1
+    xt_plain_dns_probes -A "$tool" "$queue" || return 1
     for chain in R2O_OUT R2O_IN; do
         xt "$tool" -t mangle -A "$chain" -s "$loopback" -j RETURN || return 1
         xt "$tool" -t mangle -A "$chain" -d "$loopback" -j RETURN || return 1
@@ -717,6 +791,19 @@ xt_family_up() {
     xt "$tool" -t mangle -I INPUT 1 -j R2O_IN || return 1
 }
 
+xt_plain_dns_probes() (
+    family=ip
+    [ "$2" != ip6tables ] || family=ip6
+    while read -r endpoint_family ip port; do
+        [ "$endpoint_family" = "$family" ] || continue
+        xt "$2" -t mangle "$1" R2O_OUT -p udp -d "$ip" --dport "$port" \
+            -m mark --mark "$PROBE_MARK" -m conntrack --ctdir ORIGINAL ! --ctstate DNAT \
+            -j NFQUEUE --queue-num "$3" --queue-bypass || return 1
+    done <<EOF
+$PLAIN_DNS_TARGETS
+EOF
+)
+
 xt_family_installed() {
     # shellcheck disable=SC3043 # OpenWrt's BusyBox ash supports local
     local fw_tool queue loopback late_from chain proto direction ct_direction count_direction ports flag
@@ -725,6 +812,7 @@ xt_family_installed() {
     loopback=127.0.0.0/8
     [ "$fw_tool" != ip6tables ] || loopback=::1/128
     late_from=$(late_rst_from) || return 1
+    xt_plain_dns_probes -C "$fw_tool" "$queue" || return 1
 
     for chain in R2O_OUT R2O_IN; do
         xt "$fw_tool" -t mangle -C "$chain" -s "$loopback" -j RETURN || return 1
@@ -908,7 +996,15 @@ firewall_status_nft() {
     nft list table inet r2o_rst >/dev/null 2>&1 || return 1
 
     out_queue_total=$(printf '%s\n' "$out_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
-    [ "$out_queue_total" -eq 12 ] || return 1
+    plain_dns4=0
+    plain_dns6=0
+    if [ -n "$PLAIN_DNS_TARGETS" ]; then
+        plain_dns4=$(printf '%s\n' "$PLAIN_DNS_TARGETS" | awk '$1 == "ip" { ++count } END { print count + 0 }')
+        if [ "$IPV6_ENABLED" = 1 ]; then
+            plain_dns6=$(printf '%s\n' "$PLAIN_DNS_TARGETS" | awk '$1 == "ip6" { ++count } END { print count + 0 }')
+        fi
+    fi
+    [ "$out_queue_total" -eq "$((12 + plain_dns4 + plain_dns6))" ] || return 1
     in_queue_total=$(printf '%s\n' "$in_rules_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
     [ "$in_queue_total" -eq 14 ] || return 1
     out_queue4=$(printf '%s\n' "$out_chain" | awk -v queue="$QUEUE4" \
@@ -919,7 +1015,7 @@ firewall_status_nft() {
         '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
     in_queue6=$(printf '%s\n' "$in_rules_chain" | awk -v queue="$QUEUE6" \
         '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
-    [ "$out_queue4" -eq 6 ] && [ "$out_queue6" -eq 6 ] &&
+    [ "$out_queue4" -eq "$((6 + plain_dns4))" ] && [ "$out_queue6" -eq "$((6 + plain_dns6))" ] &&
         [ "$in_queue4" -eq 7 ] && [ "$in_queue6" -eq 7 ]
 }
 

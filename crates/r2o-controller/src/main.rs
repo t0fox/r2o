@@ -1269,6 +1269,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 PathBuf::from(&arguments[2]),
                 options,
                 r2o_new_measurement_gate(),
+                None,
             );
         }
         #[cfg(not(unix))]
@@ -2231,6 +2232,7 @@ fn serve_catalog(
     catalog_path: PathBuf,
     options: ServeCliOptions,
     measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
+    ipv6: Option<bool>,
 ) -> Result<(), Box<dyn Error>> {
     use std::io::Write;
 
@@ -2243,6 +2245,27 @@ fn serve_catalog(
     } = options;
     install_r2o_controller_signal_handlers()?;
     let (mark, measure_mark) = r2o_serve_probe_marks(mark, measure_mark);
+    let dns_endpoints = if discover {
+        let ipv6 = ipv6.or_else(
+            || match std::env::var("R2O_DNS_DISCOVERY_FAMILY").as_deref() {
+                Ok("4") => Some(false),
+                Ok("6") => Some(true),
+                _ => None,
+            },
+        );
+        match r2k_core::dns_config::parse_plain_dns_endpoints(
+            &std::env::var("DNS_DISCOVERY_ENDPOINTS").unwrap_or_default(),
+            ipv6,
+        ) {
+            Ok(endpoints) => endpoints,
+            Err(error) => {
+                eprintln!("DNS Discovery: {error}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
     // C `d2kc main`: отсутствие каталога — первый запуск, а не отказ;
     // битый существующий файл — отказ с причиной.
     let catalog = match Catalog::load(&catalog_path) {
@@ -2303,6 +2326,7 @@ fn serve_catalog(
         Some(compiled),
         no_diagnostics,
         measurement_gate,
+        dns_endpoints,
     );
     println!("r2o-controller: останавливаюсь");
     result
@@ -2333,8 +2357,8 @@ fn serve_catalog_both(options: ServeBothOptions) -> Result<(), Box<dyn Error>> {
             gate.clone()
         };
         Some(std::thread::spawn(move || {
-            let result =
-                serve_catalog(socket, catalog, opts, gate).map_err(|error| error.to_string());
+            let result = serve_catalog(socket, catalog, opts, gate, Some(name == "IPv6"))
+                .map_err(|error| error.to_string());
             (name, result)
         }))
     })
@@ -7388,14 +7412,14 @@ enum HttpSearchCommand {
         deadline: std::time::Instant,
         reply: SyncSender<Result<Vec<r2k_core::control::AppliedEvent>, String>>,
     },
-    R2oInstallQuicProbe {
+    R2oInstallAddrProbe {
         command: Vec<u8>,
         delete: Vec<u8>,
         trial_id: [u8; 16],
         deadline: std::time::Instant,
         reply: SyncSender<Result<r2k_core::control::Ack, String>>,
     },
-    R2oDeleteQuicProbe {
+    R2oDeleteAddrProbe {
         command: Vec<u8>,
         deadline: std::time::Instant,
         reply: SyncSender<Result<r2k_core::control::Ack, String>>,
@@ -7465,14 +7489,14 @@ impl PendingNameProbeDeleteAck {
 }
 
 #[cfg(unix)]
-struct PendingQuicProbeAck {
+struct PendingAddrProbeAck {
     deadline: std::time::Instant,
     delete_on_failure: Option<Vec<u8>>,
     reply: SyncSender<Result<r2k_core::control::Ack, String>>,
 }
 
 #[cfg(unix)]
-impl PendingQuicProbeAck {
+impl PendingAddrProbeAck {
     fn finish(
         self,
         client: &mut ControlClient,
@@ -7481,7 +7505,7 @@ impl PendingQuicProbeAck {
         let result = match ack.filter(|_| std::time::Instant::now() < self.deadline) {
             Some(ack) if ack.ok => Ok(ack),
             Some(ack) => Err(ack_reason_text(ack.reason).to_owned()),
-            None => Err("истёк срок ожидания ACK временной QUIC-пробы".into()),
+            None => Err("истёк срок ожидания ACK временной адресной пробы".into()),
         };
         let failed = result.is_err();
         let abandoned = self.reply.send(result).is_err();
@@ -7681,7 +7705,7 @@ impl StunClientTrial {
 
     fn matches(&self, applied: &control::AppliedEvent) -> bool {
         applied.is_stun_trial_execution()
-            && applied_quic_trial_matches(applied, self.id, self.id, self.client, self.server)
+            && applied_udp_trial_matches(applied, self.id, self.id, self.client, self.server)
     }
 }
 
@@ -7728,7 +7752,7 @@ fn run_address_stun_discovery(
     let set = trial.set()?;
     let delete = trial.delete()?;
     let ack = ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
-        HttpSearchCommand::R2oInstallQuicProbe {
+        HttpSearchCommand::R2oInstallAddrProbe {
             command: set,
             delete: delete.clone(),
             trial_id: trial.id,
@@ -7754,7 +7778,7 @@ fn run_address_stun_discovery(
         Ok(events.iter().any(|event| trial.matches(event)))
     })();
     ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
-        HttpSearchCommand::R2oDeleteQuicProbe {
+        HttpSearchCommand::R2oDeleteAddrProbe {
             command: delete,
             deadline,
             reply,
@@ -7765,6 +7789,135 @@ fn run_address_stun_discovery(
     } else {
         StunDiagnosticVerdict::Unconfirmed
     })
+}
+
+#[cfg(unix)]
+const PLAIN_DNS_ADDRESS_PLAN: &str =
+    "r2o-plan 1 7\nid 00000000000000000000000000000000\nproto udp quic\nipfrag 1\n";
+
+#[cfg(unix)]
+struct PlainDnsDiscoveryJob {
+    server: std::net::SocketAddr,
+    measure_mark: u32,
+    probe_mark: u32,
+    permit: r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlainDnsVerdict {
+    Direct,
+    Rejected,
+    NoAnswer,
+    MissingExecution,
+    Confirmed,
+}
+
+#[cfg(unix)]
+fn run_plain_dns_discovery(
+    job: &mut PlainDnsDiscoveryJob,
+    commands: &dyn HttpSearchCommandSink,
+    cancel: &AtomicBool,
+) -> Result<PlainDnsVerdict, Box<dyn Error>> {
+    use r2o_controller::dns_health::{PlainDnsReply, dns_query_message, probe_plain_dns_udp_on};
+    use r2o_controller::r2o_quic_http3::{
+        r2o_quic_http3_set_socket_mark, r2o_quic_http3_udp_socket_fresh,
+    };
+    use std::time::Duration;
+
+    const REPLY_TIMEOUT: Duration = Duration::from_millis(1500);
+    let (socket, marked) = r2o_quic_http3_udp_socket_fresh(job.server, Some(job.measure_mark))
+        .map_err(|error| error.source)?;
+    if !marked {
+        return Err("не удалось установить SO_MARK прямого DNS-зонда".into());
+    }
+    let trial_id = random_id()?;
+    let id = u16::from_be_bytes([trial_id[0], trial_id[1]]);
+    for direct_id in [id ^ 1, id ^ 2] {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("DNS-зонд отменён".into());
+        }
+        match probe_plain_dns_udp_on(&socket, direct_id, REPLY_TIMEOUT)? {
+            PlainDnsReply::Answer => return Ok(PlainDnsVerdict::Direct),
+            PlainDnsReply::Rejected => return Ok(PlainDnsVerdict::Rejected),
+            PlainDnsReply::Timeout => {}
+        }
+    }
+    if !job.permit.r2o_yield_if_contended_with_cancel(cancel) || cancel.load(Ordering::Relaxed) {
+        return Err("DNS-зонд отменён".into());
+    }
+    r2o_quic_http3_set_socket_mark(&socket, job.probe_mark)?;
+    let local = socket.local_addr()?;
+    let text = r2o_controller::discovery::plan_text_for_trial(PLAIN_DNS_ADDRESS_PLAN, trial_id)?;
+    let records = r2o_plan_records_for_wire(&compile_text(&text)?)?;
+    let set = control::encode_set_dns_probe(
+        local,
+        job.server,
+        12_000,
+        &records,
+        trial_id,
+        &dns_query_message(id),
+    )?;
+    let delete = encode_delete_addr_probe(local, job.server, trial_id)?;
+    let ack = ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
+        HttpSearchCommand::R2oInstallAddrProbe {
+            command: set,
+            delete: delete.clone(),
+            trial_id,
+            deadline,
+            reply,
+        }
+    })?;
+    if !ack.ok || ack.command != control::COMMAND_SET_DNS_PROBE || ack.trial_id != Some(trial_id) {
+        return Err("нет точного ACK установки DNS-зонда".into());
+    }
+    let verified = (|| -> Result<PlainDnsVerdict, Box<dyn Error>> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("DNS-зонд отменён".into());
+        }
+        // Контроль с той же меткой и тем же кортежем отличается только DNS ID.
+        match probe_plain_dns_udp_on(&socket, id ^ 3, REPLY_TIMEOUT)? {
+            PlainDnsReply::Answer => return Ok(PlainDnsVerdict::Direct),
+            PlainDnsReply::Rejected => return Ok(PlainDnsVerdict::Rejected),
+            PlainDnsReply::Timeout => {}
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("DNS-зонд отменён".into());
+        }
+        match probe_plain_dns_udp_on(&socket, id, REPLY_TIMEOUT)? {
+            PlainDnsReply::Rejected => return Ok(PlainDnsVerdict::Rejected),
+            PlainDnsReply::Timeout => return Ok(PlainDnsVerdict::NoAnswer),
+            PlainDnsReply::Answer => {}
+        }
+        let exact = |event: &control::AppliedEvent| {
+            event.execution_id != 0
+                && event.binding.is_known()
+                && event.binding.kind == 2
+                && event.binding.family == event.key[0]
+                && event.binding.shape == control::SHAPE_DNS_PROBE
+                && event.binding.temporary
+                && applied_udp_trial_matches(event, trial_id, trial_id, local, job.server)
+        };
+        let events = r2o_collect_controller_applied_events_until(
+            commands,
+            trial_id,
+            CONTROL_ACK_TIMEOUT,
+            exact,
+        )?;
+        Ok(if events.iter().any(exact) {
+            PlainDnsVerdict::Confirmed
+        } else {
+            PlainDnsVerdict::MissingExecution
+        })
+    })();
+    ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
+        HttpSearchCommand::R2oDeleteAddrProbe {
+            command: delete,
+            deadline,
+            reply,
+        }
+    })?;
+    verified
 }
 
 #[cfg(unix)]
@@ -11170,6 +11323,13 @@ struct R2oQuicDiscoveryJob {
 enum R2oUdpDiscoveryJob {
     Quic(R2oQuicDiscoveryJob),
     Stun(StunDiscoveryJob),
+    PlainDns(PlainDnsDiscoveryJob),
+}
+
+#[cfg(unix)]
+enum AddressUdpDiscoveryOutcome {
+    Stun(StunDiscoveryOutcome),
+    PlainDns(std::net::SocketAddr, Result<PlainDnsVerdict, String>),
 }
 
 #[cfg(unix)]
@@ -11184,10 +11344,11 @@ struct R2oQuicDiscoveryWorker {
     jobs: Option<SyncSender<R2oUdpDiscoveryJob>>,
     commands: Option<Receiver<HttpSearchCommand>>,
     outcomes: Receiver<R2oQuicDiscoveryOutcome>,
-    stun_outcomes: Receiver<StunDiscoveryOutcome>,
+    address_outcomes: Receiver<AddressUdpDiscoveryOutcome>,
     cancel: Arc<AtomicBool>,
     active: HashMap<std::net::SocketAddr, R2oQuicActiveSnapshot>,
     stun_active: HashSet<std::net::SocketAddr>,
+    plain_dns_active: bool,
     stun_cooldowns: HashMap<std::net::SocketAddr, std::time::Instant>,
     trial_cooldowns: HashMap<R2oQuicCooldownKey, std::time::Instant>,
     pending_snapshots: Arc<std::sync::Mutex<HashMap<std::net::SocketAddr, (Vec<u8>, String)>>>,
@@ -11241,8 +11402,8 @@ impl R2oQuicDiscoveryWorker {
         let (command_sender, commands) = mpsc::sync_channel::<HttpSearchCommand>(16);
         let (outcome_sender, outcomes) =
             mpsc::sync_channel::<R2oQuicDiscoveryOutcome>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
-        let (stun_sender, stun_outcomes) =
-            mpsc::sync_channel::<StunDiscoveryOutcome>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
+        let (address_sender, address_outcomes) =
+            mpsc::sync_channel::<AddressUdpDiscoveryOutcome>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
         let cancel = Arc::new(AtomicBool::new(false));
         let pending_snapshots = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut threads = Vec::with_capacity(R2O_QUIC_DISCOVERY_WORKER_COUNT);
@@ -11250,7 +11411,7 @@ impl R2oQuicDiscoveryWorker {
             let worker_jobs = Arc::clone(&job_receiver);
             let worker_commands = command_sender.clone();
             let worker_outcomes = outcome_sender.clone();
-            let stun_outcomes = stun_sender.clone();
+            let address_sender = address_sender.clone();
             let worker_cancel = Arc::clone(&cancel);
             let worker_snapshots = Arc::clone(&pending_snapshots);
             let worker_runner = Arc::clone(&runner);
@@ -11275,12 +11436,24 @@ impl R2oQuicDiscoveryWorker {
                                 &worker_cancel,
                             )
                             .map_err(|error| error.to_string());
-                            if stun_outcomes
-                                .send(StunDiscoveryOutcome {
+                            if address_sender
+                                .send(AddressUdpDiscoveryOutcome::Stun(StunDiscoveryOutcome {
                                     client: job.client,
                                     server: job.server,
                                     result,
-                                })
+                                }))
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                        R2oUdpDiscoveryJob::PlainDns(mut job) => {
+                            let result =
+                                run_plain_dns_discovery(&mut job, &worker_commands, &worker_cancel)
+                                    .map_err(|error| error.to_string());
+                            if address_sender
+                                .send(AddressUdpDiscoveryOutcome::PlainDns(job.server, result))
                                 .is_err()
                             {
                                 break;
@@ -11346,10 +11519,11 @@ impl R2oQuicDiscoveryWorker {
             jobs: Some(jobs),
             commands: Some(commands),
             outcomes,
-            stun_outcomes,
+            address_outcomes,
             cancel,
             active: HashMap::new(),
             stun_active: HashSet::new(),
+            plain_dns_active: false,
             stun_cooldowns: HashMap::new(),
             trial_cooldowns: HashMap::new(),
             pending_snapshots,
@@ -11472,7 +11646,19 @@ impl R2oQuicDiscoveryWorker {
     }
 
     fn has_capacity(&self) -> bool {
-        self.active.len() + self.stun_active.len() < R2O_QUIC_DISCOVERY_WORKER_COUNT
+        self.active.len() + self.stun_active.len() + usize::from(self.plain_dns_active)
+            < R2O_QUIC_DISCOVERY_WORKER_COUNT
+    }
+
+    fn queue_plain_dns(&mut self, job: PlainDnsDiscoveryJob) -> bool {
+        if self.plain_dns_active || !self.has_capacity() {
+            return false;
+        }
+        self.plain_dns_active = self
+            .jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.try_send(R2oUdpDiscoveryJob::PlainDns(job)).is_ok());
+        self.plain_dns_active
     }
 
     fn queue_stun(&mut self, job: StunDiscoveryJob) -> bool {
@@ -11499,9 +11685,14 @@ impl R2oQuicDiscoveryWorker {
         true
     }
 
-    fn try_stun_outcome(&mut self) -> Option<StunDiscoveryOutcome> {
-        let outcome = self.stun_outcomes.try_recv().ok()?;
-        self.stun_active.remove(&outcome.server);
+    fn try_address_outcome(&mut self) -> Option<AddressUdpDiscoveryOutcome> {
+        let outcome = self.address_outcomes.try_recv().ok()?;
+        match &outcome {
+            AddressUdpDiscoveryOutcome::Stun(outcome) => {
+                self.stun_active.remove(&outcome.server);
+            }
+            AddressUdpDiscoveryOutcome::PlainDns(..) => self.plain_dns_active = false,
+        }
         Some(outcome)
     }
 
@@ -11580,6 +11771,7 @@ fn watch(socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
         None,
         false,
         r2o_new_measurement_gate(),
+        Vec::new(),
     )
 }
 
@@ -16915,7 +17107,7 @@ fn flow_socket_addresses(
 }
 
 #[cfg(unix)]
-fn applied_quic_trial_matches(
+fn applied_udp_trial_matches(
     event: &r2k_core::control::AppliedEvent,
     trial_id: [u8; 16],
     plan_id: [u8; 16],
@@ -23875,12 +24067,24 @@ fn control_command_trial_id(command: &[u8], expected: u16) -> Option<[u8; 16]> {
         control::COMMAND_SET_NAME_BOUND
         | control::COMMAND_SET_NAME_PROBE
         | control::COMMAND_SET_ENDPOINT_BOUND => body.get(body.len().checked_sub(16)?..)?,
-        COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE => {
+        COMMAND_SET_ADDR_PROBE | control::COMMAND_SET_DNS_PROBE | COMMAND_DEL_ADDR_PROBE => {
             body.get(r2k_core::control::KEY_LEN..r2k_core::control::KEY_LEN + 16)?
         }
         _ => return None,
     };
     Some(trial.try_into().ok()?)
+}
+
+#[cfg(unix)]
+fn address_probe_install_kind(set: &[u8], delete: &[u8], trial_id: [u8; 16]) -> Option<u16> {
+    [COMMAND_SET_ADDR_PROBE, control::COMMAND_SET_DNS_PROBE]
+        .into_iter()
+        .find(|&kind| {
+            r2o_trial_present(&trial_id)
+                && control_command_trial_id(set, kind) == Some(trial_id)
+                && control_command_trial_id(delete, COMMAND_DEL_ADDR_PROBE) == Some(trial_id)
+                && set[6..6 + control::KEY_LEN] == delete[6..6 + control::KEY_LEN]
+        })
 }
 
 #[cfg(unix)]
@@ -24946,6 +25150,7 @@ impl ControlClient {
         initial_catalog_sync: Option<CompiledCatalog>,
         no_diagnostics: bool,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
+        plain_dns_endpoints: Vec<std::net::SocketAddr>,
     ) -> Result<(), Box<dyn Error>> {
         use std::io::Write;
 
@@ -24955,6 +25160,16 @@ impl ControlClient {
         let mut dns_services = R2oDnsServices::from_system();
         r2o_publish_dns_services(&dns_services.services);
         let mut dns_health = R2oDnsHealth::new();
+        let plain_dns_marks = https_probe_mark
+            .zip(confirm_mark)
+            .filter(|&(measure, probe)| measure != 0 && probe != 0 && measure != probe);
+        if !plain_dns_endpoints.is_empty() && plain_dns_marks.is_none() {
+            eprintln!("DNS Discovery: нужны разные ненулевые метки прямого теста и пробы");
+        }
+        let mut plain_dns_due: Vec<_> = plain_dns_endpoints
+            .into_iter()
+            .map(|server| (server, std::time::Instant::now()))
+            .collect();
         let mut dns_services_refresh =
             std::time::Instant::now() + std::time::Duration::from_secs(30);
         let http_search = discovery.as_ref().map(|(catalog, _, _)| {
@@ -25155,7 +25370,7 @@ impl ControlClient {
         let mut live_written_at = None;
         let mut pending_candidate_acks: HashMap<[u8; 16], PendingTcpCandidateAck> = HashMap::new();
         let mut pending_name_deletes: HashMap<[u8; 16], PendingNameProbeDeleteAck> = HashMap::new();
-        let mut pending_quic_acks: HashMap<(u16, [u8; 16]), PendingQuicProbeAck> = HashMap::new();
+        let mut pending_addr_acks: HashMap<(u16, [u8; 16]), PendingAddrProbeAck> = HashMap::new();
         let run_result = (|| -> Result<(), Box<dyn Error>> {
             loop {
                 if R2O_CONTROLLER_STOP.load(Ordering::Relaxed) {
@@ -25177,7 +25392,7 @@ impl ControlClient {
                 for (_, pending) in pending_name_deletes.extract_if(|_, ack| now >= ack.deadline) {
                     pending.finish(self, None);
                 }
-                for (_, pending) in pending_quic_acks.extract_if(|_, ack| now >= ack.deadline) {
+                for (_, pending) in pending_addr_acks.extract_if(|_, ack| now >= ack.deadline) {
                     pending.finish(self, None)?;
                 }
                 let dns_wall_now = std::time::SystemTime::now()
@@ -25186,6 +25401,24 @@ impl ControlClient {
                     .as_secs() as i64;
                 dns_health.poll(&mut dns_services, dns_wall_now);
                 dns_health.start_due(&mut dns_services, https_probe_mark);
+                if let Some((measure_mark, probe_mark)) = plain_dns_marks
+                    && let Some((server, due)) = plain_dns_due
+                        .iter_mut()
+                        .filter(|(_, due)| *due <= now)
+                        .min_by_key(|(_, due)| *due)
+                    && let Some(worker) = quic_discovery
+                        .as_mut()
+                        .filter(|worker| !worker.plain_dns_active && worker.has_capacity())
+                    && let Some(permit) = measurement_gate.r2o_try_acquire()
+                    && worker.queue_plain_dns(PlainDnsDiscoveryJob {
+                        server: *server,
+                        measure_mark,
+                        probe_mark,
+                        permit,
+                    })
+                {
+                    *due = now + std::time::Duration::from_secs(120);
+                }
                 if let Some((worker, _, _, _)) = &discovery {
                     dns_services.sync_discovery_tasks(worker, std::time::Instant::now());
                 }
@@ -26344,8 +26577,35 @@ impl ControlClient {
                 }
                 if let Some(outcome) = quic_discovery
                     .as_mut()
-                    .and_then(R2oQuicDiscoveryWorker::try_stun_outcome)
+                    .and_then(R2oQuicDiscoveryWorker::try_address_outcome)
                 {
+                    let outcome = match outcome {
+                        AddressUdpDiscoveryOutcome::Stun(outcome) => outcome,
+                        AddressUdpDiscoveryOutcome::PlainDns(server, result) => {
+                            match result {
+                                Ok(PlainDnsVerdict::Direct) => println!(
+                                    "DNS/UDP {server}: прямой запрос получил корректный ответ"
+                                ),
+                                Ok(PlainDnsVerdict::Rejected) => {
+                                    println!("DNS/UDP {server}: получен некорректный DNS-ответ")
+                                }
+                                Ok(PlainDnsVerdict::NoAnswer) => println!(
+                                    "DNS/UDP {server}: кандидат не получил DNS-ответ в срок"
+                                ),
+                                Ok(PlainDnsVerdict::MissingExecution) => println!(
+                                    "DNS/UDP {server}: получен DNS-ответ, исполнение плана не подтверждено"
+                                ),
+                                Ok(PlainDnsVerdict::Confirmed) => println!(
+                                    "DNS/UDP {server}: точный APPLIED и корректный DNS-ответ подтверждены на одном сокете"
+                                ),
+                                Err(error) => {
+                                    eprintln!("DNS/UDP {server}: проба не завершена: {error}")
+                                }
+                            }
+                            std::io::stdout().flush()?;
+                            continue;
+                        }
+                    };
                     let server = outcome.server;
                     match outcome.result {
                         Ok(StunDiagnosticVerdict::Direct) => {
@@ -26564,7 +26824,7 @@ impl ControlClient {
                             && let Some(command) =
                                 self.start_name_probe_delete(command, &mut pending_name_deletes)?
                             && let Some(command) =
-                                self.start_quic_probe_ack(command, &mut pending_quic_acks)?
+                                self.start_addr_probe_ack(command, &mut pending_addr_acks)?
                         {
                             self.service_http_search_command(
                                 command,
@@ -26738,7 +26998,7 @@ impl ControlClient {
                         .values()
                         .map(|ack| ack.deadline)
                         .chain(pending_name_deletes.values().map(|ack| ack.deadline))
-                        .chain(pending_quic_acks.values().map(|ack| ack.deadline))
+                        .chain(pending_addr_acks.values().map(|ack| ack.deadline))
                         .chain(
                             catalog_sync
                                 .as_ref()
@@ -26794,7 +27054,7 @@ impl ControlClient {
                         pending.finish(self, Some(ack));
                         continue;
                     }
-                    if self.finish_quic_probe_ack(ack, &mut pending_quic_acks)? {
+                    if self.finish_addr_probe_ack(ack, &mut pending_addr_acks)? {
                         continue;
                     }
                     if let Some(cursor) = catalog_sync.as_mut() {
@@ -28899,9 +29159,9 @@ impl ControlClient {
                 eprintln!("не удалось снять временную TCP-пробу при остановке: {error}");
             }
         }
-        for (_, pending) in pending_quic_acks.drain() {
+        for (_, pending) in pending_addr_acks.drain() {
             if let Err(error) = pending.finish(self, None) {
-                eprintln!("не удалось снять временную QUIC-пробу при остановке: {error}");
+                eprintln!("не удалось снять временную адресную пробу при остановке: {error}");
             }
         }
         for (_, pending) in pending_name_deletes.drain() {
@@ -29278,50 +29538,46 @@ impl ControlClient {
         Ok(None)
     }
 
-    fn start_quic_probe_ack(
+    fn start_addr_probe_ack(
         &mut self,
         request: HttpSearchCommand,
-        pending: &mut HashMap<(u16, [u8; 16]), PendingQuicProbeAck>,
+        pending: &mut HashMap<(u16, [u8; 16]), PendingAddrProbeAck>,
     ) -> Result<Option<HttpSearchCommand>, Box<dyn Error>> {
         if r2o_control_wire() == control::WireProfile::V22 {
             return Ok(Some(request));
         }
         let (kind, command, ack) = match request {
-            HttpSearchCommand::R2oInstallQuicProbe {
+            HttpSearchCommand::R2oInstallAddrProbe {
                 command,
                 delete,
                 trial_id,
                 deadline,
                 reply,
             } => {
-                if control_command_trial_id(&command, COMMAND_SET_ADDR_PROBE) != Some(trial_id)
-                    || control_command_trial_id(&delete, COMMAND_DEL_ADDR_PROBE) != Some(trial_id)
-                    || command[6..6 + control::KEY_LEN] != delete[6..6 + control::KEY_LEN]
-                    || !r2o_trial_present(&trial_id)
-                {
+                let Some(kind) = address_probe_install_kind(&command, &delete, trial_id) else {
                     let _ = reply.send(Err(
-                        "не совпадают ключи установки и снятия QUIC-пробы".into()
+                        "не совпадают ключи установки и снятия адресной пробы".into()
                     ));
                     return Ok(None);
-                }
+                };
                 (
-                    COMMAND_SET_ADDR_PROBE,
+                    kind,
                     command,
-                    PendingQuicProbeAck {
+                    PendingAddrProbeAck {
                         deadline,
                         delete_on_failure: Some(delete),
                         reply,
                     },
                 )
             }
-            HttpSearchCommand::R2oDeleteQuicProbe {
+            HttpSearchCommand::R2oDeleteAddrProbe {
                 command,
                 deadline,
                 reply,
             } => (
                 COMMAND_DEL_ADDR_PROBE,
                 command,
-                PendingQuicProbeAck {
+                PendingAddrProbeAck {
                     deadline,
                     delete_on_failure: None,
                     reply,
@@ -29331,20 +29587,22 @@ impl ControlClient {
         };
         let Some(trial_id) = control_command_trial_id(&command, kind).filter(r2o_trial_present)
         else {
-            let _ = ack.reply.send(Err("неверный trial ID QUIC-пробы".into()));
+            let _ = ack
+                .reply
+                .send(Err("неверный trial ID адресной пробы".into()));
             return Ok(None);
         };
         let key = (kind, trial_id);
         if pending.contains_key(&key) {
-            let _ = ack
-                .reply
-                .send(Err("команда QUIC-пробы уже ожидает подтверждения".into()));
+            let _ = ack.reply.send(Err(
+                "команда адресной пробы уже ожидает подтверждения".into()
+            ));
             return Ok(None);
         }
-        if std::time::Instant::now() >= ack.deadline && kind == COMMAND_SET_ADDR_PROBE {
+        if std::time::Instant::now() >= ack.deadline && kind != COMMAND_DEL_ADDR_PROBE {
             let _ = ack
                 .reply
-                .send(Err("истёк срок отправки команды QUIC-пробы".into()));
+                .send(Err("истёк срок отправки команды адресной пробы".into()));
             return Ok(None);
         }
         self.write_command(&command)?;
@@ -29352,10 +29610,10 @@ impl ControlClient {
         Ok(None)
     }
 
-    fn finish_quic_probe_ack(
+    fn finish_addr_probe_ack(
         &mut self,
         ack: r2k_core::control::Ack,
-        pending: &mut HashMap<(u16, [u8; 16]), PendingQuicProbeAck>,
+        pending: &mut HashMap<(u16, [u8; 16]), PendingAddrProbeAck>,
     ) -> Result<bool, Box<dyn Error>> {
         let Some(request) = ack
             .trial_id
@@ -29550,34 +29808,36 @@ impl ControlClient {
                 }
                 let _ = reply.send(result);
             }
-            HttpSearchCommand::R2oInstallQuicProbe {
+            HttpSearchCommand::R2oInstallAddrProbe {
                 command,
                 delete,
                 trial_id,
                 deadline,
                 reply,
             } => {
+                let Some(kind) = address_probe_install_kind(&command, &delete, trial_id) else {
+                    let _ = reply.send(Err(
+                        "не совпадают ключи установки и снятия адресной пробы".into()
+                    ));
+                    return Ok(());
+                };
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
-                    let _ = reply.send(Err("истёк срок отправки команды QUIC-пробы".into()));
+                    let _ = reply.send(Err("истёк срок отправки команды адресной пробы".into()));
                     return Ok(());
                 }
-                let ack = match self.exchange_command_with_timeout(
-                    &command,
-                    COMMAND_SET_ADDR_PROBE,
-                    remaining,
-                ) {
+                let ack = match self.exchange_command_with_timeout(&command, kind, remaining) {
                     Ok(ack) => ack,
                     Err(error) => {
                         match self.send_command(&delete, COMMAND_DEL_ADDR_PROBE) {
                             Ok(()) => {
                                 let _ = reply.send(Err(format!(
-                                    "установка QUIC-пробы не подтверждена; временная привязка удалена: {error}"
+                                    "установка адресной пробы не подтверждена; временная привязка удалена: {error}"
                                 )));
                             }
                             Err(cleanup_error) => {
                                 let message = format!(
-                                    "установка QUIC-пробы не подтверждена ({error}); удалить временную привязку не удалось ({cleanup_error})"
+                                    "установка адресной пробы не подтверждена ({error}); удалить временную привязку не удалось ({cleanup_error})"
                                 );
                                 let _ = reply.send(Err(message.clone()));
                                 return Err(message.into());
@@ -29590,13 +29850,13 @@ impl ControlClient {
                     match self.send_command(&delete, COMMAND_DEL_ADDR_PROBE) {
                         Ok(()) => {
                             let _ = reply.send(Err(
-                                "датапат не подтвердил QUIC-пробу с ожидаемым trial ID; временная привязка удалена"
+                                "датапат не подтвердил адресную пробу с ожидаемым trial ID; временная привязка удалена"
                                     .to_owned(),
                             ));
                         }
                         Err(cleanup_error) => {
                             let message = format!(
-                                "датапат не подтвердил QUIC-пробу; удалить временную привязку не удалось: {cleanup_error}"
+                                "датапат не подтвердил адресную пробу; удалить временную привязку не удалось: {cleanup_error}"
                             );
                             let _ = reply.send(Err(message.clone()));
                             return Err(message.into());
@@ -29608,7 +29868,7 @@ impl ControlClient {
                     self.write_command(&delete)?;
                 }
             }
-            HttpSearchCommand::R2oDeleteQuicProbe {
+            HttpSearchCommand::R2oDeleteAddrProbe {
                 command,
                 deadline,
                 reply,
@@ -29624,7 +29884,7 @@ impl ControlClient {
                     let _ = reply.send(Err(error.clone()));
                     return Err(error.into());
                 }
-                let ack = result.expect("проверен результат удаления временной QUIC-пробы");
+                let ack = result.expect("проверен результат удаления временной адресной пробы");
                 if !ack.ok {
                     let message = ack_reason_text(ack.reason);
                     let _ = reply.send(Err(message.to_owned()));
@@ -30385,7 +30645,7 @@ impl ControlClient {
         let ack = ask_http_controller_until(
             commands,
             CONTROL_ACK_TIMEOUT.min(r2o_quic_trial_remaining(started_at, measurement_permit)),
-            |deadline, reply| HttpSearchCommand::R2oInstallQuicProbe {
+            |deadline, reply| HttpSearchCommand::R2oInstallAddrProbe {
                 command: set,
                 delete: delete.clone(),
                 trial_id,
@@ -30440,10 +30700,10 @@ impl ControlClient {
                     commands,
                     trial_id,
                     std::time::Duration::from_millis(400),
-                    |event| applied_quic_trial_matches(event, trial_id, plan_id, local, server),
+                    |event| applied_udp_trial_matches(event, trial_id, plan_id, local, server),
                 )?;
                 applied |= events.iter().any(|event| {
-                    applied_quic_trial_matches(event, trial_id, plan_id, local, server)
+                    applied_udp_trial_matches(event, trial_id, plan_id, local, server)
                 });
                 outcome.filter = filter;
                 outcome.applied = applied;
@@ -30498,10 +30758,10 @@ impl ControlClient {
                         commands,
                         trial_id,
                         std::time::Duration::from_millis(400),
-                        |event| applied_quic_trial_matches(event, trial_id, plan_id, local, server),
+                        |event| applied_udp_trial_matches(event, trial_id, plan_id, local, server),
                     )?;
                     applied |= events.iter().any(|event| {
-                        applied_quic_trial_matches(event, trial_id, plan_id, local, server)
+                        applied_udp_trial_matches(event, trial_id, plan_id, local, server)
                     });
                     outcome.applied = applied;
                     outcome.decision = if applied && outcome.dns_reply {
@@ -30530,10 +30790,10 @@ impl ControlClient {
                     commands,
                     trial_id,
                     std::time::Duration::from_millis(400),
-                    |event| applied_quic_trial_matches(event, trial_id, plan_id, local, server),
+                    |event| applied_udp_trial_matches(event, trial_id, plan_id, local, server),
                 )?;
                 applied |= events.iter().any(|event| {
-                    applied_quic_trial_matches(event, trial_id, plan_id, local, server)
+                    applied_udp_trial_matches(event, trial_id, plan_id, local, server)
                 });
                 if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
                     return Err("истёк срок QUIC-испытания".into());
@@ -30566,7 +30826,7 @@ impl ControlClient {
                 commands,
                 trial_id,
                 std::time::Duration::from_secs(5),
-                |event| applied_quic_trial_matches(event, trial_id, plan_id, local, server),
+                |event| applied_udp_trial_matches(event, trial_id, plan_id, local, server),
             ))
         } else {
             None
@@ -30574,12 +30834,12 @@ impl ControlClient {
         if let (Ok(outcome), Some(Ok(events))) = (&mut trial_result, &delayed_applied) {
             outcome.applied |= events
                 .iter()
-                .any(|event| applied_quic_trial_matches(event, trial_id, plan_id, local, server));
+                .any(|event| applied_udp_trial_matches(event, trial_id, plan_id, local, server));
         }
 
         let delete_result =
             ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
-                HttpSearchCommand::R2oDeleteQuicProbe {
+                HttpSearchCommand::R2oDeleteAddrProbe {
                     command: delete,
                     deadline,
                     reply,
@@ -32944,7 +33204,7 @@ impl ControlClient {
             control::COMMAND_DEL_NAME => "DEL_NAME",
             control::COMMAND_DEL_NAME_PROBE => "DEL_NAME_PROBE",
             COMMAND_DEL_VOICE_ADDR_PROBE => "DEL_VOICE_ADDR_PROBE",
-            COMMAND_DEL_ADDR_PROBE => "команда удаления временной QUIC-пробы",
+            COMMAND_DEL_ADDR_PROBE => "команда удаления временной адресной пробы",
             control::COMMAND_SET_NAME_PROBE => "SET_NAME_PROBE",
             COMMAND_SET_VOICE_ADDR => "SET_VOICE_ADDR",
             COMMAND_SET_VOICE_ADDR_PROBE => "SET_VOICE_ADDR_PROBE",
@@ -41276,7 +41536,7 @@ mod tests {
         HttpBaselineError, HttpBaselineFailureAction, HttpCandidateHistory, HttpCandidateProgress,
         HttpLiveFailures, HttpSearchCommand, HttpSearchDisposition, HttpSearchTask,
         HttpSearchWindow, HttpSearchWorker, R2oFamilyRecoveryDecision, R2oVoiceTrialContext,
-        ServeCliOptions, advance_http_candidate, applied_quic_trial_matches,
+        ServeCliOptions, advance_http_candidate, applied_udp_trial_matches,
         baseline_silence_starts_search, binding_shape_transport, candidate_text, catalog_commands,
         classify_control_trigger, classify_target_trigger, compile_text, encode_set_name,
         failed_http_programs, flow_socket_addresses, http_baseline_failure_action,
@@ -57356,7 +57616,7 @@ group_block_proven: false,
             },
         };
         let matches = |event: &r2k_core::control::AppliedEvent| {
-            applied_quic_trial_matches(event, [0x11; 16], [0x22; 16], local, server)
+            applied_udp_trial_matches(event, [0x11; 16], [0x22; 16], local, server)
         };
 
         assert!(matches(&event));
@@ -57839,7 +58099,7 @@ group_block_proven: false,
                 let ack = super::ask_http_controller_until(
                     &commands,
                     super::CONTROL_ACK_TIMEOUT,
-                    |deadline, reply| HttpSearchCommand::R2oInstallQuicProbe {
+                    |deadline, reply| HttpSearchCommand::R2oInstallAddrProbe {
                         command: set,
                         delete: delete.clone(),
                         trial_id,
@@ -57854,7 +58114,7 @@ group_block_proven: false,
                 super::ask_http_controller_until(
                     &commands,
                     super::CONTROL_ACK_TIMEOUT,
-                    |deadline, reply| HttpSearchCommand::R2oDeleteQuicProbe {
+                    |deadline, reply| HttpSearchCommand::R2oDeleteAddrProbe {
                         command: delete,
                         deadline,
                         reply,
@@ -57975,7 +58235,7 @@ group_block_proven: false,
         let mut pending = std::collections::HashMap::new();
         while completed.len() < 2 {
             if let Some(command) = worker.try_command()
-                && let Some(command) = client.start_quic_probe_ack(command, &mut pending).unwrap()
+                && let Some(command) = client.start_addr_probe_ack(command, &mut pending).unwrap()
             {
                 client
                     .service_http_search_command(
@@ -57993,7 +58253,7 @@ group_block_proven: false,
             {
                 let frame = read_frame(&mut client.socket).unwrap();
                 let ack = super::decode_ack(&frame).unwrap();
-                assert!(client.finish_quic_probe_ack(ack, &mut pending).unwrap());
+                assert!(client.finish_addr_probe_ack(ack, &mut pending).unwrap());
             }
             if let Some(outcome) = worker.try_outcome() {
                 assert!(matches!(outcome.result, Ok(None)));
@@ -58250,8 +58510,8 @@ group_block_proven: false,
         let mut pending = HashMap::new();
         assert!(
             client
-                .start_quic_probe_ack(
-                    super::HttpSearchCommand::R2oInstallQuicProbe {
+                .start_addr_probe_ack(
+                    super::HttpSearchCommand::R2oInstallAddrProbe {
                         command: set.clone(),
                         delete: delete.clone(),
                         trial_id: trial,
@@ -58280,7 +58540,7 @@ group_block_proven: false,
         let foreign = encode_ack_for_trial(key.0, true, 0, Some([2; 16])).unwrap();
         peer.write_all(&foreign).unwrap();
         let foreign = super::decode_ack(&read_frame(&mut client.socket).unwrap()).unwrap();
-        assert!(!client.finish_quic_probe_ack(foreign, &mut pending).unwrap());
+        assert!(!client.finish_addr_probe_ack(foreign, &mut pending).unwrap());
 
         let mut waiting = pending.remove(&key).unwrap();
         waiting.deadline = Instant::now();
@@ -58292,8 +58552,8 @@ group_block_proven: false,
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         assert!(
             client
-                .start_quic_probe_ack(
-                    super::HttpSearchCommand::R2oInstallQuicProbe {
+                .start_addr_probe_ack(
+                    super::HttpSearchCommand::R2oInstallAddrProbe {
                         command: set,
                         delete,
                         trial_id: trial,
@@ -58319,7 +58579,7 @@ group_block_proven: false,
         let result = super::ask_http_controller_until(
             &commands,
             Duration::from_millis(10),
-            |deadline, reply| super::HttpSearchCommand::R2oDeleteQuicProbe {
+            |deadline, reply| super::HttpSearchCommand::R2oDeleteAddrProbe {
                 command: Vec::new(),
                 deadline,
                 reply,
@@ -58351,7 +58611,7 @@ group_block_proven: false,
                 }
                 let (reply, result) = mpsc::sync_channel(1);
                 commands
-                    .send(HttpSearchCommand::R2oDeleteQuicProbe {
+                    .send(HttpSearchCommand::R2oDeleteAddrProbe {
                         command: super::encode_delete_addr_probe(local, server, trial_id).unwrap(),
                         deadline: std::time::Instant::now() + super::CONTROL_ACK_TIMEOUT,
                         reply,
@@ -62110,7 +62370,7 @@ group_block_proven: false,
                         let (reply, response) = std::sync::mpsc::sync_channel(1);
                         client
                             .service_http_search_command(
-                                super::HttpSearchCommand::R2oInstallQuicProbe {
+                                super::HttpSearchCommand::R2oInstallAddrProbe {
                                     command,
                                     delete: delete.unwrap(),
                                     trial_id,
@@ -64693,6 +64953,7 @@ group_block_proven: false,
                 Some(compiled),
                 true,
                 super::r2o_new_measurement_gate(),
+                Vec::new(),
             )
             .unwrap_err();
         assert!(error.to_string().contains("подтверждение"));
@@ -64753,6 +65014,7 @@ group_block_proven: false,
                 None,
                 true,
                 gate.clone(),
+                Vec::new(),
             )
             .unwrap_err();
         assert!(error.to_string().contains("подтверждение"), "{error}");
@@ -65453,6 +65715,35 @@ group_block_proven: false,
         assert!(super::parse_mark("0x").is_err());
         assert!(super::parse_mark("0xgg").is_err());
         assert!(super::parse_mark("4294967296").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn обычный_dns_выбирает_только_настроенные_числовые_endpoint() {
+        use r2k_core::dns_config::parse_plain_dns_endpoints as parse;
+        let configured = "192.0.2.53:53 [2001:db8::53]:1053 192.0.2.53:53";
+        assert_eq!(
+            parse(configured, None).unwrap(),
+            [
+                "192.0.2.53:53".parse().unwrap(),
+                "[2001:db8::53]:1053".parse().unwrap()
+            ]
+        );
+        assert_eq!(parse(configured, Some(true)).unwrap().len(), 1);
+        assert!(parse("", Some(false)).unwrap().is_empty());
+        for invalid in [
+            "resolver.example:53",
+            "192.0.2.53",
+            "192.0.2.53:0",
+            "224.0.0.53:53",
+            "127.0.0.1:53",
+            "[fe80::53%2]:53",
+            "[::ffff:192.0.2.53]:53",
+            "192.0.2.53:53 192.0.2.0/24:53",
+        ] {
+            assert!(parse(invalid, None).is_err(), "{invalid}");
+        }
+        assert!(parse(&"192.0.2.53:53 ".repeat(17), None).is_err());
     }
 
     #[test]

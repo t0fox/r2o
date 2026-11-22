@@ -7,7 +7,7 @@
 use r2k_core::dns_config::DnsService;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,9 +29,9 @@ pub struct DnsHealthResult {
     pub reason: String,
 }
 
-/// C `dns_query`: 29-байтный length-prefixed DNS-запрос `example.com A`.
+/// C `dns_query`: 31-байтный DNS-запрос `example.com A` с префиксом длины.
 ///
-/// Первые два байта — длина DNS-сообщения (27), затем ID, flags 0100,
+/// Первые два байта — длина DNS-сообщения (29), затем ID, flags 0100,
 /// QDCOUNT 1, AN/NS/AR 0 и вопрос `example.com A IN`.
 pub fn dns_query_frame(id: u16) -> Vec<u8> {
     let message = dns_query_message(id);
@@ -42,7 +42,7 @@ pub fn dns_query_frame(id: u16) -> Vec<u8> {
 }
 
 pub fn dns_query_message(id: u16) -> Vec<u8> {
-    let mut message = Vec::with_capacity(27);
+    let mut message = Vec::with_capacity(29);
     message.extend_from_slice(&id.to_be_bytes());
     message.extend_from_slice(&0x0100_u16.to_be_bytes());
     message.extend_from_slice(&1_u16.to_be_bytes());
@@ -54,6 +54,55 @@ pub fn dns_query_message(id: u16) -> Vec<u8> {
     message.push(0);
     message.extend_from_slice(&[0, 1, 0, 1]);
     message
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlainDnsReply {
+    Answer,
+    Rejected,
+    Timeout,
+}
+
+/// Проверяем DNS на том же подключённом сокете, который защищён пробой.
+pub fn probe_plain_dns_udp_on(
+    socket: &UdpSocket,
+    id: u16,
+    timeout: Duration,
+) -> std::io::Result<PlainDnsReply> {
+    use std::io::ErrorKind;
+
+    let deadline = Instant::now() + timeout;
+    socket.set_write_timeout(Some(timeout))?;
+    let query = dns_query_message(id);
+    if socket.send(&query)? != query.len() {
+        return Err(ErrorKind::WriteZero.into());
+    }
+    let mut bytes = [0; DNS_FRAME_MAX + 1];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(PlainDnsReply::Timeout);
+        }
+        socket.set_read_timeout(Some(remaining))?;
+        match socket.recv(&mut bytes) {
+            // Поздний ответ на контрольный запрос не относится к кандидату.
+            Ok(length) if dns16(&bytes[..length], 0) != Some(id) => {}
+            Ok(length) => {
+                return Ok(
+                    if length <= DNS_FRAME_MAX && dns_probe_reply(&bytes[..length], id) {
+                        PlainDnsReply::Answer
+                    } else {
+                        PlainDnsReply::Rejected
+                    },
+                );
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                return Ok(PlainDnsReply::Timeout);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn dns16(bytes: &[u8], offset: usize) -> Option<u16> {

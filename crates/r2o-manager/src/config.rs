@@ -33,6 +33,7 @@ const DEFAULT_CONFIG_KEYS: &[&str] = &[
     "VOICE_CONNBYTES",
     "HTTP_KEEPALIVE_PORTS",
     "DNS_PORTS",
+    "DNS_DISCOVERY_ENDPOINTS",
     "D2K_GATE",
     "PANEL_LISTEN",
     "TG_ENABLED",
@@ -396,6 +397,9 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
             .parse::<u16>()
             .is_ok_and(|seconds| (1..=3600).contains(&seconds)),
         "PORTS" | "VOICE_PORTS" | "HTTP_KEEPALIVE_PORTS" | "DNS_PORTS" => valid_port_list(value),
+        "DNS_DISCOVERY_ENDPOINTS" => {
+            r2k_core::dns_config::parse_plain_dns_endpoints(value, None).is_ok()
+        }
         "CONNBYTES" | "VOICE_CONNBYTES" => valid_connbytes_window(value),
         "MARK" | "PROBE_MARK" | "MEASURE_MARK" => valid_mark(value),
         "ONLY_MARK" => valid_only_mark(value),

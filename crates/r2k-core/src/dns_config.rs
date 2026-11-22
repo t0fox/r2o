@@ -7,6 +7,39 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+/// Числовые unicast-резолверы для адресной проверки обычного DNS.
+pub fn parse_plain_dns_endpoints(
+    config: &str,
+    ipv6: Option<bool>,
+) -> Result<Vec<std::net::SocketAddr>, &'static str> {
+    use std::net::SocketAddr;
+    let mut targets = Vec::new();
+    if config.len() > 2048 || config.split_ascii_whitespace().count() > 16 {
+        return Err("DNS_DISCOVERY_ENDPOINTS допускает до 16 адресов резолверов");
+    }
+    for value in config.split_ascii_whitespace() {
+        let endpoint: SocketAddr = value
+            .parse()
+            .map_err(|_| "ожидается числовой IP:порт DNS")?;
+        let ip = endpoint.ip();
+        if endpoint.port() == 0
+            || ip.is_unspecified()
+            || ip.is_multicast()
+            || ip.is_loopback()
+            || matches!(endpoint, SocketAddr::V4(address) if address.ip().is_broadcast()
+                || address.ip().octets()[0] == 0)
+            || matches!(endpoint, SocketAddr::V6(address) if address.scope_id() != 0
+                || address.ip().to_ipv4_mapped().is_some() || address.ip().is_unicast_link_local())
+        {
+            return Err("DNS Discovery требует однозначный unicast endpoint без зоны");
+        }
+        if ipv6.is_none_or(|ipv6| endpoint.is_ipv6() == ipv6) && !targets.contains(&endpoint) {
+            targets.push(endpoint);
+        }
+    }
+    Ok(targets)
+}
+
 pub const DNS_SERVICE_MAX: usize = 32;
 pub const DNS_HOST_MAX: usize = 256;
 pub const DNS_PATH_MAX: usize = 1024;
