@@ -168,12 +168,14 @@ fn recover_idle(root: &Path) -> Result<(), UpdateError> {
     let mut state = read_state(root)?;
     if state["busy"].as_str().is_some_and(|busy| !busy.is_empty())
         || state["install_stage"] == 2 && state["last_ok"] == true
+        || staged_file(root).try_exists()?
     {
         state["busy"] = json!("");
         state["last_utc"] = json!(now_epoch());
         state["last_ok"] = json!(false);
         state["last_message"] = json!("Операция обновления прервана");
         clear_staged(root);
+        crate::install::recover_interrupted_extraction(root)?;
         let _ = fs::remove_file(root.join("state/update-transfer.json"));
         write_state(root, &state)?;
     }

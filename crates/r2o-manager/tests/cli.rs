@@ -647,6 +647,75 @@ fn update_auto_cli_changes_only_the_auto_setting() {
     assert_eq!(state["current"], "r2o-1");
 }
 
+#[test]
+fn router_update_recovery_clears_staged_rollback_before_journal() {
+    let temp = TestDir::new();
+    let root = temp.0.join("install");
+    let state = root.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let bundle = make_bundle(&temp.0, "bundle");
+    for release in ["r2o-base", "r2o-next"] {
+        json_output(invoke(&[
+            "install-local",
+            "--root",
+            root.to_str().unwrap(),
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--release-id",
+            release,
+            "--architecture",
+            "mipsel",
+        ]));
+    }
+    let staged = state.join("update-stage.json");
+    fs::write(
+        &staged,
+        br#"{"release_id":"r2o-base","architecture":"mipsel","kind":"previous"}"#,
+    )
+    .unwrap();
+    let slots = fs::read(root.join("release-slots")).unwrap();
+    let recover = ["update-recover", "--root", root.to_str().unwrap()];
+    assert!(invoke(&recover).status.success());
+    assert!(!staged.exists());
+    assert_eq!(fs::read(root.join("release-slots")).unwrap(), slots);
+    let status = state.join("update.json");
+    let recovered = fs::read(&status).unwrap();
+    let parsed: Value = serde_json::from_slice(&recovered).unwrap();
+    assert_eq!(parsed["busy"], "");
+    assert_eq!(parsed["last_ok"], false);
+    assert!(invoke(&recover).status.success());
+    assert_eq!(fs::read(&status).unwrap(), recovered);
+}
+
+#[test]
+fn router_update_recovery_frees_unjournaled_extraction_space() {
+    let temp = TestDir::new();
+    let root = temp.0.join("install");
+    let orphan = root.join(".install-123-0");
+    let state = root.join("state");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::write(orphan.join("partial-file"), b"interrupted extraction").unwrap();
+    fs::write(
+        state.join("update.json"),
+        br#"{"format":1,"busy":"installing","phase":"verify"}"#,
+    )
+    .unwrap();
+    fs::write(root.join("config"), b"MODE=observe\n").unwrap();
+    let cache = state.join("update-download");
+    fs::create_dir(&cache).unwrap();
+    let partial = cache.join("4".repeat(64));
+    fs::write(&partial, b"resumable data").unwrap();
+    assert!(
+        invoke(&["update-recover", "--root", root.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(!orphan.exists());
+    assert_eq!(fs::read(root.join("config")).unwrap(), b"MODE=observe\n");
+    assert_eq!(fs::read(partial).unwrap(), b"resumable data");
+}
+
 #[cfg(unix)]
 #[test]
 fn router_update_recovers_after_kill_and_preserves_operator_data() {

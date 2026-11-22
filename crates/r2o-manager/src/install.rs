@@ -519,6 +519,12 @@ fn cleanup_stale_install_artifacts(root: &Path) {
     }
 }
 
+pub(crate) fn recover_interrupted_extraction(root: &Path) -> Result<(), InstallError> {
+    let _lock = ManagerLock::acquire(root)?;
+    cleanup_stale_install_artifacts(root);
+    Ok(())
+}
+
 fn create_work_dir(root: &Path) -> Result<PathBuf, InstallError> {
     for _ in 0..16 {
         let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
