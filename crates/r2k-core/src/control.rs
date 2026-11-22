@@ -92,6 +92,7 @@ pub const COMMAND_SET_ENDPOINT: u16 = 0x00a0;
 pub const COMMAND_DEL_ENDPOINT: u16 = 0x00a1;
 pub const COMMAND_SET_ENDPOINT_BOUND: u16 = 0x00a2;
 pub const COMMAND_SET_DNS_PROBE: u16 = 0x009c;
+pub const COMMAND_SET_DNS_ENDPOINT: u16 = 0x009d;
 pub const ENDPOINT_KEY_LEN: usize = 20;
 pub const COMMAND_SET_ADDR_PROBE: u16 = 0x0089;
 pub const COMMAND_DEL_ADDR_PROBE: u16 = 0x008a;
@@ -1661,7 +1662,7 @@ pub fn decode_endpoint_key(bytes: &[u8]) -> Option<(SocketAddr, u8)> {
 }
 
 const fn endpoint_shape_valid(shape: u8) -> bool {
-    matches!(shape, SHAPE_QUIC | SHAPE_VOICE)
+    matches!(shape, SHAPE_QUIC | SHAPE_VOICE | SHAPE_DNS_PROBE)
 }
 
 fn endpoint_key(endpoint: SocketAddr, shape: u8) -> Result<[u8; ENDPOINT_KEY_LEN], &'static str> {
@@ -1718,6 +1719,25 @@ pub fn encode_set_endpoint_bound(
     body.extend_from_slice(plan_records);
     body.extend_from_slice(&token);
     encode_frame(COMMAND_SET_ENDPOINT_BOUND, &body)
+}
+
+/// Закрепляем измеренную форму DNS/UDP за точным endpoint.
+pub fn encode_set_dns_endpoint(
+    endpoint: SocketAddr,
+    query_len: u16,
+    plan_records: &[u8],
+    token: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    let key = endpoint_key(endpoint, SHAPE_DNS_PROBE)?;
+    if token == [0; 16] || !crate::dns_probe::is_dns_probe_length(usize::from(query_len)) {
+        return Err("DNS endpoint требует измеренную длину запроса и ненулевой токен");
+    }
+    let mut body = Vec::with_capacity(ENDPOINT_KEY_LEN + 2 + plan_records.len() + token.len());
+    body.extend_from_slice(&key);
+    body.extend_from_slice(&query_len.to_be_bytes());
+    body.extend_from_slice(plan_records);
+    body.extend_from_slice(&token);
+    encode_frame(COMMAND_SET_DNS_ENDPOINT, &body)
 }
 
 pub fn encode_set_addr(
@@ -2321,7 +2341,10 @@ pub fn encode_ack_with_identifiers_profile(
     area_id: Option<[u8; 16]>,
     binding_context: Option<BindingContext>,
 ) -> Result<Vec<u8>, &'static str> {
-    let bound_install = matches!(command, COMMAND_SET_NAME_BOUND | COMMAND_SET_ENDPOINT_BOUND);
+    let bound_install = matches!(
+        command,
+        COMMAND_SET_NAME_BOUND | COMMAND_SET_ENDPOINT_BOUND | COMMAND_SET_DNS_ENDPOINT
+    );
     if bound_install && (trial_id.is_none() || binding_context.is_none()) {
         return Err("ACK подтверждаемой установки требует токен и контекст привязки");
     }
@@ -2330,6 +2353,7 @@ pub fn encode_ack_with_identifiers_profile(
             command,
             COMMAND_SET_NAME_BOUND
                 | COMMAND_SET_ENDPOINT_BOUND
+                | COMMAND_SET_DNS_ENDPOINT
                 | COMMAND_SET_NAME_PROBE
                 | COMMAND_SET_VOICE_ADDR_PROBE
                 | COMMAND_DEL_VOICE_ADDR_PROBE
@@ -2415,11 +2439,15 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
     if ok && reason != ACK_OK {
         return Err("успешное подтверждение содержит код отказа");
     }
-    let bound_install = matches!(command, COMMAND_SET_NAME_BOUND | COMMAND_SET_ENDPOINT_BOUND);
+    let bound_install = matches!(
+        command,
+        COMMAND_SET_NAME_BOUND | COMMAND_SET_ENDPOINT_BOUND | COMMAND_SET_DNS_ENDPOINT
+    );
     let supports_trial_id = matches!(
         command,
         COMMAND_SET_NAME_BOUND
             | COMMAND_SET_ENDPOINT_BOUND
+            | COMMAND_SET_DNS_ENDPOINT
             | COMMAND_SET_NAME_PROBE
             | COMMAND_SET_VOICE_ADDR_PROBE
             | COMMAND_DEL_VOICE_ADDR_PROBE
@@ -2516,10 +2544,12 @@ fn valid_install_ack_binding(command: u16, binding: &BindingContext) -> bool {
     binding.is_known()
         && matches!(binding.family, 4 | 6)
         && !binding.temporary
-        && if command == COMMAND_SET_ENDPOINT_BOUND {
-            binding.kind == 2 && matches!(binding.shape, SHAPE_QUIC | SHAPE_VOICE)
-        } else {
-            binding.kind == 1 && binding.shape == SHAPE_HTTP
+        && match command {
+            COMMAND_SET_ENDPOINT_BOUND => {
+                binding.kind == 2 && matches!(binding.shape, SHAPE_QUIC | SHAPE_VOICE)
+            }
+            COMMAND_SET_DNS_ENDPOINT => binding.kind == 2 && binding.shape == SHAPE_DNS_PROBE,
+            _ => binding.kind == 1 && binding.shape == SHAPE_HTTP,
         }
 }
 
@@ -3637,10 +3667,7 @@ fn valid_binding(binding: &BindingContext) -> bool {
     binding.kind <= 4
         && matches!(binding.family, 0 | 4 | 6)
         && (binding.shape <= SHAPE_ECH_TS
-            || binding.shape == SHAPE_DNS_PROBE
-                && binding.kind == 2
-                && binding.family != 0
-                && binding.temporary)
+            || binding.shape == SHAPE_DNS_PROBE && binding.kind == 2 && binding.family != 0)
 }
 
 /// Разбирает событие HTTP-портала v22 с необязательным контекстом запроса.

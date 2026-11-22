@@ -175,6 +175,9 @@ pub struct Binding {
     /// Ненулевой порт ограничивает адресную привязку одним endpoint.
     #[serde(skip_serializing_if = "is_zero")]
     pub port: u16,
+    /// Измеренное число байтов запроса обычного DNS.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dns_query_bytes: u16,
     pub transport: u8,
     #[serde(default = "default_family", serialize_with = "serialize_family")]
     pub family: u8,
@@ -998,6 +1001,11 @@ fn merge_binding(base: Option<&Binding>, local: &Binding, latest: &Binding) -> B
         ),
         transport: local.transport,
         port: local.port,
+        dns_query_bytes: merge_field(
+            base.map(|base| &base.dns_query_bytes),
+            &local.dns_query_bytes,
+            &latest.dns_query_bytes,
+        ),
         family: local.family,
         shape: local.shape,
         tcp_profile: merge_field(

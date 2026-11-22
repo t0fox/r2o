@@ -5,6 +5,10 @@ use sha2::{Digest, Sha256};
 pub const DNS_PROBE_QUERY_MIN: usize = 17;
 pub const DNS_PROBE_QUERY_MAX: usize = 272;
 
+pub fn is_dns_probe_length(length: usize) -> bool {
+    (DNS_PROBE_QUERY_MIN..=DNS_PROBE_QUERY_MAX).contains(&length)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DnsProbeGuard {
     pub length: u16,
@@ -15,7 +19,7 @@ impl DnsProbeGuard {
     pub fn decode_prefix(bytes: &[u8]) -> Option<(Self, &[u8])> {
         let (prefix, rest) = bytes.split_at_checked(34)?;
         let length = u16::from_be_bytes(prefix[..2].try_into().ok()?);
-        if !(DNS_PROBE_QUERY_MIN..=DNS_PROBE_QUERY_MAX).contains(&usize::from(length)) {
+        if !is_dns_probe_length(usize::from(length)) {
             return None;
         }
         Some((
@@ -40,7 +44,7 @@ impl DnsProbeGuard {
 }
 
 pub fn is_dns_probe_query(bytes: &[u8]) -> bool {
-    if !(DNS_PROBE_QUERY_MIN..=DNS_PROBE_QUERY_MAX).contains(&bytes.len())
+    if !is_dns_probe_length(bytes.len())
         || bytes[2] & 0xf8 != 0
         || bytes[4..12] != [0, 1, 0, 0, 0, 0, 0, 0]
     {

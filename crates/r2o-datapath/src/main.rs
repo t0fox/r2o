@@ -2760,16 +2760,17 @@ mod app {
                         // отметки текущего приветствия: именованный Initial,
                         // впервые названный этим пакетом, в C ещё не взвёл
                         // `saw_hello` в момент проверки.
-                        let quic_plan_skip_note = if quic_deny_skip || address_stun_replan {
-                            None
-                        } else {
-                            quic_second_hello_skip.or_else(|| {
-                                udp_sessions.r2o_plan_applied_skip_note(
-                                    bytes,
-                                    selected.is_some() || global_plan_present,
-                                )
-                            })
-                        };
+                        let quic_plan_skip_note =
+                            if quic_deny_skip || address_stun_replan || owned_dns_probe {
+                                None
+                            } else {
+                                quic_second_hello_skip.or_else(|| {
+                                    udp_sessions.r2o_plan_applied_skip_note(
+                                        bytes,
+                                        selected.is_some() || global_plan_present,
+                                    )
+                                })
+                            };
                         let mut first_named_hello = false;
                         if let Some(hello) = quic_hello.as_ref() {
                             let named = !hello.host.is_empty();
@@ -2928,7 +2929,7 @@ mod app {
                                             bytes,
                                             controller_probe,
                                             quic_plan_skip_note,
-                                            address_stun_replan,
+                                            address_stun_replan || owned_dns_probe,
                                             || {
                                                 let decision = if owned_dns_probe {
                                                     r2o_datapath::engine::decide_owned_dns_udp_probe(
@@ -5429,7 +5430,7 @@ mod app {
         packet: &[u8],
         controller_probe: bool,
         plan_skip: Option<&'static str>,
-        address_stun_replan: bool,
+        allow_replan: bool,
         decide: impl FnOnce() -> PacketDecision,
     ) -> PacketDecision {
         // C `handle_udp`: `fl->quic_deny` проверяется до разбора содержимого,
@@ -5443,7 +5444,7 @@ mod app {
             r2o_datapath::reason_stats::record_reason(note);
             return PacketDecision::SkippedUdp { note };
         }
-        if !address_stun_replan && sessions.r2o_plan_applied(packet) {
+        if !allow_replan && sessions.r2o_plan_applied(packet) {
             // План уже на потоке, но датаграмма не клиентская: C уходит в
             // ветку обратного направления до выбора/исполнения плана.
             return PacketDecision::SkippedUdp {

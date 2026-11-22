@@ -61,6 +61,8 @@ NFT
 
 python3 - "$datapath" "$controller" "$tmp" <<'PY'
 import collections
+import json
+import os
 import pathlib
 import selectors
 import socket
@@ -93,6 +95,53 @@ def wait_until(predicate, message):
     raise AssertionError(message)
 
 
+def stop(process):
+    if process.poll() is None:
+        process.terminate()
+    assert process.wait(8) == 0
+
+
+def start_datapaths():
+    result = []
+    for family, queue in [(4, 65141), (6, 65142)]:
+        wire = tmp / f"v{family}.sock"
+        wire.unlink(missing_ok=True)
+        process, _ = start([datapath, "--mode", "apply", "--controller-only", "--udp-reverse-hook",
+                            "--family", f"ipv{family}", "--queue", str(queue), "--control", str(wire),
+                            "--mark", "19051", "--probe-mark", "19052"], f"datapath{family}.log")
+        wait_until(wire.exists, f"нет сокета IPv{family}")
+        result.append(process)
+    return result
+
+
+def response_for(query):
+    return (query[:2] + bytes.fromhex("81800001000100000000") + query[12:]
+            + bytes.fromhex("c00c000100010000003c0004c000020a"))
+
+
+def run_until_log(loop, process, log, expected, requests, stale_v6=False):
+    deadline = time.monotonic() + 33
+    while time.monotonic() < deadline:
+        assert process.poll() is None
+        if all(line in log.read_text() for line in expected):
+            return
+        for key, _ in loop.select(.1):
+            server, port = key.fileobj, key.data
+            query, peer = server.recvfrom(512)
+            assert query[2:] == bytes.fromhex("01000001000000000000076578616d706c6503636f6d0000010001")
+            requests[(server.family, port)] += 1
+            if (port == 5302 and requests[(server.family, port)] <= 3
+                    or stale_v6 and server.family == socket.AF_INET6 and port == 53):
+                continue
+            response = response_for(query)
+            if port == 5301:
+                response = response[:13] + b"f" + response[14:]
+            else:
+                server.sendto(bytes([query[0] ^ 1]) + response[1:], peer)
+            server.sendto(response, peer)
+    raise AssertionError(requests)
+
+
 try:
     with selectors.DefaultSelector() as loop:
         for address, ports, family in [
@@ -105,21 +154,14 @@ try:
                 server.bind((address, port))
                 loop.register(server, selectors.EVENT_READ, port)
 
-        for family, queue in [(4, 65141), (6, 65142)]:
-            wire = tmp / f"v{family}.sock"
-            start([datapath, "--mode", "apply", "--controller-only", "--udp-reverse-hook",
-                   "--family", f"ipv{family}", "--queue", str(queue), "--control", str(wire),
-                   "--mark", "19051", "--probe-mark", "19052"], f"datapath{family}.log")
-            wait_until(wire.exists, f"нет сокета IPv{family}")
-
+        datapaths = start_datapaths()
         catalog = tmp / "catalog.json"
         catalog.write_text('{"boxes":[]}\n')
-        process, log = start(
-            [controller, "--serve-both", "--serve4", str(tmp / "v4.sock"),
+        serve = [controller, "--serve-both", "--serve4", str(tmp / "v4.sock"),
              "--serve6", str(tmp / "v6.sock"), str(catalog), "--discover", "--mark", "19052",
              "--measure-mark", "19053", "--live4", str(tmp / "live4.json"),
-             "--live6", str(tmp / "live6.json")], "controller.log",
-        )
+             "--live6", str(tmp / "live6.json")]
+        process, log = start(serve, "controller.log")
         expected = (
             "DNS/UDP 192.0.2.53:53: точный APPLIED и корректный DNS-ответ",
             "DNS/UDP [2001:db8::53]:53: точный APPLIED и корректный DNS-ответ",
@@ -128,30 +170,78 @@ try:
             "DNS/UDP 192.0.2.53:5302: получен DNS-ответ, исполнение плана не подтверждено",
         )
         requests = collections.Counter()
-        deadline = time.monotonic() + 33
-        while time.monotonic() < deadline:
-            assert process.poll() is None
-            if all(line in log.read_text() for line in expected):
-                break
-            for key, _ in loop.select(.1):
-                server, port = key.fileobj, key.data
-                query, peer = server.recvfrom(512)
-                assert query[2:] == bytes.fromhex("01000001000000000000076578616d706c6503636f6d0000010001")
-                requests[(server.family, port)] += 1
-                if port == 5302 and requests[(server.family, port)] <= 3:
-                    continue
-                response = query[:2] + bytes.fromhex("81800001000100000000") + query[12:]
-                response += bytes.fromhex("c00c000100010000003c0004c000020a")
-                if port == 5301:
-                    response = response[:13] + b"f" + response[14:]
-                else:
-                    server.sendto(bytes([query[0] ^ 1]) + response[1:], peer)
-                server.sendto(response, peer)
-        else:
-            raise AssertionError(requests)
+        run_until_log(loop, process, log, expected, requests)
         assert requests[(socket.AF_INET, 53)] == requests[(socket.AF_INET6, 53)] == 1, requests
         for line in expected:
             print(line)
+
+        def catalog_bindings():
+            return [b for box in json.loads(catalog.read_text())["boxes"] for b in box["bindings"]]
+
+        wait_until(lambda: len(catalog_bindings()) == 2, "DNS-привязки не попали в каталог")
+        stored = json.loads(catalog.read_text())
+        saved = catalog_bindings()
+        assert {(b["kind"], b["target"], b["port"], b["transport"], b["shape"], b["dns_query_bytes"])
+                for b in saved} == {("addr", a, 53, 17, 14, 29) for a in ("192.0.2.53", "2001:db8::53")}
+        assert not stored.get("domain_state")
+
+        query = bytes.fromhex("123401000001000000000000076578616d706c6503636f6d0000010001")
+        wrong_length = query[:12] + b"\x08a" + query[13:]
+        for server in (server for server in listeners if server.getsockname()[1] == 53):
+            server.settimeout(3)
+            with socket.socket(server.family, socket.SOCK_DGRAM) as client:
+                client.settimeout(3)
+                client.connect(server.getsockname())
+                client.send(wrong_length)
+                assert not loop.select(.2), "неизмеренная длина запроса прошла блокировку"
+                for first in [0x12, 0x13]:
+                    request = bytes([first]) + query[1:]
+                    client.send(request)
+                    received, peer = server.recvfrom(512)
+                    assert received == request, "план применился к другому запросу"
+                    server.sendto(response_for(request), peer)
+                    assert client.recv(512) == response_for(request)
+            print(f"{server.getsockname()[0]}: адресный план работает для обычного сокета и двух запросов одного потока")
+
+        stop(process)
+        for dp in datapaths:
+            stop(dp)
+        start_datapaths()
+        os.environ["DNS_DISCOVERY_ENDPOINTS"] = "192.0.2.53:53 [2001:db8::53]:53"
+        process, log = start(serve, "restart.log")
+        expected = (
+            "DNS/UDP 192.0.2.53:53: адресный план восстановлен из каталога",
+            "DNS/UDP [2001:db8::53]:53: адресный план восстановлен из каталога",
+            "DNS/UDP 192.0.2.53:53: повторно подтверждены адресный план и DNS-ответ",
+            "DNS/UDP [2001:db8::53]:53: постоянный план снят",
+            "DNS/UDP [2001:db8::53]:53: два таймаута под сохранённым планом",
+        )
+        run_until_log(loop, process, log, expected, requests, stale_v6=True)
+        wait_until(lambda: any(b["target"] == "2001:db8::53" and b.get("recheck_since")
+                               for b in catalog_bindings()), "отзыв IPv6 не попал в каталог")
+        bindings = {b["target"]: b for b in catalog_bindings()}
+        assert bindings["2001:db8::53"]["recheck_since"]
+        assert not bindings["192.0.2.53"].get("recheck_since")
+        print("DNS/UDP: восстановление IPv4/IPv6, подтверждение IPv4 и отзыв IPv6 после двух таймаутов")
+
+        run_until_log(loop, process, log, (
+            "DNS/UDP [2001:db8::53]:53: подтверждённый адресный план сохранён",
+        ), requests)
+        assert all(not b.get("recheck_since") for b in catalog_bindings())
+        print("DNS/UDP IPv6: отозванный план снова сохранён после свежей проверки")
+
+        stop(process)
+        subprocess.run(["nft", "insert", "rule", "inet", "r2o_dns_test", "in",
+                        "ip", "daddr", "192.0.2.53", "udp", "dport", "53", "accept"], check=True)
+        os.environ["DNS_DISCOVERY_ENDPOINTS"] = "192.0.2.53:53"
+        process, log = start(serve, "direct.log")
+        run_until_log(loop, process, log, (
+            "DNS/UDP 192.0.2.53:53: адресный план восстановлен из каталога",
+            "DNS/UDP 192.0.2.53:53: прямой запрос получил корректный ответ",
+            "DNS/UDP 192.0.2.53:53: постоянный план снят",
+        ), requests)
+        assert any(b["target"] == "192.0.2.53" and b.get("recheck_since") for b in catalog_bindings())
+        print("DNS/UDP IPv4: сохранённый план отозван после восстановления прямого пути")
 except BaseException:
     for log in logs:
         print(log.read_text(), file=sys.stderr)

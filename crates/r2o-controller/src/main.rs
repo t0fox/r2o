@@ -2629,6 +2629,25 @@ fn locked_catalog_for_persistence(
 }
 
 #[cfg(unix)]
+fn persist_dns_route_change(
+    lock: CatalogLock,
+    catalog: &mut Catalog,
+    path: &Path,
+    now: i64,
+    persistence: Option<&mut R2oCatalogPersistence>,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(persistence) = persistence {
+        // Повторное взятие блокировки соединяет параллельные изменения IPv4 и IPv6.
+        drop(lock);
+        persistence.persist(catalog, path, now)?;
+        persistence.last_save = std::time::Instant::now();
+    } else {
+        catalog.save_atomic(path, now)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 impl CatalogLock {
     fn acquire(path: &Path) -> Result<Self, Box<dyn Error>> {
         use std::fs::OpenOptions;
@@ -4188,6 +4207,10 @@ fn catalog_commands_with_send_cap(
                 continue;
             }
             if binding.kind == "addr" {
+                if binding.shape == control::SHAPE_DNS_PROBE && binding.dns_query_bytes != 0 {
+                    // Обычный DNS восстанавливается отдельно по списку резолверов владельца.
+                    continue;
+                }
                 let shape = r2o_catalog_addr_binding_shape(binding);
                 let family = r2o_catalog_binding_family(binding);
                 if shape == 0 || !matches!(family, 4 | 6) {
@@ -7800,7 +7823,15 @@ struct PlainDnsDiscoveryJob {
     server: std::net::SocketAddr,
     measure_mark: u32,
     probe_mark: u32,
+    route: Option<PlainDnsRoute>,
     permit: r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct PlainDnsRoute {
+    plan_id: [u8; 16],
+    binding: control::BindingContext,
 }
 
 #[cfg(unix)]
@@ -7811,6 +7842,9 @@ enum PlainDnsVerdict {
     NoAnswer,
     MissingExecution,
     Confirmed,
+    RouteVerified,
+    RouteTimeout,
+    RouteNotApplied,
 }
 
 #[cfg(unix)]
@@ -7833,21 +7867,73 @@ fn run_plain_dns_discovery(
     }
     let trial_id = random_id()?;
     let id = u16::from_be_bytes([trial_id[0], trial_id[1]]);
+    let mut direct_answers = 0;
     for direct_id in [id ^ 1, id ^ 2] {
         if cancel.load(Ordering::Relaxed) {
             return Err("DNS-зонд отменён".into());
         }
         match probe_plain_dns_udp_on(&socket, direct_id, REPLY_TIMEOUT)? {
-            PlainDnsReply::Answer => return Ok(PlainDnsVerdict::Direct),
+            PlainDnsReply::Answer if job.route.is_none() => return Ok(PlainDnsVerdict::Direct),
+            PlainDnsReply::Answer => direct_answers += 1,
             PlainDnsReply::Rejected => return Ok(PlainDnsVerdict::Rejected),
             PlainDnsReply::Timeout => {}
         }
+    }
+    if direct_answers == 2 {
+        return Ok(PlainDnsVerdict::Direct);
     }
     if !job.permit.r2o_yield_if_contended_with_cancel(cancel) || cancel.load(Ordering::Relaxed) {
         return Err("DNS-зонд отменён".into());
     }
     r2o_quic_http3_set_socket_mark(&socket, job.probe_mark)?;
     let local = socket.local_addr()?;
+    if let Some(route) = job.route {
+        let exact = |event: &control::AppliedEvent| {
+            event.execution_id != 0
+                && event.trial_id == [0; 16]
+                && event.plan_id == route.plan_id
+                && control::r2o_binding_equal(&route.binding, &event.binding)
+                && applied_udp_flow_matches(event, local, job.server)
+        };
+        for request_id in [id ^ 3, id] {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("DNS-зонд отменён".into());
+            }
+            match probe_plain_dns_udp_on(&socket, request_id, REPLY_TIMEOUT)? {
+                PlainDnsReply::Timeout => continue,
+                PlainDnsReply::Rejected => return Ok(PlainDnsVerdict::Rejected),
+                PlainDnsReply::Answer => {}
+            }
+            let events = r2o_collect_controller_applied_events_until(
+                commands,
+                [0; 16],
+                CONTROL_ACK_TIMEOUT,
+                exact,
+            )?;
+            return Ok(if events.iter().any(exact) {
+                PlainDnsVerdict::RouteVerified
+            } else {
+                PlainDnsVerdict::MissingExecution
+            });
+        }
+        let two_executions = |events: &[control::AppliedEvent]| {
+            let mut matching = events.iter().filter(|event| exact(event));
+            matching
+                .next()
+                .is_some_and(|first| matching.any(|event| event.execution_id != first.execution_id))
+        };
+        let events = r2o_collect_controller_applied_events_until_satisfied(
+            commands,
+            [0; 16],
+            CONTROL_ACK_TIMEOUT,
+            two_executions,
+        )?;
+        return Ok(if two_executions(&events) {
+            PlainDnsVerdict::RouteTimeout
+        } else {
+            PlainDnsVerdict::RouteNotApplied
+        });
+    }
     let text = r2o_controller::discovery::plan_text_for_trial(PLAIN_DNS_ADDRESS_PLAN, trial_id)?;
     let records = r2o_plan_records_for_wire(&compile_text(&text)?)?;
     let set = control::encode_set_dns_probe(
@@ -17114,13 +17200,23 @@ fn applied_udp_trial_matches(
     local: std::net::SocketAddr,
     server: std::net::SocketAddr,
 ) -> bool {
-    let key = &event.key;
     if !r2o_trial_present(&event.trial_id)
         || event.trial_id != trial_id
         || !r2o_plan_id_is_ours(plan_id, event.plan_id)
-        || key[37] != 17
-        || key[0] != if server.is_ipv4() { 4 } else { 6 }
     {
+        return false;
+    }
+    applied_udp_flow_matches(event, local, server)
+}
+
+#[cfg(unix)]
+fn applied_udp_flow_matches(
+    event: &r2k_core::control::AppliedEvent,
+    local: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+) -> bool {
+    let key = &event.key;
+    if key[37] != 17 || key[0] != if server.is_ipv4() { 4 } else { 6 } {
         return false;
     }
     let first_port = u16::from_be_bytes([key[33], key[34]]);
@@ -24066,7 +24162,8 @@ fn control_command_trial_id(command: &[u8], expected: u16) -> Option<[u8; 16]> {
     let trial = match expected {
         control::COMMAND_SET_NAME_BOUND
         | control::COMMAND_SET_NAME_PROBE
-        | control::COMMAND_SET_ENDPOINT_BOUND => body.get(body.len().checked_sub(16)?..)?,
+        | control::COMMAND_SET_ENDPOINT_BOUND
+        | control::COMMAND_SET_DNS_ENDPOINT => body.get(body.len().checked_sub(16)?..)?,
         COMMAND_SET_ADDR_PROBE | control::COMMAND_SET_DNS_PROBE | COMMAND_DEL_ADDR_PROBE => {
             body.get(r2k_core::control::KEY_LEN..r2k_core::control::KEY_LEN + 16)?
         }
@@ -25136,6 +25233,120 @@ impl ControlClient {
         Ok(())
     }
 
+    fn install_plain_dns_route(
+        &mut self,
+        server: std::net::SocketAddr,
+        text: &str,
+        query_len: u16,
+    ) -> Result<PlainDnsRoute, Box<dyn Error>> {
+        let compiled = compile_text(text)?;
+        let plan = r2k_core::plan::Plan::parse(&compiled)?;
+        let records = r2o_plan_records_for_wire(&compiled)?;
+        let token = random_id()?;
+        let set = control::encode_set_dns_endpoint(server, query_len, &records, token)?;
+        let receipt = self.exchange_command(&set, control::COMMAND_SET_DNS_ENDPOINT);
+        if matches!(&receipt, Ok(ack) if !ack.ok) {
+            return Err("датапат отверг постоянную DNS-привязку".into());
+        }
+        let binding = receipt.and_then(|ack| {
+            ack.binding_context
+                .filter(|binding| {
+                    ack.ok
+                        && ack.trial_id == Some(token)
+                        && binding.is_known()
+                        && binding.kind == 2
+                        && binding.shape == control::SHAPE_DNS_PROBE
+                        && !binding.temporary
+                        && binding.family == if server.is_ipv4() { 4 } else { 6 }
+                })
+                .ok_or_else(|| "нет точного ACK постоянной DNS-привязки".into())
+        });
+        match binding {
+            Ok(binding) => Ok(PlainDnsRoute {
+                plan_id: plan.id,
+                binding,
+            }),
+            Err(error) => {
+                if let Err(cleanup) = self.remove_plain_dns_route(server) {
+                    eprintln!("DNS/UDP {server}: не удалось откатить установку: {cleanup}");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn remove_plain_dns_route(
+        &mut self,
+        server: std::net::SocketAddr,
+    ) -> Result<(), Box<dyn Error>> {
+        self.send_command(
+            &control::encode_delete_endpoint(server, control::SHAPE_DNS_PROBE)?,
+            control::COMMAND_DEL_ENDPOINT,
+        )
+    }
+
+    fn confirm_plain_dns_route(
+        &mut self,
+        server: std::net::SocketAddr,
+        catalog: &mut Catalog,
+        path: &Path,
+        persistence: Option<&mut R2oCatalogPersistence>,
+    ) -> Result<PlainDnsRoute, Box<dyn Error>> {
+        use r2o_controller::discovery::{add_confirmed_dns_endpoint, confirmed_dns_endpoint};
+        let (lock, mut updated) =
+            locked_catalog_for_persistence(path, catalog, persistence.as_deref())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let query_len = r2o_controller::dns_health::dns_query_message(0).len() as u16;
+        add_confirmed_dns_endpoint(&mut updated, server, PLAIN_DNS_ADDRESS_PLAN, query_len, now)?;
+        let (binding, plan) = confirmed_dns_endpoint(&updated, server)
+            .filter(|(binding, _)| binding.dns_query_bytes == query_len)
+            .ok_or("подтверждённая привязка DNS отсутствует")?;
+        let route = self.install_plain_dns_route(server, &plan.text, binding.dns_query_bytes)?;
+        if let Err(error) = persist_dns_route_change(lock, &mut updated, path, now, persistence) {
+            if let Err(cleanup) = self.remove_plain_dns_route(server) {
+                eprintln!("DNS/UDP {server}: не удалось откатить сохранение: {cleanup}");
+            }
+            return Err(error);
+        }
+        *catalog = updated;
+        Ok(route)
+    }
+
+    fn retire_plain_dns_route(
+        &mut self,
+        server: std::net::SocketAddr,
+        route: PlainDnsRoute,
+        catalog: &mut Catalog,
+        path: &Path,
+        persistence: Option<&mut R2oCatalogPersistence>,
+    ) -> Result<(), Box<dyn Error>> {
+        use r2o_controller::discovery::dns_endpoint_binding;
+        let (lock, mut updated) =
+            locked_catalog_for_persistence(path, catalog, persistence.as_deref())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let id = route
+            .plan_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        for binding in updated
+            .boxes
+            .iter_mut()
+            .flat_map(|record| &mut record.bindings)
+        {
+            if dns_endpoint_binding(binding, server) && binding.plan_id == id {
+                binding.recheck_since = Some(now.max(1));
+            }
+        }
+        persist_dns_route_change(lock, &mut updated, path, now, persistence)?;
+        *catalog = updated;
+        self.remove_plain_dns_route(server)
+    }
+
     fn watch_events(
         &mut self,
         discovery: Option<(Catalog, PathBuf, Option<u32>)>,
@@ -25170,6 +25381,28 @@ impl ControlClient {
             .into_iter()
             .map(|server| (server, std::time::Instant::now()))
             .collect();
+        let mut plain_dns_routes = HashMap::new();
+        if plain_dns_marks.is_some()
+            && let Some((catalog, _, _)) = &discovery
+        {
+            let query_len = r2o_controller::dns_health::dns_query_message(0).len() as u16;
+            for &(server, _) in &plain_dns_due {
+                if let Some((binding, plan)) =
+                    r2o_controller::discovery::confirmed_dns_endpoint(catalog, server)
+                    && binding.dns_query_bytes == query_len
+                {
+                    match self.install_plain_dns_route(server, &plan.text, query_len) {
+                        Ok(route) => {
+                            plain_dns_routes.insert(server, route);
+                            println!("DNS/UDP {server}: адресный план восстановлен из каталога");
+                        }
+                        Err(error) => {
+                            eprintln!("DNS/UDP {server}: не удалось восстановить план: {error}")
+                        }
+                    }
+                }
+            }
+        }
         let mut dns_services_refresh =
             std::time::Instant::now() + std::time::Duration::from_secs(30);
         let http_search = discovery.as_ref().map(|(catalog, _, _)| {
@@ -25414,6 +25647,7 @@ impl ControlClient {
                         server: *server,
                         measure_mark,
                         probe_mark,
+                        route: plain_dns_routes.get(server).copied(),
                         permit,
                     })
                 {
@@ -26582,6 +26816,65 @@ impl ControlClient {
                     let outcome = match outcome {
                         AddressUdpDiscoveryOutcome::Stun(outcome) => outcome,
                         AddressUdpDiscoveryOutcome::PlainDns(server, result) => {
+                            if let Some((_, catalog, path, _)) = &mut discovery {
+                                match &result {
+                                    Ok(PlainDnsVerdict::Confirmed) => {
+                                        match self.confirm_plain_dns_route(
+                                            server,
+                                            catalog,
+                                            path,
+                                            catalog_persistence.as_mut(),
+                                        ) {
+                                            Ok(route) => {
+                                                plain_dns_routes.insert(server, route);
+                                                println!(
+                                                    "DNS/UDP {server}: подтверждённый адресный план сохранён"
+                                                );
+                                            }
+                                            Err(error) => eprintln!(
+                                                "DNS/UDP {server}: план не сохранён: {error}"
+                                            ),
+                                        }
+                                    }
+                                    Ok(
+                                        PlainDnsVerdict::Direct
+                                        | PlainDnsVerdict::RouteTimeout
+                                        | PlainDnsVerdict::RouteNotApplied,
+                                    ) => {
+                                        if let Some(route) = plain_dns_routes.get(&server).copied()
+                                        {
+                                            match self.retire_plain_dns_route(
+                                                server,
+                                                route,
+                                                catalog,
+                                                path,
+                                                catalog_persistence.as_mut(),
+                                            ) {
+                                                Ok(()) => {
+                                                    plain_dns_routes.remove(&server);
+                                                    println!(
+                                                        "DNS/UDP {server}: постоянный план снят"
+                                                    );
+                                                    if matches!(
+                                                        result,
+                                                        Ok(PlainDnsVerdict::RouteTimeout
+                                                            | PlainDnsVerdict::RouteNotApplied)
+                                                    ) && let Some((_, due)) = plain_dns_due
+                                                        .iter_mut()
+                                                        .find(|(endpoint, _)| *endpoint == server)
+                                                    {
+                                                        *due = std::time::Instant::now();
+                                                    }
+                                                }
+                                                Err(error) => eprintln!(
+                                                    "DNS/UDP {server}: план не снят: {error}"
+                                                ),
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
                             match result {
                                 Ok(PlainDnsVerdict::Direct) => println!(
                                     "DNS/UDP {server}: прямой запрос получил корректный ответ"
@@ -26597,6 +26890,15 @@ impl ControlClient {
                                 ),
                                 Ok(PlainDnsVerdict::Confirmed) => println!(
                                     "DNS/UDP {server}: точный APPLIED и корректный DNS-ответ подтверждены на одном сокете"
+                                ),
+                                Ok(PlainDnsVerdict::RouteVerified) => println!(
+                                    "DNS/UDP {server}: повторно подтверждены адресный план и DNS-ответ"
+                                ),
+                                Ok(PlainDnsVerdict::RouteTimeout) => println!(
+                                    "DNS/UDP {server}: два таймаута под сохранённым планом"
+                                ),
+                                Ok(PlainDnsVerdict::RouteNotApplied) => println!(
+                                    "DNS/UDP {server}: исполнение сохранённого плана не подтверждено"
                                 ),
                                 Err(error) => {
                                     eprintln!("DNS/UDP {server}: проба не завершена: {error}")
@@ -28591,6 +28893,15 @@ impl ControlClient {
                 if frame.kind == EVENT_APPLIED {
                     let applied = decode_applied(&frame)
                         .map_err(|error| format!("событие APPLIED: {error}"))?;
+                    if applied.binding.shape == control::SHAPE_DNS_PROBE {
+                        if quic_discovery
+                            .as_ref()
+                            .is_some_and(|worker| worker.plain_dns_active)
+                        {
+                            self.remember_applied_event(applied);
+                        }
+                        continue;
+                    }
                     if let Some(trial) = stun_trials.get_mut(&applied.trial_id)
                         && trial.matches(&applied)
                     {
@@ -29150,6 +29461,14 @@ impl ControlClient {
                 std::io::stdout().flush()?;
             }
         })();
+        for server in plain_dns_routes.into_keys() {
+            if let Err(error) = self.write_command(&control::encode_delete_endpoint(
+                server,
+                control::SHAPE_DNS_PROBE,
+            )?) {
+                eprintln!("DNS/UDP {server}: не удалось снять план при остановке: {error}");
+            }
+        }
         for (_, pending) in pending_candidate_acks.drain() {
             let cleanup = self.write_command(&pending.delete);
             let _ = pending.reply.send(Err(
@@ -29970,10 +30289,14 @@ impl ControlClient {
         timeout: std::time::Duration,
     ) -> Result<Vec<r2k_core::control::AppliedEvent>, Box<dyn Error>> {
         let deadline = std::time::Instant::now() + timeout;
+        let matches = |event: &control::AppliedEvent| {
+            event.trial_id == trial_id
+                && (trial_id != [0; 16] || event.binding.shape == control::SHAPE_DNS_PROBE)
+        };
         let mut events = Vec::new();
         let pending = std::mem::take(&mut self.pending_applied_events);
         for event in pending {
-            if event.trial_id == trial_id {
+            if matches(&event) {
                 events.push(event);
             } else {
                 self.remember_applied_event(event);
@@ -29987,7 +30310,7 @@ impl ControlClient {
                 };
                 if frame.kind == EVENT_APPLIED {
                     if let Ok(event) = decode_applied(&frame) {
-                        if event.trial_id == trial_id {
+                        if matches(&event) {
                             events.push(event);
                         } else {
                             self.remember_applied_event(event);
@@ -30011,7 +30334,7 @@ impl ControlClient {
             };
             if frame.kind == EVENT_APPLIED {
                 if let Ok(event) = decode_applied(&frame) {
-                    if event.trial_id == trial_id {
+                    if matches(&event) {
                         events.push(event);
                     } else {
                         self.remember_applied_event(event);

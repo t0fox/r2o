@@ -263,6 +263,8 @@ nft_up() {
                 ip6) [ "$IPV6_ENABLED" = 1 ] || continue; queue=$QUEUE6 ;;
                 *) continue ;;
             esac
+            printf '        meta iif 0 meta mark 0 %s daddr %s udp dport %s ct direction original meta mark set %s comment "r2o-dns-owner"\n' \
+                "$family" "$ip" "$port" "$PROBE_MARK"
             printf '        meta mark %s %s daddr %s udp dport %s ct direction original queue num %s bypass\n' \
                 "$PROBE_MARK" "$family" "$ip" "$port" "$queue"
         done <<EOF
@@ -608,7 +610,7 @@ dns_excl_rule() {
                     dns_family=ip
                     [ "$dns_tool" != ip6tables ] || dns_family=ip6
                     dns_insert=$(printf '%s\n' "$PLAIN_DNS_TARGETS" | awk -v family="$dns_family" '
-                        $1 == family { ++count } END { print count + 1 }')
+                        $1 == family { count += 2 } END { print count + 1 }')
                 fi
                 xt "$dns_tool" -t mangle -C "$4" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN ||
                     xt "$dns_tool" -t mangle -I "$4" "$dns_insert" -p "$dns_proto" "$5" "$2" "$6" "$3" -j RETURN
@@ -796,6 +798,9 @@ xt_plain_dns_probes() (
     [ "$2" != ip6tables ] || family=ip6
     while read -r endpoint_family ip port; do
         [ "$endpoint_family" = "$family" ] || continue
+        xt "$2" -t mangle "$1" R2O_OUT -p udp -d "$ip" --dport "$port" \
+            -m owner --socket-exists -m mark --mark 0 -m conntrack --ctdir ORIGINAL ! --ctstate DNAT \
+            -j MARK --set-xmark "$PROBE_MARK/0xffffffff" || return 1
         xt "$2" -t mangle "$1" R2O_OUT -p udp -d "$ip" --dport "$port" \
             -m mark --mark "$PROBE_MARK" -m conntrack --ctdir ORIGINAL ! --ctstate DNAT \
             -j NFQUEUE --queue-num "$3" --queue-bypass || return 1
@@ -1005,6 +1010,8 @@ firewall_status_nft() {
         fi
     fi
     [ "$out_queue_total" -eq "$((12 + plain_dns4 + plain_dns6))" ] || return 1
+    plain_dns_owner=$(printf '%s\n' "$out_chain" | awk '/comment "r2o-dns-owner"/ { ++count } END { print count + 0 }')
+    [ "$plain_dns_owner" -eq "$((plain_dns4 + plain_dns6))" ] || return 1
     in_queue_total=$(printf '%s\n' "$in_rules_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
     [ "$in_queue_total" -eq 14 ] || return 1
     out_queue4=$(printf '%s\n' "$out_chain" | awk -v queue="$QUEUE4" \

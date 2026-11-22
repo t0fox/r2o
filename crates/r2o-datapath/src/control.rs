@@ -102,6 +102,7 @@ pub struct NamePlans {
 }
 
 struct InstalledPlan {
+    dns_query_len: u16,
     plan: Plan,
     generation: u64,
     last_used: Cell<u64>,
@@ -347,7 +348,8 @@ impl NamePlans {
             frame.kind,
             COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE | control::COMMAND_SET_DNS_PROBE
         );
-        let endpoint_bound = frame.kind == control::COMMAND_SET_ENDPOINT_BOUND;
+        let dns_endpoint = frame.kind == control::COMMAND_SET_DNS_ENDPOINT;
+        let endpoint_bound = frame.kind == control::COMMAND_SET_ENDPOINT_BOUND || dns_endpoint;
         let area_command = matches!(
             frame.kind,
             COMMAND_SET_SUFFIX | COMMAND_DEL_SUFFIX | COMMAND_SET_BYPASS | COMMAND_DEL_BYPASS
@@ -406,9 +408,9 @@ impl NamePlans {
                 COMMAND_SET_NAME => self.set_name(body),
                 COMMAND_SET_NAME_BOUND => self.set_name_bound(body),
                 COMMAND_SET_ADDR => self.set_addr(body),
-                control::COMMAND_SET_ENDPOINT | control::COMMAND_SET_ENDPOINT_BOUND => {
-                    self.set_endpoint(body)
-                }
+                control::COMMAND_SET_ENDPOINT
+                | control::COMMAND_SET_ENDPOINT_BOUND
+                | control::COMMAND_SET_DNS_ENDPOINT => self.set_endpoint(body, dns_endpoint),
                 control::COMMAND_DEL_ENDPOINT => self.delete_endpoint(body),
                 COMMAND_SET_SUFFIX => self.set_suffix(body),
                 COMMAND_DEL_SUFFIX => self.delete_domain_area(body, true),
@@ -1301,27 +1303,46 @@ impl NamePlans {
         use crate::netlink::{R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING};
 
         if !controller_probe
-            || self.addr_probes.is_empty()
+            || (self.addr_probes.is_empty() && self.addr_plans.is_empty())
             || !matches!(hook, Some(R2O_NF_INET_LOCAL_OUT | R2O_NF_INET_POST_ROUTING))
         {
             return DnsProbeSelection::Unreserved;
         }
-        let Some(probe) = r2o_udp_addr_probe_flow_key(packet)
+        let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 17) else {
+            return DnsProbeSelection::Unreserved;
+        };
+        let payload = view
+            .udp_payload_range(packet)
+            .and_then(|range| packet.get(range));
+        if let Some((probe, guard)) = r2o_udp_addr_probe_flow_key(packet)
             .and_then(|key| self.addr_probes.get(&key))
             .filter(|probe| probe.expires > Instant::now())
-        else {
+            .and_then(|probe| probe.dns.map(|guard| (probe, guard)))
+        {
+            return if payload.is_some_and(|payload| guard.matches(payload)) {
+                DnsProbeSelection::Matched(&probe.plan)
+            } else {
+                DnsProbeSelection::DifferentQuestion
+            };
+        }
+        let Some(port) = packet.get(view.l4_offset + 2..view.l4_offset + 4) else {
             return DnsProbeSelection::Unreserved;
         };
-        let Some(guard) = probe.dns else {
+        let Some(entry) = self.addr_plans.get(&AddrPlanKey {
+            address: view.dst,
+            shape: control::SHAPE_DNS_PROBE,
+            port: u16::from_be_bytes([port[0], port[1]]),
+        }) else {
             return DnsProbeSelection::Unreserved;
         };
-        let payload = PacketView::parse(packet)
-            .and_then(|view| view.udp_payload_range(packet))
-            .and_then(|range| packet.get(range));
-        if payload.is_some_and(|payload| guard.matches(payload)) {
-            DnsProbeSelection::Matched(&probe.plan)
+        if payload.is_some_and(|payload| {
+            payload.len() == usize::from(entry.dns_query_len)
+                && r2k_core::dns_probe::is_dns_probe_query(payload)
+        }) {
+            Self::touch(entry, self.next_plan_clock());
+            DnsProbeSelection::Matched(&entry.plan)
         } else {
-            DnsProbeSelection::DifferentQuestion
+            DnsProbeSelection::Unreserved
         }
     }
 
@@ -1392,6 +1413,7 @@ impl NamePlans {
         self.plans.insert(
             key,
             InstalledPlan {
+                dns_query_len: 0,
                 plan,
                 generation,
                 last_used,
@@ -1424,23 +1446,41 @@ impl NamePlans {
                 port: 0,
             },
             plan,
+            0,
         )
     }
 
-    fn set_endpoint(&mut self, body: &[u8]) -> (bool, u8) {
+    fn set_endpoint(&mut self, body: &[u8], dns_endpoint: bool) -> (bool, u8) {
         let Some((key, records)) = body.split_at_checked(control::ENDPOINT_KEY_LEN) else {
             return (false, control::ACK_BAD_ARGS);
         };
         let Some((endpoint, shape)) = control::decode_endpoint_key(key) else {
             return (false, control::ACK_BAD_ARGS);
         };
+        if dns_endpoint != (shape == control::SHAPE_DNS_PROBE) {
+            return (false, control::ACK_BAD_ARGS);
+        }
+        let (dns_query_len, records) = if dns_endpoint {
+            let Some(([high, low], rest)) = records.split_first_chunk::<2>() else {
+                return (false, control::ACK_BAD_ARGS);
+            };
+            let len = u16::from_be_bytes([*high, *low]);
+            if !r2k_core::dns_probe::is_dns_probe_length(usize::from(len)) {
+                return (false, control::ACK_BAD_ARGS);
+            }
+            (len, rest)
+        } else {
+            (0, records)
+        };
         let Ok(plan) = Plan::parse_wire(records) else {
             return (false, control::ACK_BAD_PLAN);
         };
-        if plan.transport != 17
-            || !addr_plan_matches_shape(shape, &plan)
-            || !self.r2o_plan_valid(&plan)
-        {
+        let shape_matches = if dns_endpoint {
+            crate::engine::is_dns_udp_fragment_plan(&plan)
+        } else {
+            addr_plan_matches_shape(shape, &plan)
+        };
+        if plan.transport != 17 || !shape_matches || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
         self.install_addr(
@@ -1450,6 +1490,7 @@ impl NamePlans {
                 port: endpoint.port(),
             },
             plan,
+            dns_query_len,
         )
     }
 
@@ -1484,7 +1525,7 @@ impl NamePlans {
         (true, control::ACK_OK)
     }
 
-    fn install_addr(&mut self, key: AddrPlanKey, plan: Plan) -> (bool, u8) {
+    fn install_addr(&mut self, key: AddrPlanKey, plan: Plan, dns_query_len: u16) -> (bool, u8) {
         if !self.addr_plans.contains_key(&key) && !self.make_room_exact() {
             return (false, control::ACK_NO_ROOM);
         }
@@ -1496,6 +1537,7 @@ impl NamePlans {
         self.addr_plans.insert(
             key,
             InstalledPlan {
+                dns_query_len,
                 plan,
                 generation,
                 last_used,
@@ -1556,6 +1598,7 @@ impl NamePlans {
         self.suffix_plans.insert(
             key,
             InstalledPlan {
+                dns_query_len: 0,
                 plan,
                 generation,
                 last_used: Cell::new(0),
@@ -1790,6 +1833,7 @@ impl NamePlans {
         self.voice_addr_plans.insert(
             r2o_server,
             InstalledPlan {
+                dns_query_len: 0,
                 plan: r2o_plan,
                 generation: r2o_generation,
                 last_used: Cell::new(0),
@@ -2635,6 +2679,7 @@ impl NamePlans {
         self.addr_plans.insert(
             key,
             InstalledPlan {
+                dns_query_len: 0,
                 plan,
                 generation,
                 last_used,
@@ -7223,6 +7268,7 @@ mod tests {
                 shape: SHAPE_HTTP,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -7951,6 +7997,7 @@ mod tests {
                     port: 0,
                 },
                 InstalledPlan {
+                    dns_query_len: 0,
                     plan: Plan::default(),
                     generation: 1,
                     last_used: std::cell::Cell::new(0),
@@ -7989,6 +8036,7 @@ mod tests {
                     port: 0,
                 },
                 InstalledPlan {
+                    dns_query_len: 0,
                     plan: Plan::default(),
                     generation: 1,
                     last_used: std::cell::Cell::new(0),
@@ -8067,6 +8115,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: plan.clone(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -8083,6 +8132,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: plan.clone(),
                 generation: 2,
                 last_used: std::cell::Cell::new(0),
@@ -8106,6 +8156,7 @@ mod tests {
                 port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan,
                 generation: 3,
                 last_used: std::cell::Cell::new(0),
@@ -8133,6 +8184,7 @@ mod tests {
                     port: 0,
                 },
                 InstalledPlan {
+                    dns_query_len: 0,
                     plan: stream_input_tls_plan(),
                     generation: 1,
                     last_used: std::cell::Cell::new(0),
@@ -8185,6 +8237,7 @@ mod tests {
                 shape: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -8213,6 +8266,7 @@ mod tests {
                 shape: SHAPE_LEGACY,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan {
                     id: [0xE1; 16],
                     ..Plan::default()
@@ -8278,6 +8332,7 @@ mod tests {
                 shape: SHAPE_QUIC,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan {
                     id: [0xE3; 16],
                     ..Plan::default()
@@ -8303,6 +8358,7 @@ mod tests {
                 shape: SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan {
                     id: [0xE4; 16],
                     ..Plan::default()
@@ -8318,6 +8374,7 @@ mod tests {
                 port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan {
                     id: [0xE5; 16],
                     ..Plan::default()
@@ -8357,6 +8414,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -8379,6 +8437,7 @@ mod tests {
                 port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 2,
                 last_used: std::cell::Cell::new(0),
@@ -8401,6 +8460,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_VOICE,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 3,
                 last_used: std::cell::Cell::new(0),
@@ -8423,6 +8483,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_LEGACY,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 4,
                 last_used: std::cell::Cell::new(0),
@@ -8445,6 +8506,7 @@ mod tests {
                 port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 5,
                 last_used: std::cell::Cell::new(0),
@@ -8466,6 +8528,7 @@ mod tests {
                 port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -8488,6 +8551,7 @@ mod tests {
                 port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 2,
                 last_used: std::cell::Cell::new(0),
@@ -8529,6 +8593,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_ECH_TS,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 4,
                 last_used: std::cell::Cell::new(0),
@@ -8589,6 +8654,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_HTTP,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 3,
                 last_used: std::cell::Cell::new(0),
@@ -8652,6 +8718,7 @@ mod tests {
                 port: 0,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 1,
                 last_used: std::cell::Cell::new(0),
@@ -8664,6 +8731,7 @@ mod tests {
                 shape: r2k_core::control::SHAPE_MODERN,
             },
             InstalledPlan {
+                dns_query_len: 0,
                 plan: Plan::default(),
                 generation: 2,
                 last_used: std::cell::Cell::new(0),

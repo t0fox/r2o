@@ -1948,6 +1948,96 @@ pub fn has_confirmed_stun_endpoint(catalog: &Catalog, endpoint: std::net::Socket
     })
 }
 
+pub fn dns_endpoint_binding(binding: &Binding, endpoint: std::net::SocketAddr) -> bool {
+    binding.kind == "addr"
+        && binding.transport == 17
+        && binding.shape == r2k_core::control::SHAPE_DNS_PROBE
+        && binding.family == if endpoint.is_ipv4() { 4 } else { 6 }
+        && binding.port == endpoint.port()
+        && binding.target.parse::<IpAddr>().ok() == Some(endpoint.ip())
+}
+
+pub fn confirmed_dns_endpoint(
+    catalog: &Catalog,
+    endpoint: std::net::SocketAddr,
+) -> Option<(&Binding, &Plan)> {
+    catalog
+        .boxes
+        .iter()
+        .flat_map(|record| record.bindings.iter().map(move |binding| (record, binding)))
+        .filter(|(_, binding)| {
+            dns_endpoint_binding(binding, endpoint)
+                && binding.enabled
+                && binding.level >= 3
+                && binding.verified_by == 1
+                && binding.recheck_since.unwrap_or(0) == 0
+                && r2k_core::dns_probe::is_dns_probe_length(usize::from(binding.dns_query_bytes))
+        })
+        .filter_map(|(record, binding)| {
+            record
+                .plans
+                .iter()
+                .find(|plan| plan.enabled && plan.id == binding.plan_id)
+                .map(|plan| (binding, plan))
+        })
+        .max_by_key(|(binding, _)| binding.confirmed)
+}
+
+pub fn add_confirmed_dns_endpoint(
+    catalog: &mut Catalog,
+    endpoint: std::net::SocketAddr,
+    source_text: &str,
+    query_len: u16,
+    now: i64,
+) -> Result<(), String> {
+    let shape = r2k_core::control::SHAPE_DNS_PROBE;
+    let family = if endpoint.is_ipv4() { 4 } else { 6 };
+    let canonical = canonical_plan_text(source_text)?;
+    let plan_id = stable_plan_id(family, shape, &canonical);
+    let plan_text = text_with_id(&canonical, &plan_id)?;
+    let bytes = crate::plan_text::compile_text(&plan_text)?;
+    let plan = RuntimePlan::parse(&bytes).map_err(|error| error.to_string())?;
+    if now < 0
+        || !r2k_core::dns_probe::is_dns_probe_length(usize::from(query_len))
+        || !r2o_datapath::engine::is_dns_udp_fragment_plan(&plan)
+    {
+        return Err("DNS-привязка требует измеренную форму DNS/UDP с ipfrag 1".into());
+    }
+    r2k_core::control::encode_delete_endpoint(endpoint, shape)?;
+    let box_id = format!("auto-{plan_id}");
+    bind_confirmed(
+        catalog,
+        &box_id,
+        &plan_id,
+        &plan_text,
+        "dns",
+        &endpoint.ip().to_string(),
+        "addr",
+        17,
+        family,
+        shape,
+        0,
+        1,
+        1,
+        now,
+        endpoint.port(),
+        None,
+    )?;
+    let binding = catalog
+        .boxes
+        .iter_mut()
+        .find(|record| record.id == box_id)
+        .and_then(|record| {
+            record
+                .bindings
+                .iter_mut()
+                .find(|binding| dns_endpoint_binding(binding, endpoint))
+        })
+        .ok_or("сохранённая привязка DNS отсутствует")?;
+    binding.dns_query_bytes = query_len;
+    Ok(())
+}
+
 pub fn add_confirmed_quic_name_binding(
     catalog: &mut Catalog,
     host: &str,

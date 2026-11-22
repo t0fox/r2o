@@ -54,6 +54,9 @@ int main(void) {
                                    17, families[i], token, 1000, "aabb",
                                    (uint16_t)question_size, digest, NULL, 0) ||
             trace(fd[1], 100) ||
+            d2k_link_set_dns_endpoint(fd[0], addresses[i], families[i], port,
+                                      (uint16_t)question_size, "aabb", token, NULL, 0) ||
+            trace(fd[1], 46) ||
             d2k_link_set_endpoint(fd[0], addresses[i], families[i], 0,
                                   D2K_LINK_SHAPE_QUIC, "aabb", NULL, 0) == 0)
             return 4;
