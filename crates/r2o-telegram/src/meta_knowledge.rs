@@ -7,7 +7,7 @@ use r2k_core::meta::product;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{BufWriter, Read, Write};
 use std::net::IpAddr;
 use std::path::Path;
 
@@ -78,7 +78,13 @@ fn read_bounded(path: &Path, limit: usize) -> Option<String> {
 }
 
 fn digest(value: &Knowledge) -> Result<String, serde_json::Error> {
-    Ok(hex::encode(Sha256::digest(serde_json::to_vec(value)?)))
+    let mut hash = Sha256::new();
+    {
+        let mut writer = BufWriter::with_capacity(8192, &mut hash);
+        serde_json::to_writer(&mut writer, value)?;
+        writer.flush().map_err(serde_json::Error::io)?;
+    }
+    Ok(hex::encode(hash.finalize()))
 }
 
 impl Knowledge {
@@ -105,23 +111,23 @@ impl Knowledge {
             data: self,
         };
         let bytes = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
+        drop(snapshot);
         if bytes.len() > MAX_BYTES {
             return Err("снимок Meta превышает допустимый размер".into());
         }
-        if let Some(previous) = read_bounded(&path, MAX_BYTES)
-            && previous.as_bytes() == bytes
-        {
-            return write_summary(state, &summary);
-        }
-        if let Some(previous) = read_bounded(&path, MAX_BYTES)
-            && let Ok(old) = serde_json::from_str::<Snapshot>(&previous)
-            && old.version == 1
-            && digest(&old.data).ok().as_deref() == Some(&old.sha256)
-        {
-            atomic_write(
-                &state.join("meta-knowledge.previous.json"),
-                previous.as_bytes(),
-            )?;
+        if let Some(previous) = read_bounded(&path, MAX_BYTES) {
+            if previous.as_bytes() == bytes {
+                return write_summary(state, &summary);
+            }
+            if let Ok(old) = serde_json::from_str::<Snapshot>(&previous)
+                && old.version == 1
+                && digest(&old.data).ok().as_deref() == Some(&old.sha256)
+            {
+                atomic_write(
+                    &state.join("meta-knowledge.previous.json"),
+                    previous.as_bytes(),
+                )?;
+            }
         }
         atomic_write(&path, &bytes)?;
         write_summary(state, &summary)
@@ -386,6 +392,8 @@ mod tests {
         assert_eq!(kb.due(43, false, |_| true), ["new-cdn.whatsapp.net"]);
         assert!(kb.due(43, true, |_| false).is_empty());
         assert!(kb.hosts["new-cdn.whatsapp.net"].addresses.is_empty());
+        let legacy_digest = hex::encode(Sha256::digest(serde_json::to_vec(&kb).unwrap()));
+        assert_eq!(digest(&kb).unwrap(), legacy_digest);
         kb.persist(&path).unwrap();
         let mut second = Knowledge::load(&path);
         second.checked_at = 1;

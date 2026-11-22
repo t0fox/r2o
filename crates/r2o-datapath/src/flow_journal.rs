@@ -619,7 +619,7 @@ fn default_journal_note(kind: R2oFlowJournalKind, code: u8) -> Option<&'static s
 
 pub struct R2oFlowJournal {
     entries: Vec<R2oFlowJournalEntry>,
-    length: usize,
+    capacity: usize,
     head: usize,
     dropped: u64,
     added: u64,
@@ -629,10 +629,9 @@ impl R2oFlowJournal {
     pub fn with_capacity(capacity: usize) -> Result<Self, std::collections::TryReserveError> {
         let mut entries = Vec::new();
         entries.try_reserve_exact(capacity)?;
-        entries.resize_with(capacity, R2oFlowJournalEntry::default);
         Ok(Self {
             entries,
-            length: 0,
+            capacity,
             head: 0,
             dropped: 0,
             added: 0,
@@ -644,17 +643,13 @@ impl R2oFlowJournal {
             entry.note = default_journal_note(entry.kind, entry.code);
         }
         self.added = self.added.wrapping_add(1);
-        let capacity = self.entries.len();
-        if capacity == 0 {
-            return;
-        }
-        if self.length == capacity {
+        if self.entries.len() < self.capacity {
+            self.entries.push(entry);
+        } else if self.capacity != 0 {
             self.dropped = self.dropped.wrapping_add(1);
-        } else {
-            self.length += 1;
+            self.entries[self.head] = entry;
+            self.head = (self.head + 1) % self.capacity;
         }
-        self.entries[self.head] = entry;
-        self.head = (self.head + 1) % capacity;
     }
 
     pub fn record_hello_body(&mut self, at_ns: u64, body: &[u8]) -> bool {
@@ -1113,19 +1108,14 @@ impl R2oFlowJournal {
     }
 
     pub fn count(&self) -> usize {
-        self.length
+        self.entries.len()
     }
 
     pub fn get(&self, index: usize) -> Option<&R2oFlowJournalEntry> {
-        if index >= self.length {
+        if index >= self.entries.len() {
             return None;
         }
-        let start = if self.length == self.entries.len() {
-            self.head
-        } else {
-            0
-        };
-        Some(&self.entries[(start + index) % self.entries.len()])
+        Some(&self.entries[(self.head + index) % self.entries.len()])
     }
 
     pub fn dropped(&self) -> u64 {
@@ -1137,7 +1127,7 @@ impl R2oFlowJournal {
     }
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &R2oFlowJournalEntry> {
-        (0..self.length).map(|index| self.get(index).expect("индекс кольца проверен"))
+        (0..self.count()).map(|index| self.get(index).expect("индекс кольца проверен"))
     }
 }
 
