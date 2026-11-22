@@ -591,6 +591,7 @@ async function main() {
   assert.equal(await evaluate("document.fonts.check('400 16px \\\"IBM Plex Mono\\\"')"), true, "локальный IBM Plex Mono загружен");
   assert.equal(await evaluate("document.querySelectorAll('script:not([src])').length"), 0, "встроенные скрипты макета не исполняются");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent !== 'Получаем состояние…'"), "состояние из /api/status");
+  assert.match(await evaluate("document.querySelector('#now-lede').textContent"), /^R2O исследует сетевой сбой/);
   assert.equal(await evaluate("document.querySelector('#overview-metrics').textContent.includes('CPU роутера свободен на 96%')"), true, "сводка показывает свободный CPU всего роутера");
   await waitFor(() => evaluate("document.querySelector('.bindings tr[data-enabled] .t')?.textContent === 'Голос Discord'"), "голосовая привязка в коробке");
   assert.equal(await evaluate("document.querySelectorAll('.bindings .proof-note').length"), 0, "голосовая привязка не добавляет заметку о RTP, которой нет в d2o");
@@ -679,7 +680,7 @@ async function main() {
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("document.querySelectorAll('#searches .search[data-outcome=saved]').length === 1"), "финальная карточка показывается с уменьшенным движением");
   await waitFor(() => evaluate("document.querySelector('#searches .quiet') !== null"), "после ухода последней карточки появляется пустой список");
-  assert.equal(await evaluate("document.querySelector('#searches .quiet').textContent.includes('Рабочий прямой трафик подбор не запускает')"), true, "пустой список поисков отображается как в d2o, независимо от счётчика замеров");
+  assert.equal(await evaluate("document.querySelector('#searches .quiet').textContent"), "Результаты для сайтов сохраняются в каталоге, для DNS отображаются в карточке сервера.", "пустой список показывает, где появятся результаты, независимо от счётчика замеров");
   await waitFor(() => evaluate("!!document.querySelector('#telegram-body')?.dataset.state"), "обновление статуса Telegram");
   assert.equal(await evaluate("document.querySelector('#telegram-body').dataset.state"), "stopped", "неизвестный Telegram status использует fallback d2o");
 
