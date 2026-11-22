@@ -1956,7 +1956,7 @@ pub fn encode_set_addr_probe(
     plan_records: &[u8],
     trial_id: [u8; 16],
 ) -> Result<Vec<u8>, &'static str> {
-    let flow = udp_addr_probe_flow(source, destination)?;
+    let flow = addr_probe_flow(source, destination, 17)?;
     // C `d2k_link_set_addr_probe_family` не сверяет план с формой.
     if lease_ms == 0 || lease_ms > ADDR_PROBE_LEASE_MAX_MS || trial_id.iter().all(|byte| *byte == 0)
     {
@@ -1975,9 +1975,24 @@ pub fn encode_delete_addr_probe(
     destination: SocketAddr,
     trial_id: [u8; 16],
 ) -> Result<Vec<u8>, &'static str> {
-    let flow = udp_addr_probe_flow(source, destination)?;
+    let flow = addr_probe_flow(source, destination, 17)?;
+    delete_addr_probe_flow(flow, trial_id)
+}
+
+pub fn encode_delete_dns_tcp_probe(
+    source: SocketAddr,
+    destination: SocketAddr,
+    trial_id: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    delete_addr_probe_flow(dns_probe_flow(source, destination, 6)?, trial_id)
+}
+
+fn delete_addr_probe_flow(
+    flow: [u8; KEY_LEN],
+    trial_id: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
     if trial_id.iter().all(|byte| *byte == 0) {
-        return Err("идентификатор временной QUIC-привязки не может быть нулевым");
+        return Err("идентификатор временной адресной привязки не может быть нулевым");
     }
     let mut body = Vec::with_capacity(KEY_LEN + 16);
     body.extend_from_slice(&flow);
@@ -1994,20 +2009,62 @@ pub fn encode_set_dns_probe(
     trial_id: [u8; 16],
     question: &[u8],
 ) -> Result<Vec<u8>, &'static str> {
-    let flow = udp_addr_probe_flow(source, destination)?;
+    encode_dns_probe(
+        dns_probe_flow(source, destination, 17)?,
+        lease_ms,
+        plan_records,
+        trial_id,
+        question,
+    )
+}
+
+/// Временный план DNS/TCP, защищённый длиной и байтами полного DNS-кадра.
+pub fn encode_set_dns_tcp_probe(
+    source: SocketAddr,
+    destination: SocketAddr,
+    lease_ms: u32,
+    plan_records: &[u8],
+    trial_id: [u8; 16],
+    frame: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    encode_dns_probe(
+        dns_probe_flow(source, destination, 6)?,
+        lease_ms,
+        plan_records,
+        trial_id,
+        frame,
+    )
+}
+
+fn dns_probe_flow(
+    source: SocketAddr,
+    destination: SocketAddr,
+    transport: u8,
+) -> Result<[u8; KEY_LEN], &'static str> {
+    let flow = addr_probe_flow(source, destination, transport)?;
     if source.is_ipv4() != destination.is_ipv4()
         || [source, destination].into_iter().any(|address| {
             matches!(address, SocketAddr::V6(address) if address.scope_id() != 0
                 || address.flowinfo() != 0 || address.ip().to_ipv4_mapped().is_some())
         })
-        || !valid_udp_addr_probe_flow(&flow)
-        || lease_ms == 0
-        || lease_ms > ADDR_PROBE_LEASE_MAX_MS
-        || trial_id == [0; 16]
+        || !valid_exact_addr_probe_flow(&flow, transport)
     {
         return Err("некорректные параметры временной DNS-пробы");
     }
-    let guard = crate::dns_probe::DnsProbeGuard::from_query(question)
+    Ok(flow)
+}
+
+fn encode_dns_probe(
+    flow: [u8; KEY_LEN],
+    lease_ms: u32,
+    plan_records: &[u8],
+    trial_id: [u8; 16],
+    wire: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    if lease_ms == 0 || lease_ms > ADDR_PROBE_LEASE_MAX_MS || trial_id == [0; 16] {
+        return Err("некорректные параметры временной DNS-пробы");
+    }
+    let guard = crate::dns_probe::DnsProbeGuard::from_wire(wire, flow[37])
         .ok_or("DNS-проба требует одного полного вопроса класса IN")?;
     let mut body = Vec::with_capacity(KEY_LEN + 54 + plan_records.len());
     body.extend_from_slice(&flow);
@@ -2030,14 +2087,15 @@ fn address_bytes_16(address: IpAddr) -> [u8; 16] {
     }
 }
 
-fn udp_addr_probe_flow(
+fn addr_probe_flow(
     source: SocketAddr,
     destination: SocketAddr,
+    transport: u8,
 ) -> Result<[u8; KEY_LEN], &'static str> {
     // C `addr_probe_flow_bytes`: только dst_port != 0; src_port 0, нулевые
     // адреса и разные семейства допускаются, ширина — по family источника.
     if destination.port() == 0 {
-        return Err("UDP-поток временной привязки имеет недопустимый dst port");
+        return Err("поток временной привязки имеет недопустимый dst port");
     }
     let family = if source.is_ipv4() { 4 } else { 6 };
     let width = if family == 4 { 4 } else { 16 };
@@ -2049,12 +2107,20 @@ fn udp_addr_probe_flow(
     flow[17..17 + width].copy_from_slice(&dst[..width]);
     flow[33..35].copy_from_slice(&source.port().to_be_bytes());
     flow[35..37].copy_from_slice(&destination.port().to_be_bytes());
-    flow[37] = 17;
+    flow[37] = transport;
     Ok(flow)
 }
 
 pub fn valid_udp_addr_probe_flow(flow: &[u8; KEY_LEN]) -> bool {
-    if !matches!(flow[0], 4 | 6) || flow[37] != 17 {
+    valid_exact_addr_probe_flow(flow, 17)
+}
+
+pub fn valid_tcp_addr_probe_flow(flow: &[u8; KEY_LEN]) -> bool {
+    valid_exact_addr_probe_flow(flow, 6)
+}
+
+fn valid_exact_addr_probe_flow(flow: &[u8; KEY_LEN], transport: u8) -> bool {
+    if !matches!(flow[0], 4 | 6) || flow[37] != transport {
         return false;
     }
     if u16::from_be_bytes([flow[33], flow[34]]) == 0
@@ -3667,7 +3733,9 @@ fn valid_binding(binding: &BindingContext) -> bool {
     binding.kind <= 4
         && matches!(binding.family, 0 | 4 | 6)
         && (binding.shape <= SHAPE_ECH_TS
-            || binding.shape == SHAPE_DNS_PROBE && binding.kind == 2 && binding.family != 0)
+            || binding.shape == SHAPE_DNS_PROBE
+                && binding.family != 0
+                && (binding.kind == 2 || (binding.kind == 1 && binding.temporary)))
 }
 
 /// Разбирает событие HTTP-портала v22 с необязательным контекстом запроса.

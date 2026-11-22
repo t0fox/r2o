@@ -1308,22 +1308,29 @@ impl NamePlans {
         {
             return DnsProbeSelection::Unreserved;
         }
-        let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 17) else {
+        let Some(view) = PacketView::parse(packet).filter(|view| matches!(view.protocol, 6 | 17))
+        else {
             return DnsProbeSelection::Unreserved;
         };
-        let payload = view
-            .udp_payload_range(packet)
-            .and_then(|range| packet.get(range));
-        if let Some((probe, guard)) = r2o_udp_addr_probe_flow_key(packet)
+        let range = if view.protocol == 6 {
+            view.tcp_segment(packet).map(|segment| segment.payload)
+        } else {
+            view.udp_payload_range(packet)
+        };
+        let payload = range.and_then(|range| packet.get(range));
+        if let Some((probe, guard)) = r2o_addr_probe_packet_flow(view, packet)
             .and_then(|key| self.addr_probes.get(&key))
             .filter(|probe| probe.expires > Instant::now())
             .and_then(|probe| probe.dns.map(|guard| (probe, guard)))
         {
-            return if payload.is_some_and(|payload| guard.matches(payload)) {
+            return if payload.is_some_and(|payload| guard.matches_wire(payload, view.protocol)) {
                 DnsProbeSelection::Matched(&probe.plan)
             } else {
                 DnsProbeSelection::DifferentQuestion
             };
+        }
+        if view.protocol != 17 {
+            return DnsProbeSelection::Unreserved;
         }
         let Some(port) = packet.get(view.l4_offset + 2..view.l4_offset + 4) else {
             return DnsProbeSelection::Unreserved;
@@ -1937,7 +1944,9 @@ impl NamePlans {
             {
                 return (false, control::ACK_BAD_ARGS);
             }
-        } else if !control::valid_udp_addr_probe_flow(&key) {
+        } else if !(control::valid_udp_addr_probe_flow(&key)
+            || is_dns && control::valid_tcp_addr_probe_flow(&key))
+        {
             return (false, control::ACK_BAD_ARGS);
         }
         if trial_id.iter().all(|byte| *byte == 0)
@@ -1949,7 +1958,7 @@ impl NamePlans {
         let mut records = &body[fixed..];
         let dns = if is_dns {
             let Some((guard, remaining)) =
-                r2k_core::dns_probe::DnsProbeGuard::decode_prefix(records)
+                r2k_core::dns_probe::DnsProbeGuard::decode_prefix(records, key[37])
             else {
                 return (false, control::ACK_BAD_ARGS);
             };
@@ -1962,10 +1971,15 @@ impl NamePlans {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
-        if dns.is_some()
-            && (!crate::engine::is_dns_udp_fragment_plan(&plan) || !self.r2o_plan_valid(&plan))
-        {
-            return (false, control::ACK_BAD_PLAN);
+        if let Some(guard) = dns {
+            let valid = if key[37] == 6 {
+                crate::engine::is_dns_tcp_split_plan(&plan, usize::from(guard.length))
+            } else {
+                crate::engine::is_dns_udp_fragment_plan(&plan)
+            };
+            if !valid || !self.r2o_plan_valid(&plan) {
+                return (false, control::ACK_BAD_PLAN);
+            }
         }
         if voice_wildcard {
             if plan.proto == PROTO_VOICE && plan.ipfrag != 0 {
@@ -2080,7 +2094,7 @@ impl NamePlans {
             }
             return (true, control::ACK_OK);
         }
-        if !control::valid_udp_addr_probe_flow(&key) {
+        if !control::valid_udp_addr_probe_flow(&key) && !control::valid_tcp_addr_probe_flow(&key) {
             return (false, control::ACK_BAD_ARGS);
         }
         if self
@@ -3022,28 +3036,27 @@ pub fn flow_journal_key_for_packet(packet: &[u8]) -> Option<[u8; r2k_core::contr
 }
 
 fn r2o_udp_addr_probe_flow_key(packet: &[u8]) -> Option<[u8; r2k_core::control::KEY_LEN]> {
-    let view = PacketView::parse(packet)?;
-    if view.protocol != 17 || view.fragment & 0x3fff != 0 {
+    let view = PacketView::parse(packet).filter(|view| view.protocol == 17)?;
+    r2o_addr_probe_packet_flow(view, packet)
+}
+
+fn r2o_addr_probe_packet_flow(
+    view: PacketView,
+    packet: &[u8],
+) -> Option<[u8; r2k_core::control::KEY_LEN]> {
+    if view.fragment & 0x3fff != 0 {
         return None;
     }
-    let udp = packet.get(view.l4_offset..view.total_len)?;
-    if udp.len() < 8 {
-        return None;
-    }
-    let source_port = u16::from_be_bytes([udp[0], udp[1]]);
-    let destination_port = u16::from_be_bytes([udp[2], udp[3]]);
-    if source_port == 0 || destination_port == 0 {
-        return None;
-    }
+    let ports = packet.get(view.l4_offset..view.l4_offset + 4)?;
     let mut key = [0; r2k_core::control::KEY_LEN];
     key[0] = view.family;
     let ip_length = if view.family == 4 { 4 } else { 16 };
     key[1..1 + ip_length].copy_from_slice(&view.src.bytes()[..ip_length]);
     key[17..17 + ip_length].copy_from_slice(&view.dst.bytes()[..ip_length]);
-    key[33..35].copy_from_slice(&source_port.to_be_bytes());
-    key[35..37].copy_from_slice(&destination_port.to_be_bytes());
-    key[37] = 17;
-    r2k_core::control::valid_udp_addr_probe_flow(&key).then_some(key)
+    key[33..37].copy_from_slice(ports);
+    key[37] = view.protocol;
+    (control::valid_udp_addr_probe_flow(&key) || control::valid_tcp_addr_probe_flow(&key))
+        .then_some(key)
 }
 
 fn canonical_plan_name(bytes: &[u8], shape: u8) -> Option<String> {

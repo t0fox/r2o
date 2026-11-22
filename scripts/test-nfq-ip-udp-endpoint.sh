@@ -44,6 +44,8 @@ if [ "$stun" = 1 ]; then
     nft add rule inet r2o_endpoint dns_out meta mark 19051 return
     nft add rule inet r2o_endpoint dns_out ip daddr 127.0.0.1 udp dport 5353 counter queue num 65121
     nft add rule inet r2o_endpoint dns_out ip6 daddr ::1 udp dport 5353 counter queue num 65122
+    nft add rule inet r2o_endpoint dns_out ip daddr 127.0.0.1 tcp dport 15353 counter queue num 65121
+    nft add rule inet r2o_endpoint dns_out ip6 daddr ::1 tcp dport 15353 counter queue num 65122
     nft add chain inet r2o_endpoint dns_block '{ type filter hook postrouting priority -149; policy accept; }'
     nft add rule inet r2o_endpoint dns_block meta mark 19052 udp dport 5353 @th,64,16 0x1234 counter drop
     nft add rule inet r2o_endpoint dns_block meta mark 19052 udp dport 5353 counter
@@ -52,6 +54,8 @@ if [ "$stun" = 1 ]; then
     nft add chain inet r2o_endpoint in '{ type filter hook input priority 0; policy accept; }'
     nft add rule inet r2o_endpoint in ip saddr 127.0.0.1 udp sport 3478 counter queue num 65121
     nft add rule inet r2o_endpoint in ip6 saddr ::1 udp sport 3478 counter queue num 65122
+    nft add rule inet r2o_endpoint in ip saddr 127.0.0.1 tcp sport 15353 counter queue num 65121
+    nft add rule inet r2o_endpoint in ip6 saddr ::1 tcp sport 15353 counter queue num 65122
     [ -r /proc/net/nf_conntrack ] || { echo "нет доступа к /proc/net/nf_conntrack" >&2; exit 2; }
 fi
 "$datapath" --mode apply --controller-only --udp-reverse-hook --mark 19051 --probe-mark 19052 --family ipv4 --queue 65121 --control "$temp/v4.sock" >"$temp/v4.log" 2>&1 &
@@ -97,7 +101,7 @@ def command(stream, opcode, data, trial=None, rejection=None):
                 assert body[42:58] == trial, body.hex()
             return body
 
-def wait_apply(stream, plan, want, port=8443, trial=None, shape=5):
+def wait_apply(stream, plan, want, port=8443, trial=None, shape=5, transport=17):
     deadline = time.monotonic() + (3 if want else .3)
     seen = []
     while time.monotonic() < deadline:
@@ -109,13 +113,13 @@ def wait_apply(stream, plan, want, port=8443, trial=None, shape=5):
         seen.append((kind, body[:74].hex()))
         if kind == 9 and body[38:54] == plan:
             assert want, "привязка сработала на чужом порту, форме или после DEL"
-            assert body[37] == 17
+            assert body[37] == transport
             ports = {int.from_bytes(body[33:35], "big"), int.from_bytes(body[35:37], "big")}
             assert port in ports, body.hex()
             if trial is not None:
                 assert body[54:70] == trial, body.hex()
                 assert int.from_bytes(body[70:78], "big") > 0, body.hex()
-                assert body[86:90] == bytes([2, body[0], shape, 1]), body.hex()
+                assert body[86:90] == bytes([1 if transport == 6 else 2, body[0], shape, 1]), body.hex()
             stream.settimeout(3)
             return body
     stream.settimeout(3)
@@ -157,6 +161,47 @@ def expect_dns_block(server):
     finally:
         server.settimeout(3)
     raise AssertionError(("DNS-запрос неожиданно прошёл блокировку", received))
+
+
+def tcp_dns_trial(ctl, family, client, ip, query, lease=10000):
+    port = client.getsockname()[1]
+    flow = bytes([family]) + ip + ip + struct.pack("!HHB", port, 15353, 6)
+    trial = bytes([97 + family]) * 16
+    plan = bytes([113 + family]) * 16
+    tlv = b"R2OP" + struct.pack("!4H", 1, 1, 0, 3)
+    tlv += b"\0\x01\0\x10" + plan + b"\0\x02\0\x02\x06\x01"
+    tlv += struct.pack("!HHHh", 0x0100, 4, 0, len(query) // 2)
+    guard = struct.pack("!IH", lease, len(query)) + hashlib.sha256(query).digest()
+    command(ctl, 0x009c, flow + trial + guard + tlv, trial)
+    return flow, trial, plan
+
+
+def verify_tcp_split(capture, family, source_port, query):
+    capture.settimeout(2)
+    midpoint = len(query) // 2
+    needed = {query[:midpoint], query[midpoint:]}
+    segments = {}
+    deadline = time.monotonic() + 3
+    while needed - segments.keys() and time.monotonic() < deadline:
+        packet = capture.recv(2048)
+        version = packet[0] >> 4
+        if version != family:
+            continue
+        if version == 4:
+            if len(packet) < 40 or packet[9] != 6:
+                continue
+            start = (packet[0] & 0x0f) * 4
+        else:
+            if len(packet) < 60 or packet[6] != 6:
+                continue
+            start = 40
+        if struct.unpack_from("!HH", packet, start) != (source_port, 15353):
+            continue
+        payload = packet[start + (packet[start + 12] >> 4) * 4:]
+        if payload:
+            segments[payload] = struct.unpack_from("!I", packet, start + 4)[0]
+    assert set(segments) == needed, segments
+    assert segments[query[midpoint:]] == (segments[query[:midpoint]] + midpoint) % (1 << 32)
 
 for family, af, address in [(4, socket.AF_INET, "127.0.0.1"), (6, socket.AF_INET6, "::1")]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as ctl:
@@ -298,6 +343,48 @@ for family, af, address in [(4, socket.AF_INET, "127.0.0.1"), (6, socket.AF_INET
             wait_apply(ctl, plan, False, 5353, trial, shape=14)
             expect_dns_block(server)
             print(f"IPv{family}: DNS-зонд через NFQUEUE, отдельные APPLIED и ответ DNS, изоляция ID/сокета/марки, DEL и истечение")
+
+        with socket.socket(af, socket.SOCK_STREAM) as listener:
+            listener.bind((address, 15353))
+            listener.listen()
+            dns_frame = struct.pack("!H", len(query)) + query
+            answer_frame = struct.pack("!H", len(reply)) + reply
+            for mark in (0, 19052):
+                with socket.socket(af, socket.SOCK_STREAM) as client:
+                    client.settimeout(3)
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark)
+                    client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    client.connect((address, 15353))
+                    server, _ = listener.accept()
+                    with server:
+                        server.settimeout(3)
+                        flow, trial, plan = tcp_dns_trial(ctl, family, client, ip, dns_frame)
+                        if mark:
+                            other_frame = dns_frame[:2] + baseline
+                            client.sendall(other_frame)
+                            assert exact(server, len(other_frame)) == other_frame
+                        client.sendall(dns_frame)
+                        assert exact(server, len(dns_frame)) == dns_frame
+                        wait_apply(ctl, plan, False, 15353, trial, shape=14, transport=6)
+                        command(ctl, 0x008a, flow + trial, trial)
+            with socket.socket(af, socket.SOCK_STREAM) as client:
+                client.settimeout(3)
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, 19052)
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                client.connect((address, 15353))
+                server, _ = listener.accept()
+                with server, socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(3)) as capture:
+                    server.settimeout(3)
+                    flow, trial, plan = tcp_dns_trial(ctl, family, client, ip, dns_frame)
+                    capture.bind(("lo", 0))
+                    client.sendall(dns_frame)
+                    wait_apply(ctl, plan, True, 15353, trial, shape=14, transport=6)
+                    verify_tcp_split(capture, family, client.getsockname()[1], dns_frame)
+                    assert exact(server, len(dns_frame)) == dns_frame
+                    server.sendall(answer_frame)
+                    assert exact(client, len(answer_frame)) == answer_frame
+                    command(ctl, 0x008a, flow + trial, trial)
+            print(f"IPv{family}: DNS/TCP, два реальных TCP-сегмента, отдельные APPLIED и ответ, защита первого запроса и SO_MARK")
 PY
 then
     nft list table inet r2o_endpoint >&2

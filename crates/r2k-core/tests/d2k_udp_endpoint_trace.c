@@ -39,6 +39,11 @@ int main(void) {
         return 3;
     uint8_t digest[32];
     d2k_sha256(question, question_size, digest);
+    uint8_t tcp[274], tcp_digest[32];
+    tcp[0] = (uint8_t)(question_size >> 8);
+    tcp[1] = (uint8_t)question_size;
+    memcpy(tcp + 2, question, question_size);
+    d2k_sha256(tcp, question_size + 2, tcp_digest);
     for (size_t i = 0; i < 2; ++i) {
         const uint16_t port = htons(853 + (uint16_t)i);
         if (d2k_link_set_endpoint(fd[0], addresses[i], families[i], port,
@@ -57,6 +62,13 @@ int main(void) {
             d2k_link_set_dns_endpoint(fd[0], addresses[i], families[i], port,
                                       (uint16_t)question_size, "aabb", token, NULL, 0) ||
             trace(fd[1], 46) ||
+            d2k_link_set_dns_probe(fd[0], addresses[i], htons(52001), addresses[i], port,
+                                   6, families[i], token, 1000, "aabb",
+                                   (uint16_t)(question_size + 2), tcp_digest, NULL, 0) ||
+            trace(fd[1], 100) ||
+            d2k_link_del_addr_probe_family(fd[0], addresses[i], htons(52001), addresses[i], port,
+                                           6, families[i], token, NULL, 0) ||
+            trace(fd[1], 60) ||
             d2k_link_set_endpoint(fd[0], addresses[i], families[i], 0,
                                   D2K_LINK_SHAPE_QUIC, "aabb", NULL, 0) == 0)
             return 4;

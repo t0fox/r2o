@@ -5,19 +5,29 @@
 //! поэтому они вынесены в `r2k-core`; чтение UCI/doqd/Keenetic и
 //! планировщик подключаются на уровне контроллера.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Числовые unicast-резолверы для адресной проверки обычного DNS.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlainDnsEndpoint {
+    pub address: SocketAddr,
+    pub transport: u8,
+}
+
 pub fn parse_plain_dns_endpoints(
     config: &str,
     ipv6: Option<bool>,
-) -> Result<Vec<std::net::SocketAddr>, &'static str> {
-    use std::net::SocketAddr;
+) -> Result<Vec<PlainDnsEndpoint>, &'static str> {
     let mut targets = Vec::new();
     if config.len() > 2048 || config.split_ascii_whitespace().count() > 16 {
         return Err("DNS_DISCOVERY_ENDPOINTS допускает до 16 адресов резолверов");
     }
     for value in config.split_ascii_whitespace() {
+        let (value, transport) = if let Some(address) = value.strip_prefix("tcp://") {
+            (address, 6)
+        } else {
+            (value, 17)
+        };
         let endpoint: SocketAddr = value
             .parse()
             .map_err(|_| "ожидается числовой IP:порт DNS")?;
@@ -33,8 +43,12 @@ pub fn parse_plain_dns_endpoints(
         {
             return Err("DNS Discovery требует однозначный unicast endpoint без зоны");
         }
-        if ipv6.is_none_or(|ipv6| endpoint.is_ipv6() == ipv6) && !targets.contains(&endpoint) {
-            targets.push(endpoint);
+        let target = PlainDnsEndpoint {
+            address: endpoint,
+            transport,
+        };
+        if ipv6.is_none_or(|ipv6| endpoint.is_ipv6() == ipv6) && !targets.contains(&target) {
+            targets.push(target);
         }
     }
     Ok(targets)

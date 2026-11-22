@@ -21,7 +21,7 @@ ip -6 addr add 2001:db8::53/128 dev lo nodad
 ip route add default dev lo
 ip -6 route add default dev lo
 export R2O_DIR="$tmp" R2O_RUN_DIR="$tmp/run" R2O_CONFIG="$tmp/config"
-export DNS_DISCOVERY_ENDPOINTS='192.0.2.53:53 [2001:db8::53]:53 192.0.2.53:5300 [2001:db8::53]:5301 192.0.2.53:5302'
+export DNS_DISCOVERY_ENDPOINTS='192.0.2.53:53 [2001:db8::53]:53 192.0.2.53:5300 [2001:db8::53]:5301 192.0.2.53:5302 tcp://192.0.2.53:15353 tcp://[2001:db8::53]:15353'
 cat > "$R2O_CONFIG" <<EOF
 FW_BACKEND=$backend
 QUEUE_NUM=65141
@@ -29,7 +29,7 @@ QUEUE_NUM6=65142
 MARK=19051
 PROBE_MARK=19052
 MEASURE_MARK=19053
-DNS_PORTS=53,853,5300,5301,5302
+DNS_PORTS=53,853,5300,5301,5302,15353
 R2O_PPE_DEOFFLOAD=0
 EOF
 if [ "$backend" = iptables ]; then
@@ -38,6 +38,7 @@ if [ "$backend" = iptables ]; then
     cat > "$tmp/bin/ndmc" <<'NDMC'
 #!/bin/sh
 printf 'dns_server = 192.0.2.53\ndns_server = 2001:db8::53\n'
+printf 'dns_server = 192.0.2.53:15353\ndns_server = [2001:db8::53]:15353\n'
 NDMC
     chmod 755 "$tmp/bin/ndmc"
     PATH="$tmp/bin:$PATH"
@@ -57,6 +58,8 @@ add chain inet r2o_dns_test miss { type filter hook postrouting priority -151; p
 add rule inet r2o_dns_test miss meta mark 19052 udp dport 5302 meta mark set 19053
 add chain inet r2o_dns_test in { type filter hook input priority 0; policy accept; }
 add rule inet r2o_dns_test in udp dport { 53, 5301 } meta mark != 19054 counter drop
+add rule inet r2o_dns_test in meta nfproto ipv4 tcp dport 15353 tcp flags & (syn | rst | fin) == 0 meta length > 60 meta mark != 19051 counter drop
+add rule inet r2o_dns_test in meta nfproto ipv6 tcp dport 15353 tcp flags & (syn | rst | fin) == 0 meta length > 80 meta mark != 19051 counter drop
 NFT
 
 python3 - "$datapath" "$controller" "$tmp" <<'PY'
@@ -118,6 +121,29 @@ def response_for(query):
     return (query[:2] + bytes.fromhex("81800001000100000000") + query[12:]
             + bytes.fromhex("c00c000100010000003c0004c000020a"))
 
+def serve_dns_tcp(loop, stream, data):
+    if data is None:
+        connection, _ = stream.accept()
+        connection.settimeout(2)
+        loop.register(connection, selectors.EVENT_READ, bytearray())
+        return
+    chunk = stream.recv(512)
+    if not chunk:
+        loop.unregister(stream)
+        stream.close()
+        return
+    data.extend(chunk)
+    if len(data) < 31:
+        return
+    assert len(data) == 31 and data[:2] == b"\0\x1d"
+    assert data[4:] == bytes.fromhex("01000001000000000000076578616d706c6503636f6d0000010001")
+    reply = response_for(data[2:])
+    stream.sendall(len(reply).to_bytes(2, "big"))
+    time.sleep(.01)
+    stream.sendall(reply)
+    loop.unregister(stream)
+    stream.close()
+
 
 def run_until_log(loop, process, log, expected, requests, stale_v6=False):
     deadline = time.monotonic() + 33
@@ -127,6 +153,9 @@ def run_until_log(loop, process, log, expected, requests, stale_v6=False):
             return
         for key, _ in loop.select(.1):
             server, port = key.fileobj, key.data
+            if server.type == socket.SOCK_STREAM:
+                serve_dns_tcp(loop, server, port)
+                continue
             query, peer = server.recvfrom(512)
             assert query[2:] == bytes.fromhex("01000001000000000000076578616d706c6503636f6d0000010001")
             requests[(server.family, port)] += 1
@@ -153,6 +182,11 @@ try:
                 listeners.append(server)
                 server.bind((address, port))
                 loop.register(server, selectors.EVENT_READ, port)
+            listener = socket.socket(family, socket.SOCK_STREAM)
+            listeners.append(listener)
+            listener.bind((address, 15353))
+            listener.listen()
+            loop.register(listener, selectors.EVENT_READ)
 
         datapaths = start_datapaths()
         catalog = tmp / "catalog.json"
@@ -168,6 +202,8 @@ try:
             "DNS/UDP 192.0.2.53:5300: прямой запрос получил корректный ответ",
             "DNS/UDP [2001:db8::53]:5301: получен некорректный DNS-ответ",
             "DNS/UDP 192.0.2.53:5302: получен DNS-ответ, исполнение плана не подтверждено",
+            "DNS/TCP 192.0.2.53:15353: точный APPLIED и корректный DNS-ответ",
+            "DNS/TCP [2001:db8::53]:15353: точный APPLIED и корректный DNS-ответ",
         )
         requests = collections.Counter()
         run_until_log(loop, process, log, expected, requests)

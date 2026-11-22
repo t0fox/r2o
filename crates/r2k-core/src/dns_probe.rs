@@ -9,6 +9,25 @@ pub fn is_dns_probe_length(length: usize) -> bool {
     (DNS_PROBE_QUERY_MIN..=DNS_PROBE_QUERY_MAX).contains(&length)
 }
 
+pub fn is_dns_tcp_probe_frame(frame: &[u8]) -> bool {
+    frame
+        .split_first_chunk::<2>()
+        .is_some_and(|(length, question)| {
+            usize::from(u16::from_be_bytes(*length)) == question.len()
+                && is_dns_probe_query(question)
+        })
+}
+
+fn query_length(wire_length: usize, transport: u8) -> Option<usize> {
+    match transport {
+        6 => wire_length
+            .checked_sub(2)
+            .filter(|length| is_dns_probe_length(*length)),
+        17 => is_dns_probe_length(wire_length).then_some(wire_length),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DnsProbeGuard {
     pub length: u16,
@@ -16,12 +35,10 @@ pub struct DnsProbeGuard {
 }
 
 impl DnsProbeGuard {
-    pub fn decode_prefix(bytes: &[u8]) -> Option<(Self, &[u8])> {
+    pub fn decode_prefix(bytes: &[u8], transport: u8) -> Option<(Self, &[u8])> {
         let (prefix, rest) = bytes.split_at_checked(34)?;
         let length = u16::from_be_bytes(prefix[..2].try_into().ok()?);
-        if !is_dns_probe_length(usize::from(length)) {
-            return None;
-        }
+        query_length(usize::from(length), transport)?;
         Some((
             Self {
                 length,
@@ -32,14 +49,27 @@ impl DnsProbeGuard {
     }
 
     pub fn from_query(query: &[u8]) -> Option<Self> {
-        is_dns_probe_query(query).then(|| Self {
-            length: query.len() as u16,
-            sha256: Sha256::digest(query).into(),
+        Self::from_wire(query, 17)
+    }
+
+    pub fn from_wire(wire: &[u8], transport: u8) -> Option<Self> {
+        let valid = match transport {
+            6 => is_dns_tcp_probe_frame(wire),
+            17 => is_dns_probe_query(wire),
+            _ => false,
+        };
+        valid.then(|| Self {
+            length: wire.len() as u16,
+            sha256: Sha256::digest(wire).into(),
         })
     }
 
     pub fn matches(self, query: &[u8]) -> bool {
-        usize::from(self.length) == query.len() && Self::from_query(query) == Some(self)
+        self.matches_wire(query, 17)
+    }
+
+    pub fn matches_wire(self, wire: &[u8], transport: u8) -> bool {
+        usize::from(self.length) == wire.len() && Self::from_wire(wire, transport) == Some(self)
     }
 }
 

@@ -1481,11 +1481,11 @@ fn http_portal_and_response_bodies_match_donor_shapes() {
 #[ignore = "запускается с C-оракулом через test-ip-udp-endpoint-differential.sh"]
 fn d2k_udp_endpoint_совпадает_по_ipv4_и_ipv6() {
     use r2k_core::control::{
-        COMMAND_DEL_ENDPOINT, COMMAND_SET_DNS_ENDPOINT, COMMAND_SET_DNS_PROBE,
-        COMMAND_SET_ENDPOINT, COMMAND_SET_ENDPOINT_BOUND, ENDPOINT_KEY_LEN, SHAPE_DNS_PROBE,
-        SHAPE_QUIC, SHAPE_VOICE, decode_endpoint_key, encode_delete_endpoint,
-        encode_set_dns_endpoint, encode_set_dns_probe, encode_set_endpoint,
-        encode_set_endpoint_bound, read_frame,
+        COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_ENDPOINT, COMMAND_SET_DNS_ENDPOINT,
+        COMMAND_SET_DNS_PROBE, COMMAND_SET_ENDPOINT, COMMAND_SET_ENDPOINT_BOUND, ENDPOINT_KEY_LEN,
+        SHAPE_DNS_PROBE, SHAPE_QUIC, SHAPE_VOICE, decode_endpoint_key, encode_delete_dns_tcp_probe,
+        encode_delete_endpoint, encode_set_dns_endpoint, encode_set_dns_probe,
+        encode_set_dns_tcp_probe, encode_set_endpoint, encode_set_endpoint_bound, read_frame,
     };
 
     let mut actual = String::new();
@@ -1540,6 +1540,20 @@ fn d2k_udp_endpoint_совпадает_по_ipv4_и_ipv6() {
             write!(actual, "{byte:02x}").unwrap();
         }
         actual.push('\n');
+        let mut tcp = (question.len() as u16).to_be_bytes().to_vec();
+        tcp.extend_from_slice(question);
+        let set = encode_set_dns_tcp_probe(source, endpoint, 1000, &[0xaa, 0xbb], [0x5a; 16], &tcp)
+            .unwrap();
+        let del = encode_delete_dns_tcp_probe(source, endpoint, [0x5a; 16]).unwrap();
+        for (wire, kind) in [(set, COMMAND_SET_DNS_PROBE), (del, COMMAND_DEL_ADDR_PROBE)] {
+            let frame = read_frame(&mut wire.as_slice()).unwrap();
+            assert_eq!(frame.kind, kind);
+            for byte in frame.body {
+                use std::fmt::Write;
+                write!(actual, "{byte:02x}").unwrap();
+            }
+            actual.push('\n');
+        }
         let mut invalid = endpoint;
         invalid.set_port(0);
         assert!(encode_set_endpoint(invalid, SHAPE_QUIC, &[0xaa, 0xbb]).is_err());

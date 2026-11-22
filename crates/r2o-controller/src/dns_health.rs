@@ -105,6 +105,65 @@ pub fn probe_plain_dns_udp_on(
     }
 }
 
+/// DNS/TCP подтверждается полным кадром с ответом на отправленный вопрос.
+pub fn probe_plain_dns_tcp_on(
+    stream: &mut TcpStream,
+    id: u16,
+    timeout: Duration,
+) -> std::io::Result<PlainDnsReply> {
+    use std::io::ErrorKind;
+
+    let deadline = Instant::now() + timeout;
+    stream.set_write_timeout(Some(timeout))?;
+    stream.write_all(&dns_query_frame(id))?;
+
+    let read = (|| -> std::io::Result<PlainDnsReply> {
+        let mut header = [0; 2];
+        read_plain_dns_tcp_exact(stream, &mut header, deadline)?;
+        let length = usize::from(u16::from_be_bytes(header));
+        if !(12..=DNS_FRAME_MAX).contains(&length) {
+            return Ok(PlainDnsReply::Rejected);
+        }
+        let mut body = [0; DNS_FRAME_MAX];
+        read_plain_dns_tcp_exact(stream, &mut body[..length], deadline)?;
+        Ok(if dns_probe_reply(&body[..length], id) {
+            PlainDnsReply::Answer
+        } else {
+            PlainDnsReply::Rejected
+        })
+    })();
+    match read {
+        Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+            Ok(PlainDnsReply::Timeout)
+        }
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(PlainDnsReply::Rejected),
+        result => result,
+    }
+}
+
+fn read_plain_dns_tcp_exact(
+    stream: &mut TcpStream,
+    mut bytes: &mut [u8],
+    deadline: Instant,
+) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+
+    while !bytes.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ErrorKind::TimedOut.into());
+        }
+        stream.set_read_timeout(Some(left))?;
+        match stream.read(bytes) {
+            Ok(0) => return Err(ErrorKind::UnexpectedEof.into()),
+            Ok(length) => bytes = &mut bytes[length..],
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn dns16(bytes: &[u8], offset: usize) -> Option<u16> {
     let pair = bytes.get(offset..offset.checked_add(2)?)?;
     Some(u16::from_be_bytes([pair[0], pair[1]]))
@@ -1170,6 +1229,43 @@ mod tests {
         assert!(!dns_probe_reply(&no_answer, 0x1234));
         let aaaa = response(0x8180, 1, 28, 16);
         assert!(!dns_probe_reply(&aaaa, 0x1234));
+    }
+
+    #[test]
+    fn обычный_dns_tcp_подтверждает_только_полный_ответ_с_тем_же_id() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let valid = response(0x8180, 1, 1, 4);
+            let mut wrong_id = valid.clone();
+            wrong_id[1] ^= 1;
+            for (declared_len, reply) in [
+                (valid.len() as u16, valid.as_slice()),
+                (wrong_id.len() as u16, wrong_id.as_slice()),
+                (valid.len() as u16, &valid[..valid.len() - 1]),
+                ((DNS_FRAME_MAX + 1) as u16, &[]),
+            ] {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut query = [0; 31];
+                socket.read_exact(&mut query).unwrap();
+                assert_eq!(query.as_slice(), dns_query_frame(0x1234));
+                socket.write_all(&declared_len.to_be_bytes()).unwrap();
+                socket.write_all(reply).unwrap();
+            }
+        });
+        for verdict in [
+            PlainDnsReply::Answer,
+            PlainDnsReply::Rejected,
+            PlainDnsReply::Rejected,
+            PlainDnsReply::Rejected,
+        ] {
+            let mut stream = TcpStream::connect(address).unwrap();
+            assert_eq!(
+                probe_plain_dns_tcp_on(&mut stream, 0x1234, Duration::from_secs(2)).unwrap(),
+                verdict
+            );
+        }
+        server.join().unwrap();
     }
 
     fn c_query_bytes() -> Vec<u8> {

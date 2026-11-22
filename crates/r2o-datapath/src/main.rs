@@ -2932,10 +2932,18 @@ mod app {
                                             address_stun_replan || owned_dns_probe,
                                             || {
                                                 let decision = if owned_dns_probe {
-                                                    r2o_datapath::engine::decide_owned_dns_udp_probe(
-                                                        selected_plan,
-                                                        bytes,
-                                                    )
+                                                    if selected_plan.transport == 6 {
+                                                        r2o_datapath::engine::decide_with_dns_tcp_probe(
+                                                            &mut tcp_sessions,
+                                                            selected_plan,
+                                                            bytes,
+                                                            raw.as_ref().map_or(0, |raw| raw.tls_route_segment_cap(bytes)),
+                                                        )
+                                                    } else {
+                                                        r2o_datapath::engine::decide_owned_dns_udp_probe(
+                                                            selected_plan, bytes,
+                                                        )
+                                                    }
                                                 } else {
                                                     decide_with_tcp_session_mode(
                                                         &mut tcp_sessions,

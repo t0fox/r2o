@@ -7821,6 +7821,7 @@ const PLAIN_DNS_ADDRESS_PLAN: &str =
 #[cfg(unix)]
 struct PlainDnsDiscoveryJob {
     server: std::net::SocketAddr,
+    transport: u8,
     measure_mark: u32,
     probe_mark: u32,
     route: Option<PlainDnsRoute>,
@@ -7853,6 +7854,9 @@ fn run_plain_dns_discovery(
     commands: &dyn HttpSearchCommandSink,
     cancel: &AtomicBool,
 ) -> Result<PlainDnsVerdict, Box<dyn Error>> {
+    if job.transport == 6 {
+        return run_plain_dns_tcp_discovery(job, commands, cancel);
+    }
     use r2o_controller::dns_health::{PlainDnsReply, dns_query_message, probe_plain_dns_udp_on};
     use r2o_controller::r2o_quic_http3::{
         r2o_quic_http3_set_socket_mark, r2o_quic_http3_udp_socket_fresh,
@@ -7945,19 +7949,7 @@ fn run_plain_dns_discovery(
         &dns_query_message(id),
     )?;
     let delete = encode_delete_addr_probe(local, job.server, trial_id)?;
-    let ack = ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
-        HttpSearchCommand::R2oInstallAddrProbe {
-            command: set,
-            delete: delete.clone(),
-            trial_id,
-            deadline,
-            reply,
-        }
-    })?;
-    if !ack.ok || ack.command != control::COMMAND_SET_DNS_PROBE || ack.trial_id != Some(trial_id) {
-        return Err("нет точного ACK установки DNS-зонда".into());
-    }
-    let verified = (|| -> Result<PlainDnsVerdict, Box<dyn Error>> {
+    with_plain_dns_probe(commands, set, delete, trial_id, || {
         if cancel.load(Ordering::Relaxed) {
             return Err("DNS-зонд отменён".into());
         }
@@ -7970,32 +7962,88 @@ fn run_plain_dns_discovery(
         if cancel.load(Ordering::Relaxed) {
             return Err("DNS-зонд отменён".into());
         }
-        match probe_plain_dns_udp_on(&socket, id, REPLY_TIMEOUT)? {
-            PlainDnsReply::Rejected => return Ok(PlainDnsVerdict::Rejected),
-            PlainDnsReply::Timeout => return Ok(PlainDnsVerdict::NoAnswer),
-            PlainDnsReply::Answer => {}
+        let reply = probe_plain_dns_udp_on(&socket, id, REPLY_TIMEOUT)?;
+        verify_plain_dns_execution(commands, reply, trial_id, local, job.server, 17)
+    })
+}
+
+#[cfg(unix)]
+fn run_plain_dns_tcp_discovery(
+    job: &mut PlainDnsDiscoveryJob,
+    commands: &dyn HttpSearchCommandSink,
+    cancel: &AtomicBool,
+) -> Result<PlainDnsVerdict, Box<dyn Error>> {
+    use r2o_controller::dns_health::{PlainDnsReply, dns_query_frame, probe_plain_dns_tcp_on};
+    use std::time::Duration;
+
+    const TIMEOUT: Duration = Duration::from_millis(1500);
+    let family = if job.server.is_ipv4() { 4 } else { 6 };
+    let open = |mark| BoundTcpProbe::open(family, Some(mark))?.connect(job.server, TIMEOUT);
+    let trial_id = random_id()?;
+    let id = u16::from_be_bytes([trial_id[0], trial_id[1]]);
+    let mut source_ip = None;
+    for direct_id in [id ^ 1, id ^ 2] {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("DNS/TCP-зонд отменён".into());
         }
-        let exact = |event: &control::AppliedEvent| {
-            event.execution_id != 0
-                && event.binding.is_known()
-                && event.binding.kind == 2
-                && event.binding.family == event.key[0]
-                && event.binding.shape == control::SHAPE_DNS_PROBE
-                && event.binding.temporary
-                && applied_udp_trial_matches(event, trial_id, trial_id, local, job.server)
-        };
-        let events = r2o_collect_controller_applied_events_until(
-            commands,
+        let (mut stream, ip, _, _) = open(job.measure_mark)?;
+        if source_ip.replace(ip).is_some_and(|previous| previous != ip) {
+            return Err("исходный адрес контрольных DNS/TCP-соединений изменился".into());
+        }
+        match probe_plain_dns_tcp_on(&mut stream, direct_id, TIMEOUT)? {
+            PlainDnsReply::Answer => return Ok(PlainDnsVerdict::Direct),
+            PlainDnsReply::Rejected => return Ok(PlainDnsVerdict::Rejected),
+            PlainDnsReply::Timeout => {}
+        }
+    }
+    if !job.permit.r2o_yield_if_contended_with_cancel(cancel) || cancel.load(Ordering::Relaxed) {
+        return Err("DNS/TCP-зонд отменён".into());
+    }
+    let (mut stream, ip, port, _) = open(job.probe_mark)?;
+    if source_ip != Some(ip) {
+        return Err("исходный адрес DNS/TCP-кандидата изменился".into());
+    }
+    let local = std::net::SocketAddr::new(ip, port);
+    let frame = dns_query_frame(id);
+    let plan = format!(
+        "r2o-plan 1 1\nid 00000000000000000000000000000000\nproto tcp tls\nsplit payload_start +{}\norder forward\n",
+        frame.len() / 2,
+    );
+    let text = r2o_controller::discovery::plan_text_for_trial(&plan, trial_id)?;
+    let records = r2o_plan_records_for_wire(&compile_text(&text)?)?;
+    let set =
+        control::encode_set_dns_tcp_probe(local, job.server, 12_000, &records, trial_id, &frame)?;
+    let delete = control::encode_delete_dns_tcp_probe(local, job.server, trial_id)?;
+    with_plain_dns_probe(commands, set, delete, trial_id, || {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("DNS/TCP-зонд отменён".into());
+        }
+        let reply = probe_plain_dns_tcp_on(&mut stream, id, TIMEOUT)?;
+        verify_plain_dns_execution(commands, reply, trial_id, local, job.server, 6)
+    })
+}
+
+#[cfg(unix)]
+fn with_plain_dns_probe(
+    commands: &dyn HttpSearchCommandSink,
+    set: Vec<u8>,
+    delete: Vec<u8>,
+    trial_id: [u8; 16],
+    verify: impl FnOnce() -> Result<PlainDnsVerdict, Box<dyn Error>>,
+) -> Result<PlainDnsVerdict, Box<dyn Error>> {
+    let ack = ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
+        HttpSearchCommand::R2oInstallAddrProbe {
+            command: set,
+            delete: delete.clone(),
             trial_id,
-            CONTROL_ACK_TIMEOUT,
-            exact,
-        )?;
-        Ok(if events.iter().any(exact) {
-            PlainDnsVerdict::Confirmed
-        } else {
-            PlainDnsVerdict::MissingExecution
-        })
-    })();
+            deadline,
+            reply,
+        }
+    })?;
+    if !ack.ok || ack.command != control::COMMAND_SET_DNS_PROBE || ack.trial_id != Some(trial_id) {
+        return Err("нет точного ACK установки DNS-зонда".into());
+    }
+    let verified = verify();
     ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
         HttpSearchCommand::R2oDeleteAddrProbe {
             command: delete,
@@ -8004,6 +8052,45 @@ fn run_plain_dns_discovery(
         }
     })?;
     verified
+}
+
+#[cfg(unix)]
+fn verify_plain_dns_execution(
+    commands: &dyn HttpSearchCommandSink,
+    reply: r2o_controller::dns_health::PlainDnsReply,
+    trial_id: [u8; 16],
+    local: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+    transport: u8,
+) -> Result<PlainDnsVerdict, Box<dyn Error>> {
+    use r2o_controller::dns_health::PlainDnsReply;
+    match reply {
+        PlainDnsReply::Rejected => return Ok(PlainDnsVerdict::Rejected),
+        PlainDnsReply::Timeout => return Ok(PlainDnsVerdict::NoAnswer),
+        PlainDnsReply::Answer => {}
+    }
+    let exact = |event: &control::AppliedEvent| {
+        event.execution_id != 0
+            && event.binding.is_known()
+            && event.binding.kind == if transport == 6 { 1 } else { 2 }
+            && event.binding.family == event.key[0]
+            && event.binding.shape == control::SHAPE_DNS_PROBE
+            && event.binding.temporary
+            && event.trial_id == trial_id
+            && r2o_plan_id_is_ours(trial_id, event.plan_id)
+            && applied_flow_endpoints_match(event, local, server, transport)
+    };
+    let events = r2o_collect_controller_applied_events_until(
+        commands,
+        trial_id,
+        CONTROL_ACK_TIMEOUT,
+        exact,
+    )?;
+    Ok(if events.iter().any(exact) {
+        PlainDnsVerdict::Confirmed
+    } else {
+        PlainDnsVerdict::MissingExecution
+    })
 }
 
 #[cfg(unix)]
@@ -11406,16 +11493,16 @@ struct R2oQuicDiscoveryJob {
 }
 
 #[cfg(unix)]
-enum R2oUdpDiscoveryJob {
+enum R2oNetworkDiscoveryJob {
     Quic(R2oQuicDiscoveryJob),
     Stun(StunDiscoveryJob),
     PlainDns(PlainDnsDiscoveryJob),
 }
 
 #[cfg(unix)]
-enum AddressUdpDiscoveryOutcome {
+enum AddressDiscoveryOutcome {
     Stun(StunDiscoveryOutcome),
-    PlainDns(std::net::SocketAddr, Result<PlainDnsVerdict, String>),
+    PlainDns(std::net::SocketAddr, u8, Result<PlainDnsVerdict, String>),
 }
 
 #[cfg(unix)]
@@ -11427,10 +11514,10 @@ struct R2oQuicActiveSnapshot {
 
 #[cfg(unix)]
 struct R2oQuicDiscoveryWorker {
-    jobs: Option<SyncSender<R2oUdpDiscoveryJob>>,
+    jobs: Option<SyncSender<R2oNetworkDiscoveryJob>>,
     commands: Option<Receiver<HttpSearchCommand>>,
     outcomes: Receiver<R2oQuicDiscoveryOutcome>,
-    address_outcomes: Receiver<AddressUdpDiscoveryOutcome>,
+    address_outcomes: Receiver<AddressDiscoveryOutcome>,
     cancel: Arc<AtomicBool>,
     active: HashMap<std::net::SocketAddr, R2oQuicActiveSnapshot>,
     stun_active: HashSet<std::net::SocketAddr>,
@@ -11483,13 +11570,13 @@ impl R2oQuicDiscoveryWorker {
 
     fn r2o_new_with_runner(runner: Arc<R2oQuicDiscoveryRunner>) -> Self {
         let (jobs, job_receiver) =
-            mpsc::sync_channel::<R2oUdpDiscoveryJob>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
+            mpsc::sync_channel::<R2oNetworkDiscoveryJob>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
         let job_receiver = Arc::new(std::sync::Mutex::new(job_receiver));
         let (command_sender, commands) = mpsc::sync_channel::<HttpSearchCommand>(16);
         let (outcome_sender, outcomes) =
             mpsc::sync_channel::<R2oQuicDiscoveryOutcome>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
         let (address_sender, address_outcomes) =
-            mpsc::sync_channel::<AddressUdpDiscoveryOutcome>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
+            mpsc::sync_channel::<AddressDiscoveryOutcome>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
         let cancel = Arc::new(AtomicBool::new(false));
         let pending_snapshots = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut threads = Vec::with_capacity(R2O_QUIC_DISCOVERY_WORKER_COUNT);
@@ -11514,8 +11601,8 @@ impl R2oQuicDiscoveryWorker {
                         break;
                     }
                     let mut job = match job {
-                        R2oUdpDiscoveryJob::Quic(job) => job,
-                        R2oUdpDiscoveryJob::Stun(mut job) => {
+                        R2oNetworkDiscoveryJob::Quic(job) => job,
+                        R2oNetworkDiscoveryJob::Stun(mut job) => {
                             let result = run_address_stun_discovery(
                                 &mut job,
                                 &worker_commands,
@@ -11523,7 +11610,7 @@ impl R2oQuicDiscoveryWorker {
                             )
                             .map_err(|error| error.to_string());
                             if address_sender
-                                .send(AddressUdpDiscoveryOutcome::Stun(StunDiscoveryOutcome {
+                                .send(AddressDiscoveryOutcome::Stun(StunDiscoveryOutcome {
                                     client: job.client,
                                     server: job.server,
                                     result,
@@ -11534,12 +11621,16 @@ impl R2oQuicDiscoveryWorker {
                             }
                             continue;
                         }
-                        R2oUdpDiscoveryJob::PlainDns(mut job) => {
+                        R2oNetworkDiscoveryJob::PlainDns(mut job) => {
                             let result =
                                 run_plain_dns_discovery(&mut job, &worker_commands, &worker_cancel)
                                     .map_err(|error| error.to_string());
                             if address_sender
-                                .send(AddressUdpDiscoveryOutcome::PlainDns(job.server, result))
+                                .send(AddressDiscoveryOutcome::PlainDns(
+                                    job.server,
+                                    job.transport,
+                                    result,
+                                ))
                                 .is_err()
                             {
                                 break;
@@ -11644,7 +11735,7 @@ impl R2oQuicDiscoveryWorker {
         };
         let remeasured = Arc::new(AtomicBool::new(false));
         if jobs
-            .try_send(R2oUdpDiscoveryJob::Quic(R2oQuicDiscoveryJob {
+            .try_send(R2oNetworkDiscoveryJob::Quic(R2oQuicDiscoveryJob {
                 task,
                 remeasured: Arc::clone(&remeasured),
             }))
@@ -11743,7 +11834,7 @@ impl R2oQuicDiscoveryWorker {
         self.plain_dns_active = self
             .jobs
             .as_ref()
-            .is_some_and(|jobs| jobs.try_send(R2oUdpDiscoveryJob::PlainDns(job)).is_ok());
+            .is_some_and(|jobs| jobs.try_send(R2oNetworkDiscoveryJob::PlainDns(job)).is_ok());
         self.plain_dns_active
     }
 
@@ -11761,7 +11852,7 @@ impl R2oQuicDiscoveryWorker {
         if !self
             .jobs
             .as_ref()
-            .is_some_and(|jobs| jobs.try_send(R2oUdpDiscoveryJob::Stun(job)).is_ok())
+            .is_some_and(|jobs| jobs.try_send(R2oNetworkDiscoveryJob::Stun(job)).is_ok())
         {
             return false;
         }
@@ -11771,13 +11862,13 @@ impl R2oQuicDiscoveryWorker {
         true
     }
 
-    fn try_address_outcome(&mut self) -> Option<AddressUdpDiscoveryOutcome> {
+    fn try_address_outcome(&mut self) -> Option<AddressDiscoveryOutcome> {
         let outcome = self.address_outcomes.try_recv().ok()?;
         match &outcome {
-            AddressUdpDiscoveryOutcome::Stun(outcome) => {
+            AddressDiscoveryOutcome::Stun(outcome) => {
                 self.stun_active.remove(&outcome.server);
             }
-            AddressUdpDiscoveryOutcome::PlainDns(..) => self.plain_dns_active = false,
+            AddressDiscoveryOutcome::PlainDns(..) => self.plain_dns_active = false,
         }
         Some(outcome)
     }
@@ -17215,8 +17306,18 @@ fn applied_udp_flow_matches(
     local: std::net::SocketAddr,
     server: std::net::SocketAddr,
 ) -> bool {
+    applied_flow_endpoints_match(event, local, server, 17)
+}
+
+#[cfg(unix)]
+fn applied_flow_endpoints_match(
+    event: &r2k_core::control::AppliedEvent,
+    local: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+    transport: u8,
+) -> bool {
     let key = &event.key;
-    if key[37] != 17 || key[0] != if server.is_ipv4() { 4 } else { 6 } {
+    if key[37] != transport || key[0] != if server.is_ipv4() { 4 } else { 6 } {
         return false;
     }
     let first_port = u16::from_be_bytes([key[33], key[34]]);
@@ -25361,7 +25462,7 @@ impl ControlClient {
         initial_catalog_sync: Option<CompiledCatalog>,
         no_diagnostics: bool,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
-        plain_dns_endpoints: Vec<std::net::SocketAddr>,
+        plain_dns_endpoints: Vec<r2k_core::dns_config::PlainDnsEndpoint>,
     ) -> Result<(), Box<dyn Error>> {
         use std::io::Write;
 
@@ -25386,7 +25487,11 @@ impl ControlClient {
             && let Some((catalog, _, _)) = &discovery
         {
             let query_len = r2o_controller::dns_health::dns_query_message(0).len() as u16;
-            for &(server, _) in &plain_dns_due {
+            for &(target, _) in &plain_dns_due {
+                if target.transport != 17 {
+                    continue;
+                }
+                let server = target.address;
                 if let Some((binding, plan)) =
                     r2o_controller::discovery::confirmed_dns_endpoint(catalog, server)
                     && binding.dns_query_bytes == query_len
@@ -25635,7 +25740,7 @@ impl ControlClient {
                 dns_health.poll(&mut dns_services, dns_wall_now);
                 dns_health.start_due(&mut dns_services, https_probe_mark);
                 if let Some((measure_mark, probe_mark)) = plain_dns_marks
-                    && let Some((server, due)) = plain_dns_due
+                    && let Some((target, due)) = plain_dns_due
                         .iter_mut()
                         .filter(|(_, due)| *due <= now)
                         .min_by_key(|(_, due)| *due)
@@ -25644,10 +25749,14 @@ impl ControlClient {
                         .filter(|worker| !worker.plain_dns_active && worker.has_capacity())
                     && let Some(permit) = measurement_gate.r2o_try_acquire()
                     && worker.queue_plain_dns(PlainDnsDiscoveryJob {
-                        server: *server,
+                        server: target.address,
+                        transport: target.transport,
                         measure_mark,
                         probe_mark,
-                        route: plain_dns_routes.get(server).copied(),
+                        route: plain_dns_routes
+                            .get(&target.address)
+                            .copied()
+                            .filter(|_| target.transport == 17),
                         permit,
                     })
                 {
@@ -26814,9 +26923,11 @@ impl ControlClient {
                     .and_then(R2oQuicDiscoveryWorker::try_address_outcome)
                 {
                     let outcome = match outcome {
-                        AddressUdpDiscoveryOutcome::Stun(outcome) => outcome,
-                        AddressUdpDiscoveryOutcome::PlainDns(server, result) => {
-                            if let Some((_, catalog, path, _)) = &mut discovery {
+                        AddressDiscoveryOutcome::Stun(outcome) => outcome,
+                        AddressDiscoveryOutcome::PlainDns(server, transport, result) => {
+                            if transport == 17
+                                && let Some((_, catalog, path, _)) = &mut discovery
+                            {
                                 match &result {
                                     Ok(PlainDnsVerdict::Confirmed) => {
                                         match self.confirm_plain_dns_route(
@@ -26861,7 +26972,10 @@ impl ControlClient {
                                                             | PlainDnsVerdict::RouteNotApplied)
                                                     ) && let Some((_, due)) = plain_dns_due
                                                         .iter_mut()
-                                                        .find(|(endpoint, _)| *endpoint == server)
+                                                        .find(|(endpoint, _)| {
+                                                            endpoint.address == server
+                                                                && endpoint.transport == 17
+                                                        })
                                                     {
                                                         *due = std::time::Instant::now();
                                                     }
@@ -26875,21 +26989,22 @@ impl ControlClient {
                                     _ => {}
                                 }
                             }
+                            let protocol = if transport == 6 { "DNS/TCP" } else { "DNS/UDP" };
                             match result {
                                 Ok(PlainDnsVerdict::Direct) => println!(
-                                    "DNS/UDP {server}: прямой запрос получил корректный ответ"
+                                    "{protocol} {server}: прямой запрос получил корректный ответ"
                                 ),
                                 Ok(PlainDnsVerdict::Rejected) => {
-                                    println!("DNS/UDP {server}: получен некорректный DNS-ответ")
+                                    println!("{protocol} {server}: получен некорректный DNS-ответ")
                                 }
                                 Ok(PlainDnsVerdict::NoAnswer) => println!(
-                                    "DNS/UDP {server}: кандидат не получил DNS-ответ в срок"
+                                    "{protocol} {server}: кандидат не получил DNS-ответ в срок"
                                 ),
                                 Ok(PlainDnsVerdict::MissingExecution) => println!(
-                                    "DNS/UDP {server}: получен DNS-ответ, исполнение плана не подтверждено"
+                                    "{protocol} {server}: получен DNS-ответ, исполнение плана не подтверждено"
                                 ),
                                 Ok(PlainDnsVerdict::Confirmed) => println!(
-                                    "DNS/UDP {server}: точный APPLIED и корректный DNS-ответ подтверждены на одном сокете"
+                                    "{protocol} {server}: точный APPLIED и корректный DNS-ответ подтверждены на одном сокете"
                                 ),
                                 Ok(PlainDnsVerdict::RouteVerified) => println!(
                                     "DNS/UDP {server}: повторно подтверждены адресный план и DNS-ответ"
@@ -26901,7 +27016,7 @@ impl ControlClient {
                                     "DNS/UDP {server}: исполнение сохранённого плана не подтверждено"
                                 ),
                                 Err(error) => {
-                                    eprintln!("DNS/UDP {server}: проба не завершена: {error}")
+                                    eprintln!("{protocol} {server}: проба не завершена: {error}")
                                 }
                             }
                             std::io::stdout().flush()?;
@@ -66043,13 +66158,24 @@ group_block_proven: false,
     #[cfg(unix)]
     #[test]
     fn обычный_dns_выбирает_только_настроенные_числовые_endpoint() {
-        use r2k_core::dns_config::parse_plain_dns_endpoints as parse;
-        let configured = "192.0.2.53:53 [2001:db8::53]:1053 192.0.2.53:53";
+        use r2k_core::dns_config::{PlainDnsEndpoint, parse_plain_dns_endpoints as parse};
+        let configured =
+            "192.0.2.53:53 tcp://[2001:db8::53]:1053 192.0.2.53:53 tcp://192.0.2.53:53";
         assert_eq!(
             parse(configured, None).unwrap(),
             [
-                "192.0.2.53:53".parse().unwrap(),
-                "[2001:db8::53]:1053".parse().unwrap()
+                PlainDnsEndpoint {
+                    address: "192.0.2.53:53".parse().unwrap(),
+                    transport: 17
+                },
+                PlainDnsEndpoint {
+                    address: "[2001:db8::53]:1053".parse().unwrap(),
+                    transport: 6
+                },
+                PlainDnsEndpoint {
+                    address: "192.0.2.53:53".parse().unwrap(),
+                    transport: 6
+                },
             ]
         );
         assert_eq!(parse(configured, Some(true)).unwrap().len(), 1);
