@@ -199,6 +199,7 @@ const DNS_QUERY_ID_DOT: u16 = 1;
 pub enum DnsHealthFailure {
     Configuration,
     Local,
+    NoRoute,
     Network,
     Certificate,
     Server,
@@ -210,6 +211,7 @@ impl DnsHealthFailure {
         match self {
             Self::Configuration => "configuration",
             Self::Local => "local",
+            Self::NoRoute => "no_route",
             Self::Network => "network",
             Self::Certificate => "certificate",
             Self::Server => "server",
@@ -252,6 +254,7 @@ fn socket_failure(error: &std::io::Error) -> DnsHealthFailure {
         return DnsHealthFailure::Certificate;
     }
     match error.kind() {
+        NetworkUnreachable => DnsHealthFailure::NoRoute,
         TimedOut | WouldBlock | ConnectionReset | ConnectionAborted | BrokenPipe
         | HostUnreachable => DnsHealthFailure::Network,
         ConnectionRefused | UnexpectedEof | InvalidData => DnsHealthFailure::Server,
@@ -2107,7 +2110,7 @@ mod tests {
 
         assert_eq!(
             socket_failure(&Error::from(ErrorKind::NetworkUnreachable)),
-            DnsHealthFailure::Local
+            DnsHealthFailure::NoRoute
         );
         assert_eq!(
             socket_failure(&Error::from(ErrorKind::TimedOut)),

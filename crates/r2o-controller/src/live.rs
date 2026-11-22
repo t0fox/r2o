@@ -750,7 +750,9 @@ fn r2o_live_dns_services(
             let mut tcp_reachable = state.tcp_reachable;
             let mut tls_handshake = state.tls_handshake;
             let mut http_status = state.http_status;
+            let no_route = state.failure == Some(crate::dns_health::DnsHealthFailure::NoRoute);
             if let Some(task) = task
+                && !no_route
                 && state.state != DnsServiceState::DirectOk
                 && state.recovery_phase != Some(DnsRecoveryPhase::Recheck)
             {
@@ -766,9 +768,11 @@ fn r2o_live_dns_services(
             let recovered = state
                 .verified_recovery
                 .as_ref()
-                .filter(|_| state.state != DnsServiceState::DirectOk);
+                .filter(|_| !no_route && state.state != DnsServiceState::DirectOk);
             let (state_name, reason) = if state.state == DnsServiceState::DirectOk {
                 ("direct_ok", state.reason.clone())
+            } else if no_route {
+                ("no_route", state.reason.clone())
             } else if recovered.is_some() {
                 (
                     "recovered",
@@ -2234,7 +2238,28 @@ mod tests {
         assert_eq!(rows[0]["dns_answer_confirmed"], false);
         assert_eq!(rows[0]["dns_answer_via_plan"], false);
 
+        live.state = DnsServiceState::Failed;
+        live.failure = Some(crate::dns_health::DnsHealthFailure::NoRoute);
+        live.recovery_phase = None;
+        live.verified_recovery = Some(super::DnsVerifiedRecovery {
+            plan_id: "предыдущий план".into(),
+            checked_at: 1,
+            rtt_ms: Some(20),
+        });
+        let rows = super::r2o_live_dns_services(
+            &Catalog::default(),
+            std::slice::from_ref(&service),
+            std::slice::from_ref(&live),
+            std::slice::from_ref(&task),
+        );
+        assert_eq!(rows[0]["state"], "no_route");
+        assert_eq!(rows[0]["failure"], "no_route");
+        assert_eq!(rows[0]["dns_answer_confirmed"], false);
+        assert_eq!(rows[0]["dns_answer_via_plan"], false);
+        assert!(rows[0].get("answer_rtt_ms").is_none());
+
         live.dns_answer = true;
+        live.failure = None;
         live.state = DnsServiceState::DirectOk;
         live.recovery_phase = None;
         let rows = super::r2o_live_dns_services(&Catalog::default(), &[service], &[live], &[task]);

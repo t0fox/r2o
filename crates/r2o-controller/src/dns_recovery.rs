@@ -7,7 +7,7 @@ use super::{
 };
 use r2k_core::dns_config::DnsService;
 use r2o_controller::discovery::DiscoveryTarget;
-use r2o_controller::dns_health::{DnsHealthResult, probe_dns_health};
+use r2o_controller::dns_health::{DnsHealthFailure, DnsHealthResult, probe_dns_health};
 use r2o_controller::live::{DnsRecoveryPhase, DnsServiceState, DnsVerifiedRecovery};
 use r2o_controller::r2o_resource_limit::R2oMeasurementGate;
 use std::net::SocketAddr;
@@ -576,7 +576,10 @@ impl Recovery {
             }
             live.recovery_phase = None;
             live.verified_recovery = None;
-            if let Some(reason) = reason.filter(|_| live.state == DnsServiceState::Failed) {
+            if let Some(reason) = reason.filter(|_| {
+                live.state == DnsServiceState::Failed
+                    && live.failure != Some(DnsHealthFailure::NoRoute)
+            }) {
                 live.reason = reason.to_owned();
             }
             live.recovery_retry_at = Some(now + RETRY);
@@ -1137,7 +1140,6 @@ mod tests {
 
     #[test]
     fn dns_recovery_requires_repeat_failures_for_the_same_endpoint() {
-        use r2o_controller::dns_health::DnsHealthFailure;
         let service = DnsService {
             protocol: "dot".into(),
             host: "2001:db8::5".into(),
@@ -1179,6 +1181,12 @@ mod tests {
         assert_eq!(request.endpoint, "[2001:db8::5]:853".parse().unwrap());
         assert_eq!(request.target.host, "resolver.example");
         assert_eq!(request.index(&state), Some(0));
+        for _ in 0..2 {
+            finish_probe(&mut state, DnsHealthFailure::NoRoute);
+            assert!(Request::from_failures(&state, 0, Some(6), None).is_none());
+        }
+        assert!(request.needs_recovery(&state).is_none());
+        assert!(state.live[0].reason.contains("нет маршрута"));
         finish_probe(&mut state, DnsHealthFailure::Certificate);
         finish_probe(&mut state, DnsHealthFailure::Network);
         assert!(Request::from_failures(&state, 0, Some(6), None).is_none());

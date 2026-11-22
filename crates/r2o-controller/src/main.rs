@@ -3326,6 +3326,11 @@ impl R2oDnsServices {
                 });
                 live.reason = if result.dns_reply {
                     result.reason.clone()
+                } else if result.failure
+                    == Some(r2o_controller::dns_health::DnsHealthFailure::NoRoute)
+                {
+                    "У роутера нет маршрута к этому адресу. Проверка повторится автоматически."
+                        .into()
                 } else if result.http_status == 413 {
                     "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается."
                         .into()

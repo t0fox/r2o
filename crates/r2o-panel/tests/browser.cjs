@@ -481,9 +481,23 @@ esac
   assert.equal(await evaluate("document.querySelector('[data-nav=now]').getAttribute('aria-current')"), "page");
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('[2001:db8::9]:853')"), true);
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('17 мс')"), true);
-  assert.equal(await evaluate("document.querySelector('#dns-protection-more summary').textContent"), "Ещё 1 сервер · с ошибкой 1");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-more summary').textContent"), "Ещё 1 точка подключения · с ошибкой 1");
   await evaluate("document.querySelector('#dns-protection-more summary').click()");
   assert.equal(await evaluate("document.querySelector('#dns-protection-more').open && document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Ошибка'"), true);
+  const refusedResolver = liveState.dns_services[3];
+  liveState.dns_services[3] = {
+    ...liveState.dns_services[0], resolved_ip: "2001:db8::53", state: "no_route",
+    failure: "no_route", answer_rtt_ms: null, status_reason: "У роутера нет маршрута к этому адресу.",
+  };
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Нет маршрута'"), "IPv6 без маршрута отображается отдельным статусом");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-more summary').textContent"), "Ещё 1 точка подключения");
+  assert.deepEqual(await evaluate(`["#dns-protection-list", "#dns-protection-extra"].map(selector =>
+    [...document.querySelector(selector).querySelector("li").querySelectorAll(".dns-service-protocol, .meta-chip")].map(e => e.textContent))`),
+  [["DoT · IPv4", "Доступен напрямую"], ["DoT · IPv6", "Нет маршрута"]]);
+  liveState.dns_services[3] = refusedResolver;
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Ошибка'"), "отказ DNS-сервера остаётся ошибкой");
   await evaluate("document.querySelector('#dns-protection-more summary').click()");
   await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   assert.equal(await evaluate(`(() => {

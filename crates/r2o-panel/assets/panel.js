@@ -3439,7 +3439,7 @@
     if (root.__r2oKey === key) return;
     root.__r2oKey = key;
     var message = !fresh ? "Данные контроллера устарели или ещё недоступны."
-      : rows.length ? "Обнаружено серверов: " + rows.length
+      : rows.length ? "Точки подключения: " + rows.length
         : "В поддерживаемых настройках роутера зашифрованные DNS-серверы не найдены.";
     if (summary.textContent !== message) summary.textContent = message;
     var doc = this.doc;
@@ -3459,6 +3459,7 @@
       plan_applied: ["Подбор", "warn"],
       bypass_ok: ["Подбор", "warn"],
       recovered: ["Обход работает", "ok"],
+      no_route: ["Нет маршрута", ""],
       failed: ["Ошибка", "bad"],
       no_bypass: ["Ошибка", "bad"]
     };
@@ -3469,11 +3470,13 @@
         state = observed.stale ? state : states.checking;
       }
       var item = el(doc, "li", "card dns-service");
+      var address = str(row.resolved_ip || row.host);
+      var family = address.indexOf(":") >= 0 ? "IPv6" : /^\d+(?:\.\d+){3}$/.test(address) ? "IPv4" : "";
+      var protocol = protocols[row.protocol] || str(row.protocol);
       var badge = el(doc, "span", "meta-chip", state[0]);
       badge.dataset.tone = state[1];
-      add(item, el(doc, "span", "dns-service-protocol", protocols[row.protocol] || str(row.protocol)),
+      add(item, el(doc, "span", "dns-service-protocol", family ? protocol + " · " + family : protocol),
         badge, el(doc, "h3", "dns-service-host", str(row.sni || row.host)));
-      var address = str(row.resolved_ip || row.host);
       if (address.indexOf(":") >= 0 && address[0] !== "[") address = "[" + address + "]";
       var endpoint = address + (row.port ? ":" + row.port : "");
       if ((row.protocol === "doh" || row.protocol === "doh3") && row.path && row.path !== "/") endpoint += str(row.path);
@@ -3484,7 +3487,7 @@
         ["Проверка", observed.checked ? localTime(observed.checked) : "—", ""]
       ];
       if (row.plan_applied === true && row.applied_plan_id) {
-        fields.push([observed.stale ? "Последний план" : "Применённый план", str(row.applied_plan_id), "dns-service-plan"]);
+        fields.push([observed.stale || row.state === "no_route" ? "Последний план" : "Применённый план", str(row.applied_plan_id), "dns-service-plan"]);
       }
       fields.forEach(function (field) {
         var entry = el(doc, "div", "");
@@ -3504,7 +3507,7 @@
     var extraCount = Math.max(0, items.length - visible);
     more.hidden = extraCount === 0;
     if (extraCount) {
-      var label = "Ещё " + count(extraCount, "сервер", "сервера", "серверов");
+      var label = "Ещё " + count(extraCount, "точка подключения", "точки подключения", "точек подключения");
       var failed = rows.slice(visible).filter(function (row, index) {
         return !time[visible + index].stale && (row.state === "failed" || row.state === "no_bypass");
       }).length;
