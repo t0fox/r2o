@@ -1704,8 +1704,7 @@ mod app {
         )?;
         let mut flow_journal = R2oFlowJournal::with_capacity(options.journal_capacity as usize)?;
         let journal_origin = Instant::now();
-        let meta_disable_marker = std::env::var_os("R2O_META_STATE_DIR")
-            .map(|path| std::path::PathBuf::from(path).join("meta-protection.disabled"));
+        let meta_state_dir = std::env::var_os("R2O_META_STATE_DIR").map(std::path::PathBuf::from);
         let mut meta_observed_dns_at = None;
         let journal_origin_ns = r2o_now_ns();
         let mut journal_seen = 0_u64;
@@ -2638,7 +2637,7 @@ mod app {
                         name_plans.prune_expired_probes(now);
                         let packet_view = r2k_core::packet::PacketView::parse(bytes);
                         if !controller_probe
-                            && let Some(marker) = meta_disable_marker.as_ref()
+                            && let Some(state) = meta_state_dir.as_deref()
                             && meta_observed_dns_at.is_none_or(|last| {
                                 now.saturating_duration_since(last)
                                     >= std::time::Duration::from_millis(200)
@@ -2646,7 +2645,7 @@ mod app {
                             && let Some(view) = packet_view.as_ref()
                             && let Some(ctrl) = control.as_mut().filter(|ctrl| ctrl.is_connected())
                             && let Some(host) = meta_dns_name(view, bytes)
-                            && !marker.exists()
+                            && r2k_core::meta::protection_enabled(state)
                         {
                             meta_observed_dns_at = Some(now);
                             let _ = ctrl.try_send_event(

@@ -297,8 +297,8 @@ if [ "$1" = meta-protection-product ]; then
   esac
 fi
 case "$1" in
-  meta-protection-off) touch '${work}/meta-protection.disabled' ;;
-  meta-protection-on) rm -f '${work}/meta-protection.disabled' ;;
+  meta-protection-off) touch '${work}/meta-protection.disabled'; rm -f '${work}/meta-protection.enabled' ;;
+  meta-protection-on) touch '${work}/meta-protection.enabled'; rm -f '${work}/meta-protection.disabled' ;;
 esac
 `);
   fs.chmodSync(servicePath, 0o700);
@@ -527,6 +527,16 @@ esac
     const screenshot = await call("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(captureDir, "dns-overview-desktop.png"), Buffer.from(screenshot.data, "base64"));
   }
+  const masterSwitch = "document.getElementById('meta-protection-switch')";
+  const metaDetailsHidden = `(() => {
+    const blocks = ["meta-protection-families", "meta-protection-infrastructure"];
+    return blocks.every(id => getComputedStyle(document.getElementById(id)).display === "none");
+  })()`;
+  assert.equal(await evaluate(masterSwitch + ".getAttribute('aria-checked')"), "false");
+  assert.equal(await evaluate(metaDetailsHidden), true, "при первом запуске сервисы, CDN и источники скрыты");
+  await evaluate(masterSwitch + ".click()");
+  await waitFor(() => evaluate(masterSwitch + ".getAttribute('aria-checked') === 'true'"), "Meta Protection включается общим переключателем");
+  assert.equal(await evaluate(metaDetailsHidden), false, "после включения доступны все сервисы");
   const metaSwitch = "[data-family=instagram] [role=switch]";
   const metaLabel = "[data-family=instagram] .meta-family-head";
   assert.equal(await evaluate("document.querySelectorAll('#meta-protection [role=switch]').length"), 8);
@@ -563,13 +573,13 @@ esac
   assert.deepEqual(fs.readFileSync(serviceLog, "utf8").split("\n").filter(line => line.startsWith("meta-protection-product")), [
     "meta-protection-product instagram off", "meta-protection-product instagram on",
   ]);
-  const masterSwitch = "document.getElementById('meta-protection-switch')";
   await evaluate(masterSwitch + ".click()");
   await waitFor(() => evaluate(masterSwitch + ".getAttribute('aria-checked') === 'false'"), "общий переключатель останавливает Meta Protection");
-  assert.equal(await evaluate("document.querySelector('[data-family=facebook] .meta-subtitle').textContent"), "Общая защита выключена");
+  assert.equal(await evaluate(metaDetailsHidden), true, "после выключения сервисы снова скрыты");
   assert.equal(await evaluate("document.querySelector('[data-family=facebook] [role=switch]').getAttribute('aria-checked')"), "true");
   await evaluate(masterSwitch + ".click()");
   await waitFor(() => evaluate(masterSwitch + ".getAttribute('aria-checked') === 'true'"), "общий переключатель восстанавливает Meta Protection");
+  assert.equal(await evaluate(metaDetailsHidden), false);
   for (const width of [1440, 390, 320]) {
     await call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
     await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });

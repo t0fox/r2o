@@ -130,6 +130,7 @@ LM_PID=$RUN/r2o-log-maintenance.pid
 PPE_ADAPTER=${R2O_PPE_ADAPTER:-$SCRIPT_DIR/r2o-ppe-deoffload.sh}
 R2O_PPE_DEOFFLOAD=${R2O_PPE_DEOFFLOAD:-1}
 CATALOG=$STATE/catalog.json
+META_ENABLED=$STATE/meta-protection.enabled
 META_DISABLED=$STATE/meta-protection.disabled
 export R2O_META_STATE_DIR="$STATE" R2O_MANAGER="$MANAGER"
 export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$PPE_ADAPTER" \
@@ -728,8 +729,12 @@ meta_dns_scheduler_running() {
     return 1
 }
 
+meta_protection_enabled() {
+    [ -f "$META_ENABLED" ] && [ ! -e "$META_DISABLED" ]
+}
+
 meta_dns_scheduler_start() {
-    [ ! -e "$META_DISABLED" ] || return 0
+    meta_protection_enabled || return 0
     if type ndmc >/dev/null 2>&1; then
         export R2O_META_DNS_DISABLED=0
         case "$R2O_META_RANGES" in
@@ -791,9 +796,15 @@ meta_dns_scheduler_stop() {
 
 meta_protection_enable() {
     prepare_dirs || return 1
-    if [ -e "$META_DISABLED" ]; then
-        rm -f "$META_DISABLED" || return 1
+    if [ ! -f "$META_ENABLED" ]; then
+        [ ! -e "$META_ENABLED" ] || return 1
+        meta_marker=$(mktemp "$STATE/.meta-protection.XXXXXX") || return 1
+        printf '1\n' > "$meta_marker" && mv -f "$meta_marker" "$META_ENABLED" || {
+            rm -f "$meta_marker"
+            return 1
+        }
     fi
+    rm -f "$META_DISABLED" || return 1
     meta_dns_scheduler_start
 }
 
@@ -806,6 +817,7 @@ meta_protection_disable() {
             return 1
         }
     fi
+    rm -f "$META_ENABLED" || return 1
     meta_dns_scheduler_stop || return 1
     "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --remove-meta-dns
 }
@@ -1516,7 +1528,7 @@ start() {
     telegram_start || say "Telegram не запущен; см. $LOG/telegram.log и $TG_STATUS"
     panel_start || say "панель не запущена; datapath продолжает работу"
     rt_proxy_start || say "rt-proxy RuTracker не запущен; rutracker останется без прокси"
-    if [ -e "$META_DISABLED" ]; then
+    if ! meta_protection_enabled; then
         meta_protection_disable || say "не удалось снять принадлежащие R2O записи Meta DNS"
     else
         meta_dns_scheduler_start || say "планировщик Meta DNS не запустился"
@@ -1544,7 +1556,7 @@ update_health() {
         && "$FIREWALL" status && "$FIREWALL" dns-ensure \
         && { [ -z "$PANEL_LISTEN" ] || "$MANAGER" update-ping-panel "$PANEL_LISTEN"; } \
         && { [ "$TG_ENABLED" = 0 ] || telegram_ready; } \
-        && { [ -e "$META_DISABLED" ] || meta_dns_scheduler_running; } \
+        && { ! meta_protection_enabled || meta_dns_scheduler_running; } \
         && firewall_watchdog_running && update_scheduler_running
 }
 
@@ -1640,7 +1652,7 @@ status() {
     else
         echo "  rt-proxy RuTracker: выключен конфигурацией"
     fi
-    if [ -e "$META_DISABLED" ]; then
+    if ! meta_protection_enabled; then
         echo "  Meta Protection: выключена"
     else
         meta_dns_scheduler_running && echo "  Meta Protection: планировщик работает" || echo "  Meta Protection: планировщик не работает"

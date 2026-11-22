@@ -12,6 +12,11 @@ pub const PRODUCTS: &[&str] = &[
     "fbcdn",
 ];
 
+pub fn protection_enabled(state: &Path) -> bool {
+    state.join("meta-protection.enabled").is_file()
+        && !state.join("meta-protection.disabled").exists()
+}
+
 pub fn product_marker(state: &Path, product: &str) -> Option<PathBuf> {
     PRODUCTS
         .contains(&product)

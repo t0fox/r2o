@@ -1640,6 +1640,9 @@
     var state = this.$("meta-protection-state"), lamp = this.$("meta-protection-lamp");
     if (state.textContent !== summary) state.textContent = summary;
     lamp.dataset.tone = saving ? "live" : !enabled ? "" : this.failed || !status.running || status.error ? "warn" : status.checked_at ? "ok" : "live";
+    this.$("meta-protection-families").hidden = !enabled;
+    this.$("meta-protection-infrastructure").hidden = !enabled;
+    if (!enabled) return;
     var rows = list(status.families), searches = list(status.searches);
     var checked = function (epoch) { return epoch ? new Date(epoch * 1000).toLocaleString() : "Ещё не проверено"; };
     var metric = function (stats, label, value) { stats.append(el(doc, "dt", "", label), el(doc, "dd", "", value)); };

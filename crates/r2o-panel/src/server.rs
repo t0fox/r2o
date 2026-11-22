@@ -1353,7 +1353,7 @@ fn snapshot(
     if !linked {
         absent.push(stage("traffic", "Наблюдаемый трафик", false, "Нечем: контроллер не подключён к датапату. Это не «ноль соединений», а отсутствие измерения."));
     }
-    let meta_enabled = !config.state_dir.join("meta-protection.disabled").exists();
+    let meta_enabled = r2k_core::meta::protection_enabled(&config.state_dir);
     let meta_running = meta_enabled
         && pid_path_running(&config.manager_root.join("run/meta-dns-scheduler.pid")).is_some();
     let mut meta = read_json_object(&config.state_dir.join("meta-status.json"), 64 * 1024)

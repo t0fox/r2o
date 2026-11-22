@@ -12,7 +12,7 @@ R2O_INIT=$ROOT/router/S99r2o
 [ -f "$D2O_UPDATE" ] || fail "не найден D2O updater $D2O_UPDATE"
 
 tr -d '\r' < "$D2O_UPDATE" | sed -n '/^healthy() {/,$p' | sed '/^do_install() {/,$d' > "$TEMP/d2o-healthy.sh"
-tr -d '\r' < "$R2O_INIT" | sed -n '/^update_health() {/,/^}/p' > "$TEMP/r2o-health.sh"
+tr -d '\r' < "$R2O_INIT" | sed -n '/^meta_protection_enabled() {/,/^}/p; /^update_health() {/,/^}/p' > "$TEMP/r2o-health.sh"
 tr -d '\r' < "$R2O_INIT" | sed -n '/^panel_start() {/,$p' | sed '/^start() {/,$d' > "$TEMP/r2o-panel-start.sh"
 R2O_PANEL_DEFAULT=$(tr -d '\r' < "$R2O_INIT" | sed -n 's/^\(PANEL_LISTEN=.*\)$/\1/p' | tail -n 1)
 [ -n "$R2O_PANEL_DEFAULT" ] || fail "не найдена инициализация PANEL_LISTEN в R2O"
@@ -109,7 +109,7 @@ component_running() {
 }
 RUNTIME=$TEMP/r2o/runtime
 # shellcheck disable=SC2034 # Эти параметры читает подключённая функция update_health.
-IPV6_ENABLED_RUNTIME=0 QUEUE4=2000 TG_ENABLED=0 META_DISABLED=$TEMP/r2o/meta-disabled
+IPV6_ENABLED_RUNTIME=0 QUEUE4=2000 TG_ENABLED=0 META_ENABLED=$TEMP/r2o/meta-enabled META_DISABLED=$TEMP/r2o/meta-disabled
 DP4_PID=$TEMP/r2o/dp.pid
 SOCK4=$TEMP/r2o/dp.sock
 MANAGER=$TEMP/manager
@@ -128,7 +128,7 @@ with socket.socket(socket.AF_UNIX) as listener:
     listener.bind(sys.argv[1])
 PY
 printf '{}\n' > "$RUNTIME/live4.json"
-meta_dns_scheduler_running() { return 0; }
+meta_dns_scheduler_running() { return 1; }
 firewall_watchdog_running() { return 0; }
 update_scheduler_running() { return 0; }
 update_health || fail "R2O отклонил работающий datapath с выключенной панелью"
