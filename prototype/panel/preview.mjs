@@ -24,10 +24,16 @@ const page=html.replace('<script src="/assets/gsap.js"',fixtureTag+'\n  <script 
 files.set('assets/mock.js',await readFile(join(root,'mock.js')));
 if(redesign){
   // В демонстрации результат оставляем для изучения после окончания сценария.
-  files.set('assets/panel.js',files.get('assets/panel.js').toString().replace(/(var SEARCH_RESULT_MS = )\d+;/,'$1Infinity;'));
+  files.set('assets/panel.js',files.get('assets/panel.js').toString()
+    .replace(/(var SEARCH_RESULT_MS = )\d+;/,'$1Infinity;')
+    .replace('this.initRouter();','if (global.R2oSearchConcept) win.addEventListener("r2o-demo-replay", function () { self.poll(); });\n    this.initRouter();')
+    .replace('self.updateSearch(row, s);','self.updateSearch(row, s); if (global.R2oSearchConcept) global.R2oSearchConcept(row, s);'));
+  for(const asset of ['search-card.css','search-card.js'])files.set('assets/'+asset,await readFile(join(root,asset)));
   files.set('index.html',page.replace('<html ','<html data-redesign-preview ')
+    .replace('<script src="/assets/panel.js"', '<script src="/assets/search-card.js" defer></script>\n  <script src="/assets/panel.js"')
     .replace('Панель работает локально на роутере и обращается только к его /api.', 'Демонстрационные данные. Действия выполняются только в этой вкладке.')
-    .replace('</head>',`<style>
+    .replace('</head>',`<link rel="stylesheet" href="/assets/search-card.css">
+    <style>
       .mast-host:not(:empty) { display: inline-block; }
       .episode-replay { margin-left: auto; }
     </style></head>`));
