@@ -1665,6 +1665,40 @@ fn start_telegram_check(config: &Config) -> Result<(), ActionError> {
     result
 }
 
+#[cfg(unix)]
+fn manager_update_busy(root: &Path) -> Result<bool, ActionError> {
+    use std::fs::TryLockError;
+    use std::io::ErrorKind;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let lock = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(root.join("state/update-router.lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(ActionError::Start),
+    };
+    if !lock.metadata().map_err(|_| ActionError::Start)?.is_file() {
+        return Err(ActionError::Start);
+    }
+    // Менеджер и процесс восстановления удерживают исключительную блокировку.
+    loop {
+        match lock.try_lock_shared() {
+            Ok(()) => return Ok(false),
+            Err(TryLockError::WouldBlock) => return Ok(true),
+            Err(TryLockError::Error(error)) if error.kind() == ErrorKind::Interrupted => {}
+            Err(TryLockError::Error(_)) => return Err(ActionError::Start),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn manager_update_busy(_root: &Path) -> Result<bool, ActionError> {
+    Ok(false)
+}
+
 fn start_update_worker(
     config: &Config,
     action: &str,
@@ -1672,6 +1706,9 @@ fn start_update_worker(
 ) -> Result<(), ActionError> {
     let running = (action != "update-cancel").then(|| Arc::clone(&config.update_worker_running));
     if let Some(flag) = &running {
+        if manager_update_busy(&config.manager_root)? {
+            return Err(ActionError::Busy);
+        }
         flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| ActionError::Busy)?;
     }
