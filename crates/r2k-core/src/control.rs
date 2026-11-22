@@ -133,6 +133,7 @@ pub const SHAPE_MODERN_TS: u8 = 11;
 pub const SHAPE_LEGACY_TS: u8 = 12;
 pub const SHAPE_ECH_TS: u8 = 13;
 pub const SHAPE_DNS_PROBE: u8 = 14;
+pub const SHAPE_DNS_TCP: u8 = 15;
 pub const TCP_PROFILE_UNKNOWN: u8 = 0;
 pub const TCP_PROFILE_NO_TS: u8 = 1;
 pub const TCP_PROFILE_TS: u8 = 2;
@@ -1662,7 +1663,26 @@ pub fn decode_endpoint_key(bytes: &[u8]) -> Option<(SocketAddr, u8)> {
 }
 
 const fn endpoint_shape_valid(shape: u8) -> bool {
-    matches!(shape, SHAPE_QUIC | SHAPE_VOICE | SHAPE_DNS_PROBE)
+    matches!(
+        shape,
+        SHAPE_QUIC | SHAPE_VOICE | SHAPE_DNS_PROBE | SHAPE_DNS_TCP
+    )
+}
+
+pub const fn dns_endpoint_shape(transport: u8) -> Option<u8> {
+    match transport {
+        6 => Some(SHAPE_DNS_TCP),
+        17 => Some(SHAPE_DNS_PROBE),
+        _ => None,
+    }
+}
+
+pub const fn dns_endpoint_transport(shape: u8) -> Option<u8> {
+    match shape {
+        SHAPE_DNS_TCP => Some(6),
+        SHAPE_DNS_PROBE => Some(17),
+        _ => None,
+    }
 }
 
 fn endpoint_key(endpoint: SocketAddr, shape: u8) -> Result<[u8; ENDPOINT_KEY_LEN], &'static str> {
@@ -1672,7 +1692,7 @@ fn endpoint_key(endpoint: SocketAddr, shape: u8) -> Result<[u8; ENDPOINT_KEY_LEN
         || endpoint.ip().is_multicast()
         || matches!(endpoint, SocketAddr::V6(addr) if addr.scope_id() != 0 || addr.flowinfo() != 0)
     {
-        return Err("неверный ключ адресной привязки UDP");
+        return Err("неверный ключ адресной привязки");
     }
     let mut key = [0; ENDPOINT_KEY_LEN];
     match endpoint.ip() {
@@ -1728,8 +1748,22 @@ pub fn encode_set_dns_endpoint(
     plan_records: &[u8],
     token: [u8; 16],
 ) -> Result<Vec<u8>, &'static str> {
-    let key = endpoint_key(endpoint, SHAPE_DNS_PROBE)?;
-    if token == [0; 16] || !crate::dns_probe::is_dns_probe_length(usize::from(query_len)) {
+    encode_set_dns_endpoint_for_transport(endpoint, 17, query_len, plan_records, token)
+}
+
+/// Длина относится к байтам на проводе, включая двухбайтный префикс DNS/TCP.
+pub fn encode_set_dns_endpoint_for_transport(
+    endpoint: SocketAddr,
+    transport: u8,
+    query_len: u16,
+    plan_records: &[u8],
+    token: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    let shape = dns_endpoint_shape(transport).ok_or("неподдерживаемый транспорт DNS")?;
+    let key = endpoint_key(endpoint, shape)?;
+    if token == [0; 16]
+        || !crate::dns_probe::is_dns_probe_wire_length(usize::from(query_len), transport)
+    {
         return Err("DNS endpoint требует измеренную длину запроса и ненулевой токен");
     }
     let mut body = Vec::with_capacity(ENDPOINT_KEY_LEN + 2 + plan_records.len() + token.len());
@@ -2614,7 +2648,10 @@ fn valid_install_ack_binding(command: u16, binding: &BindingContext) -> bool {
             COMMAND_SET_ENDPOINT_BOUND => {
                 binding.kind == 2 && matches!(binding.shape, SHAPE_QUIC | SHAPE_VOICE)
             }
-            COMMAND_SET_DNS_ENDPOINT => binding.kind == 2 && binding.shape == SHAPE_DNS_PROBE,
+            COMMAND_SET_DNS_ENDPOINT => matches!(
+                (binding.kind, binding.shape),
+                (2, SHAPE_DNS_PROBE) | (1, SHAPE_DNS_TCP)
+            ),
             _ => binding.kind == 1 && binding.shape == SHAPE_HTTP,
         }
 }
@@ -3735,7 +3772,11 @@ fn valid_binding(binding: &BindingContext) -> bool {
         && (binding.shape <= SHAPE_ECH_TS
             || binding.shape == SHAPE_DNS_PROBE
                 && binding.family != 0
-                && (binding.kind == 2 || (binding.kind == 1 && binding.temporary)))
+                && (binding.kind == 2 || (binding.kind == 1 && binding.temporary))
+            || binding.shape == SHAPE_DNS_TCP
+                && binding.kind == 1
+                && binding.family != 0
+                && !binding.temporary)
 }
 
 /// Разбирает событие HTTP-портала v22 с необязательным контекстом запроса.

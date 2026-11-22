@@ -1329,22 +1329,22 @@ impl NamePlans {
                 DnsProbeSelection::DifferentQuestion
             };
         }
-        if view.protocol != 17 {
+        let Some(shape) = control::dns_endpoint_shape(view.protocol) else {
             return DnsProbeSelection::Unreserved;
-        }
+        };
         let Some(port) = packet.get(view.l4_offset + 2..view.l4_offset + 4) else {
             return DnsProbeSelection::Unreserved;
         };
         let Some(entry) = self.addr_plans.get(&AddrPlanKey {
             address: view.dst,
-            shape: control::SHAPE_DNS_PROBE,
+            shape,
             port: u16::from_be_bytes([port[0], port[1]]),
         }) else {
             return DnsProbeSelection::Unreserved;
         };
         if payload.is_some_and(|payload| {
             payload.len() == usize::from(entry.dns_query_len)
-                && r2k_core::dns_probe::is_dns_probe_query(payload)
+                && r2k_core::dns_probe::is_dns_probe_wire(payload, view.protocol)
         }) {
             Self::touch(entry, self.next_plan_clock());
             DnsProbeSelection::Matched(&entry.plan)
@@ -1464,15 +1464,17 @@ impl NamePlans {
         let Some((endpoint, shape)) = control::decode_endpoint_key(key) else {
             return (false, control::ACK_BAD_ARGS);
         };
-        if dns_endpoint != (shape == control::SHAPE_DNS_PROBE) {
+        let dns_transport = control::dns_endpoint_transport(shape);
+        if dns_endpoint != dns_transport.is_some() {
             return (false, control::ACK_BAD_ARGS);
         }
+        let transport = dns_transport.unwrap_or(17);
         let (dns_query_len, records) = if dns_endpoint {
             let Some(([high, low], rest)) = records.split_first_chunk::<2>() else {
                 return (false, control::ACK_BAD_ARGS);
             };
             let len = u16::from_be_bytes([*high, *low]);
-            if !r2k_core::dns_probe::is_dns_probe_length(usize::from(len)) {
+            if !r2k_core::dns_probe::is_dns_probe_wire_length(usize::from(len), transport) {
                 return (false, control::ACK_BAD_ARGS);
             }
             (len, rest)
@@ -1482,12 +1484,12 @@ impl NamePlans {
         let Ok(plan) = Plan::parse_wire(records) else {
             return (false, control::ACK_BAD_PLAN);
         };
-        let shape_matches = if dns_endpoint {
-            crate::engine::is_dns_udp_fragment_plan(&plan)
-        } else {
-            addr_plan_matches_shape(shape, &plan)
+        let shape_matches = match dns_transport {
+            Some(6) => crate::engine::is_dns_tcp_split_plan(&plan, usize::from(dns_query_len)),
+            Some(_) => crate::engine::is_dns_udp_fragment_plan(&plan),
+            None => addr_plan_matches_shape(shape, &plan),
         };
-        if plan.transport != 17 || !shape_matches || !self.r2o_plan_valid(&plan) {
+        if plan.transport != transport || !shape_matches || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
         self.install_addr(
@@ -1512,7 +1514,11 @@ impl NamePlans {
         let installed = self.addr_plans.get(&key)?;
         Some(control::BindingContext {
             generation: installed.generation,
-            kind: 2,
+            kind: if shape == control::SHAPE_DNS_TCP {
+                1
+            } else {
+                2
+            },
             family: key.address.family(),
             shape,
             temporary: false,

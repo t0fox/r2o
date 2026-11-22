@@ -18,13 +18,19 @@ pub fn is_dns_tcp_probe_frame(frame: &[u8]) -> bool {
         })
 }
 
-fn query_length(wire_length: usize, transport: u8) -> Option<usize> {
+pub fn is_dns_probe_wire(wire: &[u8], transport: u8) -> bool {
     match transport {
-        6 => wire_length
-            .checked_sub(2)
-            .filter(|length| is_dns_probe_length(*length)),
-        17 => is_dns_probe_length(wire_length).then_some(wire_length),
-        _ => None,
+        6 => is_dns_tcp_probe_frame(wire),
+        17 => is_dns_probe_query(wire),
+        _ => false,
+    }
+}
+
+pub fn is_dns_probe_wire_length(wire_length: usize, transport: u8) -> bool {
+    match transport {
+        6 => wire_length.checked_sub(2).is_some_and(is_dns_probe_length),
+        17 => is_dns_probe_length(wire_length),
+        _ => false,
     }
 }
 
@@ -38,7 +44,9 @@ impl DnsProbeGuard {
     pub fn decode_prefix(bytes: &[u8], transport: u8) -> Option<(Self, &[u8])> {
         let (prefix, rest) = bytes.split_at_checked(34)?;
         let length = u16::from_be_bytes(prefix[..2].try_into().ok()?);
-        query_length(usize::from(length), transport)?;
+        if !is_dns_probe_wire_length(usize::from(length), transport) {
+            return None;
+        }
         Some((
             Self {
                 length,
@@ -53,12 +61,7 @@ impl DnsProbeGuard {
     }
 
     pub fn from_wire(wire: &[u8], transport: u8) -> Option<Self> {
-        let valid = match transport {
-            6 => is_dns_tcp_probe_frame(wire),
-            17 => is_dns_probe_query(wire),
-            _ => false,
-        };
-        valid.then(|| Self {
+        is_dns_probe_wire(wire, transport).then(|| Self {
             length: wire.len() as u16,
             sha256: Sha256::digest(wire).into(),
         })

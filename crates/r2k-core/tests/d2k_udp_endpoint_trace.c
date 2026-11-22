@@ -69,6 +69,9 @@ int main(void) {
             d2k_link_del_addr_probe_family(fd[0], addresses[i], htons(52001), addresses[i], port,
                                            6, families[i], token, NULL, 0) ||
             trace(fd[1], 60) ||
+            d2k_link_set_dns_endpoint(fd[0], addresses[i], families[i], port,
+                                      (uint16_t)(question_size + 2), "aabb", token, NULL, 0) ||
+            trace(fd[1], 46) ||
             d2k_link_set_endpoint(fd[0], addresses[i], families[i], 0,
                                   D2K_LINK_SHAPE_QUIC, "aabb", NULL, 0) == 0)
             return 4;

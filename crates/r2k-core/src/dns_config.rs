@@ -8,10 +8,17 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Числовые unicast-резолверы для адресной проверки обычного DNS.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PlainDnsEndpoint {
     pub address: SocketAddr,
     pub transport: u8,
+}
+
+impl std::fmt::Display for PlainDnsEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let protocol = if self.transport == 6 { "TCP" } else { "UDP" };
+        write!(f, "DNS/{protocol} {}", self.address)
+    }
 }
 
 pub fn parse_plain_dns_endpoints(

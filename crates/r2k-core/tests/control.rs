@@ -1483,9 +1483,10 @@ fn d2k_udp_endpoint_совпадает_по_ipv4_и_ipv6() {
     use r2k_core::control::{
         COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_ENDPOINT, COMMAND_SET_DNS_ENDPOINT,
         COMMAND_SET_DNS_PROBE, COMMAND_SET_ENDPOINT, COMMAND_SET_ENDPOINT_BOUND, ENDPOINT_KEY_LEN,
-        SHAPE_DNS_PROBE, SHAPE_QUIC, SHAPE_VOICE, decode_endpoint_key, encode_delete_dns_tcp_probe,
-        encode_delete_endpoint, encode_set_dns_endpoint, encode_set_dns_probe,
-        encode_set_dns_tcp_probe, encode_set_endpoint, encode_set_endpoint_bound, read_frame,
+        SHAPE_DNS_PROBE, SHAPE_DNS_TCP, SHAPE_QUIC, SHAPE_VOICE, decode_endpoint_key,
+        encode_delete_dns_tcp_probe, encode_delete_endpoint, encode_set_dns_endpoint,
+        encode_set_dns_endpoint_for_transport, encode_set_dns_probe, encode_set_dns_tcp_probe,
+        encode_set_endpoint, encode_set_endpoint_bound, read_frame,
     };
 
     let mut actual = String::new();
@@ -1554,6 +1555,27 @@ fn d2k_udp_endpoint_совпадает_по_ipv4_и_ipv6() {
             }
             actual.push('\n');
         }
+        let wire = encode_set_dns_endpoint_for_transport(
+            endpoint,
+            6,
+            tcp.len() as u16,
+            &[0xaa, 0xbb],
+            [0x5a; 16],
+        )
+        .unwrap();
+        let mut frame = read_frame(&mut wire.as_slice()).unwrap();
+        assert_eq!(frame.kind, COMMAND_SET_DNS_ENDPOINT);
+        assert_eq!(
+            decode_endpoint_key(&frame.body[..ENDPOINT_KEY_LEN]),
+            Some((endpoint, SHAPE_DNS_TCP))
+        );
+        // У D2K код формы общий для UDP и TCP.
+        frame.body[17] = 9;
+        for byte in frame.body {
+            use std::fmt::Write;
+            write!(actual, "{byte:02x}").unwrap();
+        }
+        actual.push('\n');
         let mut invalid = endpoint;
         invalid.set_port(0);
         assert!(encode_set_endpoint(invalid, SHAPE_QUIC, &[0xaa, 0xbb]).is_err());

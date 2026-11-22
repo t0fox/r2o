@@ -21,7 +21,7 @@ ip -6 addr add 2001:db8::53/128 dev lo nodad
 ip route add default dev lo
 ip -6 route add default dev lo
 export R2O_DIR="$tmp" R2O_RUN_DIR="$tmp/run" R2O_CONFIG="$tmp/config"
-export DNS_DISCOVERY_ENDPOINTS='192.0.2.53:53 [2001:db8::53]:53 192.0.2.53:5300 [2001:db8::53]:5301 192.0.2.53:5302 tcp://192.0.2.53:15353 tcp://[2001:db8::53]:15353'
+export DNS_DISCOVERY_ENDPOINTS='192.0.2.53:53 [2001:db8::53]:53 192.0.2.53:5300 [2001:db8::53]:5301 192.0.2.53:5302 tcp://192.0.2.53:53 tcp://[2001:db8::53]:53'
 cat > "$R2O_CONFIG" <<EOF
 FW_BACKEND=$backend
 QUEUE_NUM=65141
@@ -29,7 +29,7 @@ QUEUE_NUM6=65142
 MARK=19051
 PROBE_MARK=19052
 MEASURE_MARK=19053
-DNS_PORTS=53,853,5300,5301,5302,15353
+DNS_PORTS=53,853,5300,5301,5302
 R2O_PPE_DEOFFLOAD=0
 EOF
 if [ "$backend" = iptables ]; then
@@ -38,7 +38,6 @@ if [ "$backend" = iptables ]; then
     cat > "$tmp/bin/ndmc" <<'NDMC'
 #!/bin/sh
 printf 'dns_server = 192.0.2.53\ndns_server = 2001:db8::53\n'
-printf 'dns_server = 192.0.2.53:15353\ndns_server = [2001:db8::53]:15353\n'
 NDMC
     chmod 755 "$tmp/bin/ndmc"
     PATH="$tmp/bin:$PATH"
@@ -58,8 +57,8 @@ add chain inet r2o_dns_test miss { type filter hook postrouting priority -151; p
 add rule inet r2o_dns_test miss meta mark 19052 udp dport 5302 meta mark set 19053
 add chain inet r2o_dns_test in { type filter hook input priority 0; policy accept; }
 add rule inet r2o_dns_test in udp dport { 53, 5301 } meta mark != 19054 counter drop
-add rule inet r2o_dns_test in meta nfproto ipv4 tcp dport 15353 tcp flags & (syn | rst | fin) == 0 meta length > 60 meta mark != 19051 counter drop
-add rule inet r2o_dns_test in meta nfproto ipv6 tcp dport 15353 tcp flags & (syn | rst | fin) == 0 meta length > 80 meta mark != 19051 counter drop
+add rule inet r2o_dns_test in meta nfproto ipv4 tcp dport 53 tcp flags & (syn | rst | fin) == 0 meta length > 60 meta mark != 19051 counter drop
+add rule inet r2o_dns_test in meta nfproto ipv6 tcp dport 53 tcp flags & (syn | rst | fin) == 0 meta length > 80 meta mark != 19051 counter drop
 NFT
 
 python3 - "$datapath" "$controller" "$tmp" <<'PY'
@@ -121,7 +120,7 @@ def response_for(query):
     return (query[:2] + bytes.fromhex("81800001000100000000") + query[12:]
             + bytes.fromhex("c00c000100010000003c0004c000020a"))
 
-def serve_dns_tcp(loop, stream, data):
+def serve_dns_tcp(loop, stream, data, silence):
     if data is None:
         connection, _ = stream.accept()
         connection.settimeout(2)
@@ -137,15 +136,21 @@ def serve_dns_tcp(loop, stream, data):
         return
     assert len(data) == 31 and data[:2] == b"\0\x1d"
     assert data[4:] == bytes.fromhex("01000001000000000000076578616d706c6503636f6d0000010001")
+    if silence:
+        return
     reply = response_for(data[2:])
-    stream.sendall(len(reply).to_bytes(2, "big"))
-    time.sleep(.01)
-    stream.sendall(reply)
-    loop.unregister(stream)
-    stream.close()
+    try:
+        stream.sendall(len(reply).to_bytes(2, "big"))
+        time.sleep(.01)
+        stream.sendall(reply)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        loop.unregister(stream)
+        stream.close()
 
 
-def run_until_log(loop, process, log, expected, requests, stale_v6=False):
+def run_until_log(loop, process, log, expected, requests, stale=()):
     deadline = time.monotonic() + 33
     while time.monotonic() < deadline:
         assert process.poll() is None
@@ -154,13 +159,13 @@ def run_until_log(loop, process, log, expected, requests, stale_v6=False):
         for key, _ in loop.select(.1):
             server, port = key.fileobj, key.data
             if server.type == socket.SOCK_STREAM:
-                serve_dns_tcp(loop, server, port)
+                serve_dns_tcp(loop, server, port, (server.family, 6) in stale)
                 continue
             query, peer = server.recvfrom(512)
             assert query[2:] == bytes.fromhex("01000001000000000000076578616d706c6503636f6d0000010001")
             requests[(server.family, port)] += 1
             if (port == 5302 and requests[(server.family, port)] <= 3
-                    or stale_v6 and server.family == socket.AF_INET6 and port == 53):
+                    or port == 53 and (server.family, 17) in stale):
                 continue
             response = response_for(query)
             if port == 5301:
@@ -184,7 +189,7 @@ try:
                 loop.register(server, selectors.EVENT_READ, port)
             listener = socket.socket(family, socket.SOCK_STREAM)
             listeners.append(listener)
-            listener.bind((address, 15353))
+            listener.bind((address, 53))
             listener.listen()
             loop.register(listener, selectors.EVENT_READ)
 
@@ -202,8 +207,8 @@ try:
             "DNS/UDP 192.0.2.53:5300: прямой запрос получил корректный ответ",
             "DNS/UDP [2001:db8::53]:5301: получен некорректный DNS-ответ",
             "DNS/UDP 192.0.2.53:5302: получен DNS-ответ, исполнение плана не подтверждено",
-            "DNS/TCP 192.0.2.53:15353: точный APPLIED и корректный DNS-ответ",
-            "DNS/TCP [2001:db8::53]:15353: точный APPLIED и корректный DNS-ответ",
+            "DNS/TCP 192.0.2.53:53: точный APPLIED и корректный DNS-ответ",
+            "DNS/TCP [2001:db8::53]:53: точный APPLIED и корректный DNS-ответ",
         )
         requests = collections.Counter()
         run_until_log(loop, process, log, expected, requests)
@@ -214,17 +219,44 @@ try:
         def catalog_bindings():
             return [b for box in json.loads(catalog.read_text())["boxes"] for b in box["bindings"]]
 
-        wait_until(lambda: len(catalog_bindings()) == 2, "DNS-привязки не попали в каталог")
+        wait_until(lambda: len(catalog_bindings()) == 4, "DNS-привязки не попали в каталог")
         stored = json.loads(catalog.read_text())
         saved = catalog_bindings()
         assert {(b["kind"], b["target"], b["port"], b["transport"], b["shape"], b["dns_query_bytes"])
-                for b in saved} == {("addr", a, 53, 17, 14, 29) for a in ("192.0.2.53", "2001:db8::53")}
+                for b in saved} == {("addr", a, 53, transport, shape, length)
+                                    for a in ("192.0.2.53", "2001:db8::53")
+                                    for transport, shape, length in ((17, 14, 29), (6, 15, 31))}
         assert not stored.get("domain_state")
 
         query = bytes.fromhex("123401000001000000000000076578616d706c6503636f6d0000010001")
         wrong_length = query[:12] + b"\x08a" + query[13:]
         for server in (server for server in listeners if server.getsockname()[1] == 53):
             server.settimeout(3)
+            if server.type == socket.SOCK_STREAM:
+                for request in (wrong_length, query):
+                    wire = len(request).to_bytes(2, "big") + request
+                    with socket.socket(server.family, socket.SOCK_STREAM) as client:
+                        client.settimeout(3)
+                        client.connect(server.getsockname())
+                        with server.accept()[0] as peer:
+                            client.sendall(wire)
+                            if request == wrong_length:
+                                peer.settimeout(.2)
+                                try:
+                                    peer.recv(1)
+                                except TimeoutError:
+                                    continue
+                                raise AssertionError("неизмеренная длина TCP-запроса прошла блокировку")
+                            peer.settimeout(3)
+                            with peer.makefile("rb") as incoming:
+                                assert incoming.read(len(wire)) == wire
+                            reply = response_for(request)
+                            frame = len(reply).to_bytes(2, "big") + reply
+                            peer.sendall(frame)
+                            with client.makefile("rb") as incoming:
+                                assert incoming.read(len(frame)) == frame
+                print(f"{server.getsockname()[0]}: обычный DNS/TCP прошёл только с измеренной длиной")
+                continue
             with socket.socket(server.family, socket.SOCK_DGRAM) as client:
                 client.settimeout(3)
                 client.connect(server.getsockname())
@@ -243,41 +275,49 @@ try:
         for dp in datapaths:
             stop(dp)
         start_datapaths()
-        os.environ["DNS_DISCOVERY_ENDPOINTS"] = "192.0.2.53:53 [2001:db8::53]:53"
+        targets = ("192.0.2.53:53", "[2001:db8::53]:53")
+        os.environ["DNS_DISCOVERY_ENDPOINTS"] = " ".join([*targets, *(f"tcp://{t}" for t in targets)])
         process, log = start(serve, "restart.log")
-        expected = (
-            "DNS/UDP 192.0.2.53:53: адресный план восстановлен из каталога",
-            "DNS/UDP [2001:db8::53]:53: адресный план восстановлен из каталога",
+        expected = [f"DNS/{transport} {target}: адресный план восстановлен из каталога"
+                    for transport in ("UDP", "TCP") for target in targets] + [
             "DNS/UDP 192.0.2.53:53: повторно подтверждены адресный план и DNS-ответ",
+            "DNS/TCP [2001:db8::53]:53: повторно подтверждены адресный план и DNS-ответ",
             "DNS/UDP [2001:db8::53]:53: постоянный план снят",
             "DNS/UDP [2001:db8::53]:53: два таймаута под сохранённым планом",
-        )
-        run_until_log(loop, process, log, expected, requests, stale_v6=True)
-        wait_until(lambda: any(b["target"] == "2001:db8::53" and b.get("recheck_since")
-                               for b in catalog_bindings()), "отзыв IPv6 не попал в каталог")
-        bindings = {b["target"]: b for b in catalog_bindings()}
-        assert bindings["2001:db8::53"]["recheck_since"]
-        assert not bindings["192.0.2.53"].get("recheck_since")
-        print("DNS/UDP: восстановление IPv4/IPv6, подтверждение IPv4 и отзыв IPv6 после двух таймаутов")
+            "DNS/TCP 192.0.2.53:53: постоянный план снят",
+            "DNS/TCP 192.0.2.53:53: два таймаута под сохранённым планом",
+        ]
+        run_until_log(loop, process, log, expected, requests,
+                      stale={(socket.AF_INET6, 17), (socket.AF_INET, 6)})
+
+        def rechecks():
+            return {(b["target"], b["transport"]) for b in catalog_bindings() if b.get("recheck_since")}
+
+        wait_until(lambda: rechecks() == {("2001:db8::53", 17), ("192.0.2.53", 6)},
+                   "в журнале ожидался отзыв только DNS/UDP IPv6 и DNS/TCP IPv4")
+        print("DNS/UDP и DNS/TCP: независимое восстановление и отзыв после двух таймаутов")
 
         run_until_log(loop, process, log, (
             "DNS/UDP [2001:db8::53]:53: подтверждённый адресный план сохранён",
+            "DNS/TCP 192.0.2.53:53: подтверждённый адресный план сохранён",
         ), requests)
-        assert all(not b.get("recheck_since") for b in catalog_bindings())
-        print("DNS/UDP IPv6: отозванный план снова сохранён после свежей проверки")
+        wait_until(lambda: not rechecks(), "отозванные планы не сохранились")
+        print("DNS/UDP IPv6 и DNS/TCP IPv4: отозванные планы снова сохранены после свежей проверки")
 
         stop(process)
-        subprocess.run(["nft", "insert", "rule", "inet", "r2o_dns_test", "in",
-                        "ip", "daddr", "192.0.2.53", "udp", "dport", "53", "accept"], check=True)
-        os.environ["DNS_DISCOVERY_ENDPOINTS"] = "192.0.2.53:53"
+        for transport in ("udp", "tcp"):
+            subprocess.run(["nft", "insert", "rule", "inet", "r2o_dns_test", "in",
+                            "ip", "daddr", "192.0.2.53", transport, "dport", "53", "accept"], check=True)
+        os.environ["DNS_DISCOVERY_ENDPOINTS"] = "192.0.2.53:53 tcp://192.0.2.53:53"
         process, log = start(serve, "direct.log")
-        run_until_log(loop, process, log, (
-            "DNS/UDP 192.0.2.53:53: адресный план восстановлен из каталога",
-            "DNS/UDP 192.0.2.53:53: прямой запрос получил корректный ответ",
-            "DNS/UDP 192.0.2.53:53: постоянный план снят",
-        ), requests)
-        assert any(b["target"] == "192.0.2.53" and b.get("recheck_since") for b in catalog_bindings())
-        print("DNS/UDP IPv4: сохранённый план отозван после восстановления прямого пути")
+        run_until_log(loop, process, log, [f"DNS/{transport} 192.0.2.53:53: {outcome}"
+                                          for transport in ("UDP", "TCP")
+                                          for outcome in ("адресный план восстановлен из каталога",
+                                                          "прямой запрос получил корректный ответ",
+                                                          "постоянный план снят")], requests)
+        wait_until(lambda: rechecks() == {("192.0.2.53", 17), ("192.0.2.53", 6)},
+                   "прямой путь не снял оба IPv4-плана")
+        print("DNS/UDP и DNS/TCP IPv4: оба плана отозваны после восстановления прямого пути")
 except BaseException:
     for log in logs:
         print(log.read_text(), file=sys.stderr)

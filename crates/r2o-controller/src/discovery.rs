@@ -1437,8 +1437,11 @@ pub fn bind_confirmed(
     if kind.is_empty() || kind.len() >= 8 || target.is_empty() || target.len() > 255 {
         return Err("catalog binding kind or target is invalid".into());
     }
-    if port != 0 && (kind != "addr" || transport != 17) {
-        return Err("порт поддерживается только адресными UDP-привязками".into());
+    if port != 0
+        && (kind != "addr"
+            || !(transport == 17 || (transport == 6 && shape == r2k_core::control::SHAPE_DNS_TCP)))
+    {
+        return Err("порт поддерживается только адресными UDP- и DNS/TCP-привязками".into());
     }
     if !matches!(family, 4 | 6) {
         return Err("catalog binding family is invalid".into());
@@ -1948,18 +1951,21 @@ pub fn has_confirmed_stun_endpoint(catalog: &Catalog, endpoint: std::net::Socket
     })
 }
 
-pub fn dns_endpoint_binding(binding: &Binding, endpoint: std::net::SocketAddr) -> bool {
+pub fn dns_endpoint_binding(
+    binding: &Binding,
+    endpoint: r2k_core::dns_config::PlainDnsEndpoint,
+) -> bool {
     binding.kind == "addr"
-        && binding.transport == 17
-        && binding.shape == r2k_core::control::SHAPE_DNS_PROBE
-        && binding.family == if endpoint.is_ipv4() { 4 } else { 6 }
-        && binding.port == endpoint.port()
-        && binding.target.parse::<IpAddr>().ok() == Some(endpoint.ip())
+        && binding.transport == endpoint.transport
+        && r2k_core::control::dns_endpoint_transport(binding.shape) == Some(endpoint.transport)
+        && binding.family == if endpoint.address.is_ipv4() { 4 } else { 6 }
+        && binding.port == endpoint.address.port()
+        && binding.target.parse::<IpAddr>().ok() == Some(endpoint.address.ip())
 }
 
 pub fn confirmed_dns_endpoint(
     catalog: &Catalog,
-    endpoint: std::net::SocketAddr,
+    endpoint: r2k_core::dns_config::PlainDnsEndpoint,
 ) -> Option<(&Binding, &Plan)> {
     catalog
         .boxes
@@ -1971,7 +1977,10 @@ pub fn confirmed_dns_endpoint(
                 && binding.level >= 3
                 && binding.verified_by == 1
                 && binding.recheck_since.unwrap_or(0) == 0
-                && r2k_core::dns_probe::is_dns_probe_length(usize::from(binding.dns_query_bytes))
+                && r2k_core::dns_probe::is_dns_probe_wire_length(
+                    usize::from(binding.dns_query_bytes),
+                    endpoint.transport,
+                )
         })
         .filter_map(|(record, binding)| {
             record
@@ -1985,25 +1994,34 @@ pub fn confirmed_dns_endpoint(
 
 pub fn add_confirmed_dns_endpoint(
     catalog: &mut Catalog,
-    endpoint: std::net::SocketAddr,
+    endpoint: r2k_core::dns_config::PlainDnsEndpoint,
     source_text: &str,
     query_len: u16,
     now: i64,
 ) -> Result<(), String> {
-    let shape = r2k_core::control::SHAPE_DNS_PROBE;
-    let family = if endpoint.is_ipv4() { 4 } else { 6 };
+    let shape = r2k_core::control::dns_endpoint_shape(endpoint.transport)
+        .ok_or("неподдерживаемый транспорт DNS")?;
+    let family = if endpoint.address.is_ipv4() { 4 } else { 6 };
     let canonical = canonical_plan_text(source_text)?;
     let plan_id = stable_plan_id(family, shape, &canonical);
     let plan_text = text_with_id(&canonical, &plan_id)?;
     let bytes = crate::plan_text::compile_text(&plan_text)?;
     let plan = RuntimePlan::parse(&bytes).map_err(|error| error.to_string())?;
+    let compatible = if endpoint.transport == 6 {
+        r2o_datapath::engine::is_dns_tcp_split_plan(&plan, usize::from(query_len))
+    } else {
+        r2o_datapath::engine::is_dns_udp_fragment_plan(&plan)
+    };
     if now < 0
-        || !r2k_core::dns_probe::is_dns_probe_length(usize::from(query_len))
-        || !r2o_datapath::engine::is_dns_udp_fragment_plan(&plan)
+        || !r2k_core::dns_probe::is_dns_probe_wire_length(
+            usize::from(query_len),
+            endpoint.transport,
+        )
+        || !compatible
     {
-        return Err("DNS-привязка требует измеренную форму DNS/UDP с ipfrag 1".into());
+        return Err("DNS-привязка требует измеренную форму запроса и точный DNS-план".into());
     }
-    r2k_core::control::encode_delete_endpoint(endpoint, shape)?;
+    r2k_core::control::encode_delete_endpoint(endpoint.address, shape)?;
     let box_id = format!("auto-{plan_id}");
     bind_confirmed(
         catalog,
@@ -2011,16 +2029,16 @@ pub fn add_confirmed_dns_endpoint(
         &plan_id,
         &plan_text,
         "dns",
-        &endpoint.ip().to_string(),
+        &endpoint.address.ip().to_string(),
         "addr",
-        17,
+        endpoint.transport,
         family,
         shape,
         0,
         1,
         1,
         now,
-        endpoint.port(),
+        endpoint.address.port(),
         None,
     )?;
     let binding = catalog

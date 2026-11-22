@@ -267,10 +267,8 @@ nft_up() {
                 ip6) [ "$IPV6_ENABLED" = 1 ] || continue; queue=$QUEUE6 ;;
                 *) continue ;;
             esac
-            if [ "$protocol" = udp ]; then
-                printf '        meta iif 0 meta mark 0 %s daddr %s udp dport %s ct direction original meta mark set %s comment "r2o-dns-owner"\n' \
-                    "$family" "$ip" "$port" "$PROBE_MARK"
-            fi
+            printf '        meta iif 0 meta mark 0 %s daddr %s %s dport %s ct direction original meta mark set %s comment "r2o-dns-owner"\n' \
+                "$family" "$ip" "$protocol" "$port" "$PROBE_MARK"
             printf '        meta mark %s %s daddr %s %s dport %s ct direction original queue num %s bypass\n' \
                 "$PROBE_MARK" "$family" "$ip" "$protocol" "$port" "$queue"
         done <<EOF
@@ -632,7 +630,7 @@ dns_excl_rule() {
                     dns_family=ip
                     [ "$dns_tool" != ip6tables ] || dns_family=ip6
                     dns_insert=$(printf '%s\n' "$PLAIN_DNS_TARGETS" | awk -v family="$dns_family" -v chain="$4" '
-                        $1 == family && chain == "R2O_OUT" { count += ($4 == "udp" ? 2 : 1) }
+                        $1 == family && chain == "R2O_OUT" { count += 2 }
                         $1 == family && chain == "R2O_IN" && $4 == "tcp" { ++count }
                         END { print count + 1 }')
                 fi
@@ -822,11 +820,10 @@ xt_plain_dns_probes() (
     [ "$2" != ip6tables ] || family=ip6
     while read -r endpoint_family ip port protocol; do
         [ "$endpoint_family" = "$family" ] || continue
-        if [ "$protocol" = udp ]; then
-            xt "$2" -t mangle "$1" R2O_OUT -p udp -d "$ip" --dport "$port" \
-                -m owner --socket-exists -m mark --mark 0 -m conntrack --ctdir ORIGINAL ! --ctstate DNAT \
-                -j MARK --set-xmark "$PROBE_MARK/0xffffffff" || return 1
-        else
+        xt "$2" -t mangle "$1" R2O_OUT -p "$protocol" -d "$ip" --dport "$port" \
+            -m owner --socket-exists -m mark --mark 0 -m conntrack --ctdir ORIGINAL ! --ctstate DNAT \
+            -j MARK --set-xmark "$PROBE_MARK/0xffffffff" || return 1
+        if [ "$protocol" = tcp ]; then
             xt "$2" -t mangle "$1" R2O_IN -p tcp -s "$ip" --sport "$port" \
                 -m addrtype --dst-type LOCAL -m conntrack --ctdir REPLY ! --ctstate DNAT \
                 --tcp-flags SYN,ACK SYN,ACK -j NFQUEUE --queue-num "$3" --queue-bypass || return 1
@@ -1043,7 +1040,7 @@ firewall_status_nft() {
     plain_dns_owner=$(printf '%s\n' "$out_chain" | awk '/comment "r2o-dns-owner"/ { ++count } END { print count + 0 }')
     plain_dns_tcp=$(printf '%s\n' "$PLAIN_DNS_TARGETS" | awk -v v6="$IPV6_ENABLED" '
         $4 == "tcp" && ($1 == "ip" || v6 == 1) { ++count } END { print count + 0 }')
-    [ "$plain_dns_owner" -eq "$((plain_dns4 + plain_dns6 - plain_dns_tcp))" ] || return 1
+    [ "$plain_dns_owner" -eq "$((plain_dns4 + plain_dns6))" ] || return 1
     [ "$(printf '%s\n' "$input_chain" | awk '/queue/ && /bypass/ { ++count } END { print count + 0 }')" -eq "$plain_dns_tcp" ] || return 1
     in_queue_total=$(printf '%s\n' "$in_rules_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
     [ "$in_queue_total" -eq 14 ] || return 1
