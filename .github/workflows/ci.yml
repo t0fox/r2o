@@ -131,7 +131,9 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       - name: Проверить упаковку выпуска
-        run: sh scripts/test-package-release.sh
+        run: |
+          sh scripts/test-package-release.sh
+          python3 -B scripts/test-update-catalog.py
       - name: Проверить сценарии обновления и службы роутера
         run: |
           set -euo pipefail

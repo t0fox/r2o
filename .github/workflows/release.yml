@@ -321,6 +321,10 @@ jobs:
             -rawin -in "$out/latest.json" -sigfile "$out/latest.json.sig"
           old_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
           old_catalog="$RUNNER_TEMP/previous-catalog.json"
+          published="$RUNNER_TEMP/published-update-tags.txt"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
+            --jq '.[] | select(.draft == false and .prerelease == false) |
+              select(any(.assets[]; .name == "latest.json.sig")) | .tag_name' > "$published"
           case "$old_tag" in
             r2o-20261122-1125-6b5c711-45017277844-1)
               printf '{"format":1,"releases":[]}\n' > "$old_catalog"
@@ -332,7 +336,7 @@ jobs:
                 -rawin -in "$old_catalog" -sigfile "$RUNNER_TEMP/catalog/catalog.json.sig"
               ;;
           esac
-          python3 scripts/build-update-catalog.py "$old_tag" "$old_catalog" "$out"
+          python3 scripts/build-update-catalog.py "$old_tag" "$old_catalog" "$published" "$out"
           openssl pkeyutl -sign -inkey "$key" -rawin \
             -in "$out/catalog.json" -out "$out/catalog.json.sig"
       - name: Опубликовать подписанный выпуск
