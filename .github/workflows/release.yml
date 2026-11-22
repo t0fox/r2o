@@ -237,6 +237,9 @@ jobs:
     env:
       RELEASE_ID: ${{ needs.plan.outputs.release_id }}
       VERSION: ${{ needs.plan.outputs.version }}
+      RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+      RELEASE_TITLE: ${{ needs.plan.outputs.title }}
+      R2O_R2_PUBLIC_URL: ${{ vars.R2O_R2_PUBLIC_URL }}
       NOTES: ${{ needs.plan.outputs.notes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -255,6 +258,7 @@ jobs:
       - name: Упаковать ABI и общий манифест
         run: |
           set -euo pipefail
+          export RELEASE_SEQUENCE=$((GITHUB_RUN_NUMBER * 1000 + GITHUB_RUN_ATTEMPT))
           sh scripts/package-release.sh "$RUNNER_TEMP/builds" "$RUNNER_TEMP/release" \
             'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl armv7-musleabi mips-openwrt-musl mips64el-musl x86_64-musl i686-musl powerpc64-musl riscv64-musl'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -281,6 +285,7 @@ jobs:
       VERSION: ${{ needs.plan.outputs.version }}
       TITLE: ${{ needs.plan.outputs.title }}
       SHA: ${{ needs.plan.outputs.sha }}
+      R2O_R2_PUBLIC_URL: ${{ vars.R2O_R2_PUBLIC_URL }}
       NOTES: ${{ needs.plan.outputs.notes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -314,7 +319,29 @@ jobs:
             -in "$out/latest.json" -out "$out/latest.json.sig"
           openssl pkeyutl -verify -pubin -inkey crates/r2o-manager/release-public.pem \
             -rawin -in "$out/latest.json" -sigfile "$out/latest.json.sig"
+          old_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          old_catalog="$RUNNER_TEMP/previous-catalog.json"
+          case "$old_tag" in
+            r2o-20261122-1125-6b5c711-45017277844-1)
+              printf '{"format":1,"releases":[]}\n' > "$old_catalog"
+              ;;
+            *)
+              gh release download "$old_tag" --pattern 'catalog.json*' --dir "$RUNNER_TEMP/catalog"
+              mv "$RUNNER_TEMP/catalog/catalog.json" "$old_catalog"
+              openssl pkeyutl -verify -pubin -inkey crates/r2o-manager/release-public.pem \
+                -rawin -in "$old_catalog" -sigfile "$RUNNER_TEMP/catalog/catalog.json.sig"
+              ;;
+          esac
+          python3 scripts/build-update-catalog.py "$old_tag" "$old_catalog" "$out"
+          openssl pkeyutl -sign -inkey "$key" -rawin \
+            -in "$out/catalog.json" -out "$out/catalog.json.sig"
       - name: Опубликовать подписанный выпуск
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2O_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2O_R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2O_R2_ENDPOINT: ${{ vars.R2O_R2_ENDPOINT }}
+          R2O_R2_BUCKET: ${{ vars.R2O_R2_BUCKET }}
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/release"
@@ -327,7 +354,7 @@ jobs:
             -f target_commitish="$SHA" -f name="$TITLE" -f body="$NOTES")
           release_id=$(printf '%s' "$response" | python3 -c \
             'import json,sys; print(json.load(sys.stdin)["id"])')
-          for asset in "$out"/r2o-*.tar.gz "$out/latest.json" "$out/latest.json.sig"; do
+          for asset in "$out"/r2o-*.tar.gz "$out"/latest.json* "$out"/catalog.json*; do
             name=$(basename "$asset")
             curl -fsS --retry 3 -X POST \
               -H "Authorization: Bearer $GH_TOKEN" \
@@ -346,7 +373,22 @@ jobs:
                 -o "$verify/$name" "$url"
             done
           sh scripts/verify-release-assets.sh "$verify" "$RELEASE_ID"
+          if [ -n "$R2O_R2_PUBLIC_URL" ]; then
+            : "${R2O_R2_ENDPOINT:?}" "${R2O_R2_BUCKET:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
+            mirror="s3://$R2O_R2_BUCKET/$RELEASE_ID"
+            for asset in "$verify"/r2o-*.tar.gz "$verify"/latest.json* "$verify"/catalog.json*; do
+              name=$(basename "$asset")
+              aws --endpoint-url "$R2O_R2_ENDPOINT" s3 cp --only-show-errors "$asset" "$mirror/$name"
+              curl -fsSL --max-time 120 --retry 3 -o "$RUNNER_TEMP/r2-object" "${R2O_R2_PUBLIC_URL%/}/$RELEASE_ID/$name"
+              cmp -s "$asset" "$RUNNER_TEMP/r2-object"
+            done
+          fi
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
             -F draft=false -f make_latest=true >/dev/null
           latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
           test "$latest" = "$RELEASE_ID"
+          if [ -n "$R2O_R2_PUBLIC_URL" ]; then
+            printf '%s\n' "$RELEASE_ID" > "$RUNNER_TEMP/r2-latest"
+            aws --endpoint-url "$R2O_R2_ENDPOINT" s3 cp --only-show-errors \
+              --cache-control no-cache "$RUNNER_TEMP/r2-latest" "s3://$R2O_R2_BUCKET/latest"
+          fi

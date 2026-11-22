@@ -38,7 +38,7 @@ printf '%s\n' \
     router/r2o-ppe-deoffload.sh \
     router/001-r2o.sh \
     router/select-panel-ip.sh | sort > "$TEMP/expected"
-printf '%s\n' router/uninstall.sh >> "$TEMP/expected"
+printf '%s\n' router/uninstall.sh router/update-schema router/update-sequence router/update-r2 >> "$TEMP/expected"
 sort -o "$TEMP/expected" "$TEMP/expected"
 cmp "$TEMP/expected" "$TEMP/entries"
 tar -xOzf "$TEMP/out/r2o-mipsel.tar.gz" router/files/meta-ranges.txt |
@@ -47,13 +47,21 @@ python3 - "$TEMP/out/latest.json" "$TEMP/out/r2o-mipsel.tar.gz" <<'PY'
 import hashlib
 import json
 import sys
+import tarfile
+import os
 
 with open(sys.argv[1], encoding="utf-8") as manifest_file:
     manifest = json.load(manifest_file)
 with open(sys.argv[2], "rb") as archive_file:
     digest = hashlib.sha256(archive_file.read()).hexdigest()
 assert manifest["release_id"] == "r2o-test"
-assert manifest["assets"]["mipsel"]["sha256"] == digest
+asset = manifest["assets"]["mipsel"]
+assert asset["sha256"] == digest
+assert asset["bytes"] == os.stat(sys.argv[2]).st_size
+with tarfile.open(sys.argv[2]) as package:
+    assert asset["expanded"] == sum(item.size for item in package if item.isfile())
+assert manifest["metadata"]["format"] == 2
+assert manifest["metadata"]["state_format"] == 1
 PY
 
 set -- mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl \

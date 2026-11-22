@@ -6,6 +6,8 @@ OUT=${2:?использование: package-release.sh КАТАЛОГ_СБОР�
 : "${RELEASE_ID:?не задан идентификатор выпуска RELEASE_ID}"
 : "${VERSION:?не задана версия выпуска VERSION}"
 NOTES=${NOTES:-}
+RELEASE_SEQUENCE=${RELEASE_SEQUENCE:-$(date +%s)}
+export RELEASE_SEQUENCE
 ARCHES=${3:-mipsel}
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
@@ -57,7 +59,7 @@ for ARCH do
         fi
         install -m 0755 "$source" "$STAGE/builds/"
     done
-    for file in S99r2o S99r2o.shim r2o-firewall.sh r2o-firewall-fw3-include.sh r2o-tg-firewall.sh r2o-update-scheduler.sh r2o-log-maintenance.sh r2o-telegram-watchdog.sh r2o-firewall-watchdog.sh r2o-ppe-deoffload.sh 001-r2o.sh select-panel-ip.sh openwrt-init config.default install.sh uninstall.sh; do
+    for file in S99r2o S99r2o.shim update-schema r2o-firewall.sh r2o-firewall-fw3-include.sh r2o-tg-firewall.sh r2o-update-scheduler.sh r2o-log-maintenance.sh r2o-telegram-watchdog.sh r2o-firewall-watchdog.sh r2o-ppe-deoffload.sh 001-r2o.sh select-panel-ip.sh openwrt-init config.default install.sh uninstall.sh; do
         source="$ROOT/router/$file"
         if ! test -f "$source" || test -L "$source"; then
             echo "файл адаптера роутера отсутствует или небезопасен: $source" >&2
@@ -68,6 +70,9 @@ for ARCH do
         install -m "$mode" "$source" "$STAGE/router/$file"
     done
     install -m 0644 "$ROOT/router/files/meta-ranges.txt" "$STAGE/router/files/meta-ranges.txt"
+    printf '%s\n' "$RELEASE_SEQUENCE" > "$STAGE/router/update-sequence"
+    printf '%s\n' "${R2O_R2_PUBLIC_URL:-}" > "$STAGE/router/update-r2"
+    chmod 0644 "$STAGE/router/update-sequence" "$STAGE/router/update-r2"
 
     archive="$OUT/r2o-$ARCH.tar.gz"
     tar -czf "$archive" -C "$STAGE" builds router
@@ -77,13 +82,22 @@ for ARCH do
         echo "архив выпуска превышает ограничение менеджера в 256 МиБ: $ARCH" >&2
         exit 1
     }
-    printf '%s\t%s\n' "$ARCH" "$digest" >> "$ASSETS"
+    expanded=$(find "$STAGE" -type f -printf '%s\n' | awk '{ n += $1 } END { printf "%.0f", n }')
+    [ "$expanded" -le 268435456 ] || {
+        echo "распакованный выпуск превышает ограничение в 256 МиБ: $ARCH" >&2
+        exit 1
+    }
+    printf '%s\t%s\t%s\t%s\n' "$ARCH" "$digest" "$archive_size" "$expanded" >> "$ASSETS"
     printf 'собран выпуск %s (%s)\n' "$RELEASE_ID" "$ARCH"
 done
 
+RELEASE_SHA=${RELEASE_SHA:-$(git -C "$ROOT" rev-parse HEAD)}
+export RELEASE_SHA
 python3 - "$RELEASE_ID" "$VERSION" "$NOTES" "$ASSETS" "$OUT/latest.json" <<'PY'
 import json
+import os
 import sys
+import time
 
 release_id, version, notes, assets_path, manifest_path = sys.argv[1:]
 if not release_id or len(release_id.encode("utf-8")) > 128:
@@ -96,10 +110,10 @@ if len(notes.encode("utf-8")) > 4096 or "\0" in notes:
 assets = {}
 with open(assets_path, encoding="utf-8") as records:
     for record in records:
-        architecture, digest = record.rstrip("\n").split("\t")
+        architecture, digest, size, expanded = record.rstrip("\n").split("\t")
         if architecture in assets:
             raise SystemExit(f"архитектура выпуска повторена: {architecture}")
-        assets[architecture] = {"sha256": digest}
+        assets[architecture] = {"sha256": digest, "bytes": int(size), "expanded": int(expanded)}
 
 with open(manifest_path, "w", encoding="utf-8", newline="\n") as manifest:
     json.dump(
@@ -108,6 +122,16 @@ with open(manifest_path, "w", encoding="utf-8", newline="\n") as manifest:
             "version": version,
             "notes": notes,
             "assets": assets,
+            "metadata": {
+                "format": 2,
+                "state_format": 1,
+                "config_format": 1,
+                "commit": os.environ["RELEASE_SHA"],
+                "title": os.environ.get("RELEASE_TITLE") or version,
+                "sequence": int(os.environ["RELEASE_SEQUENCE"]),
+                "created_utc": int(time.time()),
+                "r2_url": os.environ.get("R2O_R2_PUBLIC_URL") or None,
+            },
         },
         manifest,
         ensure_ascii=False,
