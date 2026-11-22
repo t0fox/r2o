@@ -914,7 +914,6 @@ fn link_controller_applets(staging: &Path, architecture: &str) -> io::Result<()>
             "r2o-detect",
             "r2o-telegram",
             "r2o-panel",
-            "r2o-datapath",
             "r2o-manager",
         ],
         _ => return Ok(()),
@@ -1414,13 +1413,7 @@ mod tests {
         activate_download(&root, &prepared).unwrap();
         let controller =
             fs::metadata(active_component_path(&root, "r2o-controller").unwrap()).unwrap();
-        for name in [
-            "r2o-fetch",
-            "r2o-telegram",
-            "r2o-panel",
-            "r2o-datapath",
-            "r2o-manager",
-        ] {
+        for name in ["r2o-fetch", "r2o-telegram", "r2o-panel", "r2o-manager"] {
             let applet = fs::metadata(active_component_path(&root, name).unwrap()).unwrap();
             assert_eq!(
                 (applet.dev(), applet.ino()),
@@ -1494,11 +1487,13 @@ mod tests {
             link_active_applets(&root).unwrap();
             let controller = active_component_path(&root, "r2o-controller").unwrap();
             let controller = fs::metadata(controller).unwrap();
-            for name in ["r2o-datapath", "r2o-manager"] {
+            for name in ["r2o-telegram", "r2o-manager"] {
                 let file = active_component_path(&root, name).unwrap();
                 assert_eq!(fs::metadata(file).unwrap().ino(), controller.ino());
                 assert!(!builds.join(format!(".{name}.link")).exists());
             }
+            let datapath = active_component_path(&root, "r2o-datapath").unwrap();
+            assert_ne!(fs::metadata(datapath).unwrap().ino(), controller.ino());
             assert_eq!(
                 fs::metadata(root.join("r2o-manager")).unwrap().ino(),
                 controller.ino()
@@ -1562,7 +1557,6 @@ mod tests {
             "r2o-detect",
             "r2o-telegram",
             "r2o-panel",
-            "r2o-datapath",
             "r2o-manager",
         ] {
             assert_eq!(

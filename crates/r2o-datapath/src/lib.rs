@@ -1,10 +1,4 @@
-#[cfg(all(target_arch = "mips", target_endian = "little"))]
-extern crate self as r2o_datapath;
-
 pub mod capture;
-#[cfg(all(target_arch = "mips", target_endian = "little"))]
-#[path = "main.rs"]
-pub mod cli;
 #[cfg(target_os = "linux")]
 pub mod conntrack;
 #[cfg(target_os = "linux")]
