@@ -38,10 +38,11 @@ printf '%s\n' \
     router/r2o-ppe-deoffload.sh \
     router/001-r2o.sh \
     router/select-panel-ip.sh | sort > "$TEMP/expected"
-printf '%s\n' router/uninstall.sh router/update-schema router/update-sequence router/update-r2 router/controller-applets >> "$TEMP/expected"
+printf '%s\n' router/uninstall.sh router/update-schema router/update-sequence router/update-r2 router/controller-applets router/rollback-xz >> "$TEMP/expected"
 sort -o "$TEMP/expected" "$TEMP/expected"
 cmp "$TEMP/expected" "$TEMP/entries"
 [ "$(tar -xOzf "$TEMP/out/r2o-mipsel.tar.gz" router/controller-applets)" = R2O-CONTROLLER-APPLETS-1 ]
+[ "$(tar -xOzf "$TEMP/out/r2o-mipsel.tar.gz" router/rollback-xz)" = R2O-ROLLBACK-XZ-1 ]
 tar -xOzf "$TEMP/out/r2o-mipsel.tar.gz" router/files/meta-ranges.txt |
     cmp - "$ROOT/router/files/meta-ranges.txt"
 python3 - "$TEMP/out/latest.json" "$TEMP/out/r2o-mipsel.tar.gz" <<'PY'

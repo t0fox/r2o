@@ -2,12 +2,14 @@ use super::{
     ARCHIVE_MAX_BYTES, ARCHIVE_MAX_EXPANDED_BYTES, InstallError, create_staging_dir,
     extract_bundle, read_release_architecture, sync_directory, validate_bundle,
 };
-use flate2::{Compression, write::GzEncoder};
+use lzma_rust2::{XzOptions, XzReader, XzWriter};
 use std::fs::{self, File, Metadata};
-use std::io::{self, Read};
+use std::io::{self, BufReader, BufWriter, Read};
 use std::path::Path;
 
-pub(super) const ARCHIVE: &str = ".rollback-builds.tar.gz";
+pub(super) const ARCHIVE: &str = ".rollback-builds.tar.xz";
+const DICTIONARY_BYTES: u32 = 2 * 1024 * 1024;
+const DECODE_LIMIT_KIB: u32 = DICTIONARY_BYTES / 1024 + 128;
 
 pub(super) fn compact(root: &Path, id: &str) -> Result<(), InstallError> {
     let releases = root.join("releases");
@@ -24,7 +26,9 @@ pub(super) fn compact(root: &Path, id: &str) -> Result<(), InstallError> {
     let stage = create_staging_dir(&releases, id)?;
     let result = (|| {
         let temporary = stage.join(ARCHIVE);
-        let encoder = GzEncoder::new(File::create(&temporary)?, Compression::default());
+        let mut options = XzOptions::with_preset(4);
+        options.lzma_options.dict_size = DICTIONARY_BYTES;
+        let encoder = XzWriter::new(BufWriter::new(File::create(&temporary)?), options)?;
         let mut tar = tar::Builder::new(encoder);
         let mut raw_bytes = 0u64;
         for entry in fs::read_dir(&builds)? {
@@ -46,7 +50,11 @@ pub(super) fn compact(root: &Path, id: &str) -> Result<(), InstallError> {
                 tar.append_path_with_name(entry.path(), path)?;
             }
         }
-        let packed = tar.into_inner()?.finish()?;
+        let packed = tar
+            .into_inner()?
+            .finish()?
+            .into_inner()
+            .map_err(|error| error.into_error())?;
         if packed.metadata()?.len() >= raw_bytes {
             return Ok(());
         }
@@ -82,8 +90,13 @@ pub(super) fn restore(root: &Path, id: &str) -> Result<(), InstallError> {
     let architecture = read_release_architecture(root, id)?;
     let stage = create_staging_dir(&releases, id)?;
     let result = (|| {
-        let decoder = extract_bundle(File::open(&packed)?, &stage, ARCHIVE_MAX_EXPANDED_BYTES)?;
-        // Дочитываем gzip для проверки его CRC и ограничиваем хвост tar.
+        let decoder = XzReader::new_mem_limit(
+            BufReader::new(File::open(&packed)?),
+            false,
+            DECODE_LIMIT_KIB,
+        );
+        let decoder = extract_bundle(decoder, &stage, ARCHIVE_MAX_EXPANDED_BYTES)?;
+        // Дочитываем XZ для проверки контрольной суммы и ограничиваем хвост tar.
         if io::copy(&mut decoder.take(16 * 1024), &mut io::sink())? == 16 * 1024 {
             return Err(InstallError::InvalidArchive(
                 "слишком длинное заполнение в архиве отката".into(),

@@ -7,6 +7,7 @@ description = "Signed release verification and lifecycle manager for r2o"
 [dependencies]
 base64 = "0.22"
 flate2 = "1.1"
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "encoder", "xz"] }
 ring = "0.17"
 r2k-core = { path = "../r2k-core" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

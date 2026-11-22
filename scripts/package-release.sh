@@ -70,6 +70,7 @@ for ARCH do
         install -m "$mode" "$source" "$STAGE/router/$file"
     done
     install -m 0644 "$ROOT/router/files/meta-ranges.txt" "$STAGE/router/files/meta-ranges.txt"
+    install -m 0644 "$ROOT/router/rollback-xz" "$STAGE/router/rollback-xz"
     printf 'R2O-CONTROLLER-APPLETS-1\n' > "$STAGE/router/controller-applets"
     printf '%s\n' "$RELEASE_SEQUENCE" > "$STAGE/router/update-sequence"
     printf '%s\n' "${R2O_R2_PUBLIC_URL:-}" > "$STAGE/router/update-r2"

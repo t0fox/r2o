@@ -236,7 +236,7 @@ fn prepare_archive_inner(
         archive_file.seek(SeekFrom::Start(0))?;
         let bundle = work.join("bundle");
         fs::create_dir(&bundle)?;
-        extract_bundle(&mut archive_file, &bundle, max_expanded)?;
+        extract_bundle(GzDecoder::new(&mut archive_file), &bundle, max_expanded)?;
         validate_bundle(&bundle, architecture)?;
         if manifest.metadata.is_some() {
             abi::validate_bundle_abi(&bundle, architecture)?;
@@ -432,7 +432,13 @@ pub(crate) fn cleanup_releases(root: &Path) -> Result<(), InstallError> {
     let _lock = ManagerLock::acquire(root)?;
     if let Some(slots) = read_install_slots(root)? {
         prune_obsolete_releases(root, &slots);
-        if let Some(previous) = &slots.previous {
+        if let Some(previous) = &slots.previous
+            && root
+                .join("releases")
+                .join(&slots.current)
+                .join("router/rollback-xz")
+                .is_file()
+        {
             rollback_archive::compact(root, previous)?;
         }
     }
@@ -596,9 +602,8 @@ fn extract_bundle<R: Read>(
     reader: R,
     destination: &Path,
     max_expanded: u64,
-) -> Result<GzDecoder<R>, InstallError> {
-    let decoder = GzDecoder::new(reader);
-    let mut archive = Archive::new(decoder);
+) -> Result<R, InstallError> {
+    let mut archive = Archive::new(reader);
     archive.set_preserve_permissions(false);
     archive.set_unpack_xattrs(false);
     let mut seen = std::collections::HashSet::new();
@@ -1392,6 +1397,12 @@ mod tests {
         cleanup_releases(&root).unwrap();
         let old = root.join("releases/r2o-previous");
         let archive = old.join(rollback_archive::ARCHIVE);
+        assert!(old.join("builds").is_dir());
+        assert!(!archive.exists());
+        let router = root.join("releases/r2o-current/router");
+        fs::create_dir(&router).unwrap();
+        fs::write(router.join("rollback-xz"), "R2O-ROLLBACK-XZ-1\n").unwrap();
+        cleanup_releases(&root).unwrap();
         assert!(!old.join("builds").exists());
         assert!(old.join("router/controller-applets").is_file());
         let packed = fs::read(&archive).unwrap();
