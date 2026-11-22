@@ -170,11 +170,11 @@ pub struct Config {
     #[arg(long, conflicts_with = "resolve_meta")]
     pub initialize_identity: bool,
 
-    /// Получить адреса Meta через системный DNS и прямые DNS-запросы.
+    /// Получить A/AAAA адреса Meta через защищённые DoH-резолверы.
     #[arg(long)]
     pub resolve_meta: bool,
 
-    /// Обновить проверенные статические Meta DNS-записи Keenetic.
+    /// Обновить проверенные точные Meta DNS-записи.
     #[arg(long, conflicts_with_all = ["remove_meta_dns", "meta_dns_scheduler", "initialize_identity", "resolve_meta"])]
     pub refresh_meta_dns: bool,
 
@@ -186,7 +186,7 @@ pub struct Config {
     #[arg(long, conflicts_with_all = ["refresh_meta_dns", "meta_dns_scheduler", "initialize_identity", "resolve_meta"])]
     pub remove_meta_dns: bool,
 
-    /// Запустить ежедневное обновление Meta DNS с разнесённым окном и ростом паузы после ошибок.
+    /// Запустить Meta Protection и ежедневное обновление источников.
     #[arg(long, conflicts_with_all = ["refresh_meta_dns", "remove_meta_dns", "initialize_identity", "resolve_meta"])]
     pub meta_dns_scheduler: bool,
 

@@ -1,6 +1,6 @@
 //! Построение DNS A-запросов и ограниченная проверка ответов.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const MAX_ANSWERS: usize = 32;
 const MAX_ADDRESSES: usize = 8;
@@ -84,7 +84,7 @@ pub enum DnsError {
 
 #[derive(Debug)]
 enum RecordData {
-    Address(Ipv4Addr),
+    Address(IpAddr),
     Cname(String),
 }
 
@@ -94,8 +94,29 @@ struct Record {
     data: RecordData,
 }
 
+/// Извлекает имя из полного обычного DNS-вопроса для пассивного наблюдения.
+pub fn observed_meta_question(wire: &[u8]) -> Option<String> {
+    if wire.len() > 4096 || wire.get(2)? & 0xf8 != 0 || read_u16(wire, 4).ok()? != 1 {
+        return None;
+    }
+    let mut offset = 12;
+    let host = read_name(wire, &mut offset).ok()?;
+    let kind = read_u16(wire, offset).ok()?;
+    if crate::meta::product(&host).is_none()
+        || !matches!(kind, 1 | 28 | 65)
+        || read_u16(wire, offset + 2).ok()? != 1
+    {
+        return None;
+    }
+    Some(host)
+}
+
 pub fn build_a_query(id: u16, name: &str) -> Result<Vec<u8>, DnsError> {
-    if name.is_empty() || name.len() > 253 {
+    build_address_query(id, name, 1)
+}
+
+pub fn build_address_query(id: u16, name: &str, qtype: u16) -> Result<Vec<u8>, DnsError> {
+    if name.is_empty() || name.len() > 253 || !matches!(qtype, 1 | 28) {
         return Err(DnsError::InvalidQuery);
     }
     let mut query = Vec::with_capacity(12 + name.len() + 6);
@@ -110,11 +131,26 @@ pub fn build_a_query(id: u16, name: &str) -> Result<Vec<u8>, DnsError> {
         query.extend_from_slice(label.as_bytes());
     }
     query.push(0);
-    query.extend_from_slice(&[0, 1, 0, 1]);
+    query.extend_from_slice(&qtype.to_be_bytes());
+    query.extend_from_slice(&[0, 1]);
     Ok(query)
 }
 
 pub fn parse_a_reply(message: &[u8], query: &[u8], qname: &str) -> Result<Vec<Ipv4Addr>, DnsError> {
+    Ok(parse_address_reply(message, query, qname)?
+        .into_iter()
+        .filter_map(|ip| match ip {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        })
+        .collect())
+}
+
+pub fn parse_address_reply(
+    message: &[u8],
+    query: &[u8],
+    qname: &str,
+) -> Result<Vec<IpAddr>, DnsError> {
     if query.len() < 17 || message.len() < query.len() {
         return Err(DnsError::Malformed);
     }
@@ -129,6 +165,10 @@ pub fn parse_a_reply(message: &[u8], query: &[u8], qname: &str) -> Result<Vec<Ip
         return Err(DnsError::Mismatch);
     }
 
+    let qtype = read_u16(query, query.len() - 4)?;
+    if !matches!(qtype, 1 | 28) {
+        return Err(DnsError::InvalidQuery);
+    }
     let answer_count = usize::from(read_u16(message, 6)?);
     if answer_count > MAX_ANSWERS {
         return Err(DnsError::Malformed);
@@ -148,9 +188,20 @@ pub fn parse_a_reply(message: &[u8], query: &[u8], qname: &str) -> Result<Vec<Ip
         let data = message.get(offset..data_end).ok_or(DnsError::Malformed)?;
         if class == 1 {
             match (kind, data_len) {
-                (1, 4) => records.push(Record {
+                (1, 4) if qtype == 1 => records.push(Record {
                     owner,
-                    data: RecordData::Address(Ipv4Addr::new(data[0], data[1], data[2], data[3])),
+                    data: RecordData::Address(
+                        Ipv4Addr::new(data[0], data[1], data[2], data[3]).into(),
+                    ),
+                }),
+                (28, 16) if qtype == 28 => records.push(Record {
+                    owner,
+                    data: RecordData::Address(
+                        Ipv6Addr::from(
+                            <[u8; 16]>::try_from(data).map_err(|_| DnsError::Malformed)?,
+                        )
+                        .into(),
+                    ),
                 }),
                 (5, _) => {
                     let mut name_offset = offset;

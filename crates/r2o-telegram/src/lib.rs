@@ -16,6 +16,7 @@ pub mod list_update;
 pub mod memory_budget;
 pub mod meta_dns;
 pub mod meta_edge;
+mod meta_knowledge;
 pub mod outbound;
 pub(crate) mod response_observer;
 pub mod routing;

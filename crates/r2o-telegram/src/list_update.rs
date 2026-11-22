@@ -9,23 +9,23 @@
 //! трогает Discovery. Meta-диапазоны читает существующий `meta_dns`,
 //! остальные списки доступны как сохранённая база для следующих этапов.
 
+use crate::cf_proxy_doh::{doh_tls, is_usable_edge_ip, protected_address_lookup};
 use crate::meta_dns::{
     Attempt, append_log, atomic_write, backoff_after, env_bounded, local_clock, random_u16,
     read_attempt, should_run, write_attempt,
 };
-use r2k_core::dns::{DNS_RESOLVERS, build_a_query, parse_a_reply};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::ServerName;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket, lookup_host};
+use tokio::net::{TcpStream, lookup_host};
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use webpki_roots::TLS_SERVER_ROOTS;
@@ -40,6 +40,11 @@ const FETCH_ATTEMPTS: usize = 2;
 const MAX_REDIRECTS: usize = 3;
 const MAX_GEOSITE_FILES: usize = 32;
 const MAX_GEOSITE_DEPTH: usize = 4;
+
+pub(crate) fn is_meta_source(source: &ListSource) -> bool {
+    source.name == "geosite-meta" || source.name.starts_with("meta-")
+}
+
 const MANIFEST_VERSION: u32 = 1;
 const MANIFEST_LIMIT: u64 = 64 * 1024;
 
@@ -104,6 +109,131 @@ pub const SOURCES: &[ListSource] = &[
         parts: &["https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/meta"],
         min_lines: 3,
         max_lines: 100_000,
+    },
+    ListSource {
+        name: "meta-as32934-v6",
+        kind: ListKind::Cidr,
+        parts: &[
+            "https://raw.githubusercontent.com/ipverse/as-ip-blocks/master/as/32934/ipv6-aggregated.txt",
+        ],
+        min_lines: 1,
+        max_lines: 4096,
+    },
+    ListSource {
+        name: "meta-as63293-v4",
+        kind: ListKind::Cidr,
+        parts: &[
+            "https://raw.githubusercontent.com/ipverse/as-ip-blocks/master/as/63293/ipv4-aggregated.txt",
+        ],
+        min_lines: 1,
+        max_lines: 8192,
+    },
+    ListSource {
+        name: "meta-as63293-v6",
+        kind: ListKind::Cidr,
+        parts: &[
+            "https://raw.githubusercontent.com/ipverse/as-ip-blocks/master/as/63293/ipv6-aggregated.txt",
+        ],
+        min_lines: 1,
+        max_lines: 8192,
+    },
+    ListSource {
+        name: "meta-as54115-v4",
+        kind: ListKind::Cidr,
+        parts: &[
+            "https://raw.githubusercontent.com/ipverse/as-ip-blocks/master/as/54115/ipv4-aggregated.txt",
+        ],
+        min_lines: 1,
+        max_lines: 4096,
+    },
+    ListSource {
+        name: "meta-as54115-v6",
+        kind: ListKind::Cidr,
+        parts: &[
+            "https://raw.githubusercontent.com/ipverse/as-ip-blocks/master/as/54115/ipv6-aggregated.txt",
+        ],
+        min_lines: 1,
+        max_lines: 4096,
+    },
+    ListSource {
+        name: "meta-tickcount",
+        kind: ListKind::Domains,
+        parts: &["https://raw.githubusercontent.com/tickcount/iplists/main/rules/Meta/domains.txt"],
+        min_lines: 3,
+        max_lines: 256,
+    },
+    ListSource {
+        name: "meta-itdog",
+        kind: ListKind::Domains,
+        parts: &[
+            "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Services/meta.lst",
+        ],
+        min_lines: 3,
+        max_lines: 256,
+    },
+    ListSource {
+        name: "meta-whatsapp",
+        kind: ListKind::Domains,
+        parts: &[
+            "https://raw.githubusercontent.com/amartinawi/whatsapp-domains/main/whatsapp-domains.txt",
+        ],
+        min_lines: 3,
+        max_lines: 4096,
+    },
+    ListSource {
+        name: "meta-tachyon",
+        kind: ListKind::Domains,
+        parts: &[
+            "https://raw.githubusercontent.com/Dushnilin/tachyon-lists/main/release/domains/meta.lst",
+        ],
+        min_lines: 3,
+        max_lines: 1024,
+    },
+    ListSource {
+        name: "meta-tachyon-quest",
+        kind: ListKind::Domains,
+        parts: &[
+            "https://raw.githubusercontent.com/Dushnilin/tachyon-lists/main/release/domains/meta_quest.lst",
+        ],
+        min_lines: 3,
+        max_lines: 256,
+    },
+    ListSource {
+        name: "meta-tickcount-ip",
+        kind: ListKind::Cidr,
+        parts: &[
+            "https://raw.githubusercontent.com/tickcount/iplists/main/rules/Meta/ip-extended.txt",
+        ],
+        min_lines: 3,
+        max_lines: 8192,
+    },
+    ListSource {
+        name: "meta-tachyon-ip",
+        kind: ListKind::Cidr,
+        parts: &[
+            "https://raw.githubusercontent.com/Dushnilin/tachyon-lists/main/release/subnets/meta.lst",
+        ],
+        min_lines: 3,
+        max_lines: 8192,
+    },
+    ListSource {
+        name: "meta-rezmoss-ip",
+        kind: ListKind::Cidr,
+        parts: &[
+            "https://raw.githubusercontent.com/rezmoss/cloud-provider-ip-addresses/main/meta/meta.netset",
+        ],
+        min_lines: 3,
+        max_lines: 2048,
+    },
+    ListSource {
+        name: "meta-itdog-ip",
+        kind: ListKind::Cidr,
+        parts: &[
+            "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Subnets/IPv4/meta.lst",
+            "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Subnets/IPv6/meta.lst",
+        ],
+        min_lines: 3,
+        max_lines: 2048,
     },
     ListSource {
         name: "geosite-telegram",
@@ -266,28 +396,22 @@ fn resolve_location(base: &str, location: &str) -> Result<String, String> {
     Err(format!("неподдерживаемое перенаправление: {location}"))
 }
 
-async fn resolve_ips(host: &str) -> Result<Vec<Ipv4Addr>, String> {
-    let mut result = Vec::new();
-    if let Ok(Ok(addresses)) = timeout(DNS_TIMEOUT, lookup_host((host, 443))).await {
-        for address in addresses {
-            if let std::net::IpAddr::V4(address) = address.ip() {
-                push_unique(&mut result, address);
+async fn resolve_ips(host: &str) -> Result<Vec<IpAddr>, String> {
+    let tls = doh_tls(None)?;
+    let (secure, system) = tokio::join!(
+        protected_address_lookup(host, &tls),
+        timeout(DNS_TIMEOUT, lookup_host((host, 443))),
+    );
+    let mut result: Vec<_> = secure.into_iter().map(|(ip, _)| ip).collect();
+    // Для загрузки списков резервный адрес проверяется HTTPS с именем источника.
+    if let Ok(Ok(addresses)) = system {
+        for ip in addresses
+            .map(|address| address.ip())
+            .filter(is_usable_edge_ip)
+        {
+            if !result.contains(&ip) {
+                result.push(ip);
             }
-        }
-    }
-    // Системный DNS может отдать устаревший/подменённый адрес. Прямые
-    // запросы к публичным резолверам добавляем всегда, а не только при
-    // пустом ответе: иначе первый же неверный A-рекорд блокирует загрузку.
-    let direct = futures_util::future::join_all(
-        DNS_RESOLVERS
-            .iter()
-            .take(4)
-            .map(|resolver| query_public_dns(resolver.address, host)),
-    )
-    .await;
-    for addresses in direct.into_iter().flatten() {
-        for address in addresses {
-            push_unique(&mut result, address);
         }
     }
     if result.is_empty() {
@@ -296,42 +420,15 @@ async fn resolve_ips(host: &str) -> Result<Vec<Ipv4Addr>, String> {
     Ok(result)
 }
 
-async fn query_public_dns(resolver: Ipv4Addr, host: &str) -> Result<Vec<Ipv4Addr>, String> {
-    let id = random_u16()?;
-    let query = build_a_query(id, host).map_err(|_| format!("некорректное DNS-имя {host}"))?;
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .await
-        .map_err(|error| format!("не удалось открыть DNS-сокет: {error}"))?;
-    socket
-        .connect(SocketAddr::from((resolver, 53)))
-        .await
-        .map_err(|error| format!("не удалось подключиться к DNS {resolver}: {error}"))?;
-    timeout(DNS_TIMEOUT, async {
-        socket
-            .send(&query)
-            .await
-            .map_err(|error| format!("не удалось отправить DNS-запрос: {error}"))?;
-        let mut response = [0_u8; 4096];
-        let length = socket
-            .recv(&mut response)
-            .await
-            .map_err(|error| format!("не удалось получить DNS-ответ: {error}"))?;
-        parse_a_reply(&response[..length], &query, host)
-            .map_err(|_| format!("DNS {resolver} вернул некорректный ответ для {host}"))
-    })
-    .await
-    .map_err(|_| format!("истёк DNS-тайм-аут {resolver} для {host}"))?
-}
-
 async fn fetch_once(
     parts: &UrlParts<'_>,
-    address: Ipv4Addr,
+    address: IpAddr,
     max_bytes: usize,
     etag: Option<&str>,
 ) -> Result<FetchOutcome, String> {
     let tcp = timeout(
         CONNECT_TIMEOUT,
-        TcpStream::connect(SocketAddr::from((address, parts.port))),
+        TcpStream::connect(SocketAddr::new(address, parts.port)),
     )
     .await
     .map_err(|_| format!("тайм-аут TCP к {address}"))?
@@ -478,12 +575,6 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn push_unique(values: &mut Vec<Ipv4Addr>, value: Ipv4Addr) {
-    if !values.contains(&value) {
-        values.push(value);
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ListManifest {
     version: u32,
@@ -621,6 +712,16 @@ impl<F: ListFetch> ListUpdater<F> {
         Ok(())
     }
 
+    pub(crate) async fn update_meta(&mut self) -> Result<(), String> {
+        let now = now_epoch()?;
+        for source in SOURCES.iter().filter(|source| is_meta_source(source)) {
+            if let Err(error) = self.update_one(source, now, self.force).await {
+                append_log(&self.paths.log, &format!("{}: {error}", source.name));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn update_all(&mut self, force: bool) -> Result<ListSummary, String> {
         let now = now_epoch()?;
         self.update_all_with_now(now, force).await
@@ -629,7 +730,11 @@ impl<F: ListFetch> ListUpdater<F> {
     async fn update_all_with_now(&mut self, now: u64, force: bool) -> Result<ListSummary, String> {
         let mut summary = ListSummary::default();
         let mut fatal = None;
-        for source in SOURCES {
+        let other_only = std::env::var("R2O_LISTS_EXCLUDE_META").as_deref() == Ok("1");
+        for source in SOURCES
+            .iter()
+            .filter(|source| !other_only || !is_meta_source(source))
+        {
             match self.update_one(source, now, force).await {
                 Ok(SourceOutcome::Updated) => summary.updated += 1,
                 Ok(SourceOutcome::Fresh | SourceOutcome::NotModified) => summary.fresh += 1,
@@ -680,6 +785,7 @@ impl<F: ListFetch> ListUpdater<F> {
                 if let Some((mut manifest, _)) = existing {
                     manifest.fetched_at = now;
                     self.write_manifest(&manifest_path, &manifest)?;
+                    self.clear_source_error(source);
                     Ok(SourceOutcome::NotModified)
                 } else {
                     Err("источник вернул 304 без сохранённой базы".to_string())
@@ -746,6 +852,7 @@ impl<F: ListFetch> ListUpdater<F> {
                     bytes: bytes.len(),
                 };
                 self.write_manifest(&manifest_path, &manifest)?;
+                self.clear_source_error(source);
                 append_log(
                     &self.paths.log,
                     &format!("{}: {} строк, {} байт", source.name, lines, bytes.len()),
@@ -760,12 +867,25 @@ impl<F: ListFetch> ListUpdater<F> {
         }
     }
 
+    fn clear_source_error(&self, source: &ListSource) {
+        if is_meta_source(source) {
+            let _ = std::fs::remove_file(self.paths.dir.join(format!("{}.error", source.name)));
+        }
+    }
+
     fn keep_or_fail(
         &self,
         source: &ListSource,
         has_existing: bool,
         error: String,
     ) -> Result<SourceOutcome, String> {
+        if is_meta_source(source) {
+            let length = error.floor_char_boundary(error.len().min(300));
+            let _ = atomic_write(
+                &self.paths.dir.join(format!("{}.error", source.name)),
+                error[..length].as_bytes(),
+            );
+        }
         if has_existing {
             append_log(
                 &self.paths.log,
@@ -1025,7 +1145,7 @@ fn read_existing(
             ()
         }
     };
-    let body_for_compare = std::fs::read_to_string(path).ok()?;
+    let body_for_compare = body;
     let mut manifest = read_manifest(manifest_path).unwrap_or_else(|| ListManifest {
         version: MANIFEST_VERSION,
         source: source.parts.join(","),
@@ -1042,6 +1162,25 @@ fn read_existing(
     }
     let _ = now;
     Some((manifest, body_for_compare))
+}
+
+pub(crate) fn verified_meta_source(
+    dir: &Path,
+    source: &ListSource,
+) -> Option<(u64, String, String)> {
+    let (manifest, body) = read_existing(
+        source,
+        &dir.join(format!("{}.txt", source.name)),
+        &dir.join(format!("{}.json", source.name)),
+        0,
+    )?;
+    if manifest.fetched_at == 0
+        || manifest.source != source.parts.join(",")
+        || manifest.bytes != body.len()
+    {
+        return None;
+    }
+    Some((manifest.fetched_at, manifest.sha256, body))
 }
 
 fn read_manifest(path: &Path) -> Option<ListManifest> {
@@ -1070,25 +1209,26 @@ fn normalize_cidrs(text: &str, source: &ListSource) -> Result<String, String> {
             Some((address, prefix)) => (address, Some(prefix)),
             None => (line, None),
         };
-        let Ok(address) = address.parse::<Ipv4Addr>() else {
+        let Ok(address) = address.parse::<IpAddr>() else {
             invalid += 1;
             continue;
         };
+        let width = if address.is_ipv4() { 32 } else { 128 };
         let prefix = match prefix {
             Some(prefix) => match prefix.parse::<u8>() {
-                Ok(prefix) if prefix <= 32 => prefix,
+                Ok(prefix) if prefix <= width => prefix,
                 _ => {
                     invalid += 1;
                     continue;
                 }
             },
-            None => 32,
+            None => width,
         };
         if prefix == 0 {
             invalid += 1;
             continue;
         }
-        networks.insert((u32::from(address), prefix));
+        networks.insert((address, prefix));
     }
     if total == 0 {
         return Err("в ответе нет CIDR-строк".to_string());
@@ -1118,7 +1258,7 @@ fn normalize_cidrs(text: &str, source: &ListSource) -> Result<String, String> {
         source.parts.join(" ")
     );
     for (address, prefix) in networks {
-        output.push_str(&format!("{}/{prefix}\n", Ipv4Addr::from(address)));
+        output.push_str(&format!("{address}/{prefix}\n"));
     }
     Ok(output)
 }
@@ -1127,7 +1267,7 @@ fn normalize_domain(raw: &str) -> Option<String> {
     let value = raw.trim().trim_end_matches('.').to_ascii_lowercase();
     if value.is_empty()
         || value.len() > 253
-        || value.parse::<Ipv4Addr>().is_ok()
+        || value.parse::<IpAddr>().is_ok()
         || value.contains('*')
         || value.contains('/')
         || value.contains(':')
@@ -1332,6 +1472,31 @@ mod tests {
         assert!(normalize_domain("-bad.example").is_none());
         assert!(normalize_domain("127.0.0.1").is_none());
         assert!(normalize_domain("*.example.com").is_none());
+    }
+
+    #[tokio::test]
+    async fn meta_source_integrity_covers_ipv4_and_ipv6_and_rejects_a_changed_body() {
+        let temp = TempDir::new("meta-ip-integrity");
+        let paths = paths(&temp.0);
+        let source = SOURCES
+            .iter()
+            .find(|source| source.name == "meta-rezmoss-ip")
+            .unwrap();
+        let data = "157.240.0.0/16\n2a03:2880::/32\n2a03:2887::/32\n";
+        let fetch = MockFetch::with(&[(source.parts[0], Ok(data))]);
+        let mut updater = ListUpdater::new(fetch, paths.clone()).with_retry_delay(Duration::ZERO);
+        assert!(matches!(
+            updater.update_one(source, 100, true).await,
+            Ok(SourceOutcome::Updated)
+        ));
+        let (_, _, body) = verified_meta_source(&paths.dir, source).unwrap();
+        assert!(body.contains("2a03:2880::/32"));
+        std::fs::write(
+            paths.dir.join("meta-rezmoss-ip.txt"),
+            data.replace("157.240", "8.8"),
+        )
+        .unwrap();
+        assert!(verified_meta_source(&paths.dir, source).is_none());
     }
 
     #[tokio::test]

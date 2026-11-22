@@ -2,6 +2,8 @@
 use r2k_core::control::encode_frame;
 #[cfg(unix)]
 mod dns_recovery;
+#[cfg(unix)]
+mod meta_protection;
 use r2k_core::control::{
     self, ADDR_PROBE_LEASE_MAX_MS, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR,
     COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_NAME, COMMAND_DEL_VOICE_ADDR_PROBE, COMMAND_SET_ADDR,
@@ -1059,6 +1061,35 @@ fn r2o_offline_self_check() -> bool {
 }
 
 fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
+    if arguments
+        .first()
+        .is_some_and(|arg| arg == "--meta-encrypted-resolve")
+    {
+        if !(2..=9).contains(&arguments.len()) {
+            return Err("Meta DNS: ожидается от одного до восьми имён".into());
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let result = runtime.block_on(async {
+            let mut result = std::collections::BTreeMap::new();
+            for name in arguments
+                .iter()
+                .skip(1)
+                .filter_map(|argument| argument.to_str())
+            {
+                if r2k_core::meta::product(name).is_some() {
+                    result.insert(
+                        name,
+                        r2o_controller::dns_health::meta_address_fallback(name).await,
+                    );
+                }
+            }
+            result
+        });
+        println!("{}", serde_json::to_string(&result)?);
+        return Ok(());
+    }
     if arguments.len() == 1 && (arguments[0] == "--help" || arguments[0] == "-h") {
         print_help();
         return Ok(());
@@ -25767,6 +25798,7 @@ impl ControlClient {
                 .filter(|family| matches!(family, 4 | 6))
         });
         dns_health.family = dns_family;
+        let mut meta_traffic = meta_protection::MetaTraffic::from_env(dns_family);
         let mut dns_recovery = discovery.as_ref().and_then(|_| {
             dns_recovery::Recovery::from_environment(
                 https_probe_mark,
@@ -26036,6 +26068,21 @@ impl ControlClient {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
+                if let Some(meta) = &mut meta_traffic {
+                    let targets = meta.poll(now, dns_wall_now.max(0) as u64);
+                    if let Some((worker, catalog, _, _)) = &mut discovery {
+                        for target in targets {
+                            if !worker.is_active(&target)
+                                && !r2o_controller::discovery::has_covering_binding(
+                                    catalog, &target,
+                                )
+                                && worker.queue_with_planned(target.clone(), false)
+                            {
+                                meta.pending.insert(target, now);
+                            }
+                        }
+                    }
+                }
                 dns_health.poll(&mut dns_services, dns_wall_now);
                 if let (Some(recovery), Some((worker, _, _, _))) =
                     (&mut dns_recovery, &mut discovery)
@@ -26628,6 +26675,23 @@ impl ControlClient {
                     && let Some(outcome) = worker.try_outcome()
                 {
                     let target = outcome.target.clone();
+                    let mut outcome = outcome;
+                    if let Some(meta) = &mut meta_traffic
+                        && meta.pending.remove(&target).is_some()
+                    {
+                        let proof = r2o_confirmed_proof_map()
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get(&target)
+                            .copied();
+                        if !meta.enabled() || (outcome.plan_text.is_some() && proof.is_none()) {
+                            let _ = r2o_confirmed_proof_take(&target);
+                            let _ = r2o_budget_cut_pending_take(&target);
+                            continue;
+                        }
+                        // Синтетическая проверка относится к конкретному имени и адресу.
+                        outcome.group_block_proven = false;
+                    }
                     let outcome_reason = outcome.detail.clone();
                     if let Some(diagnostics) = diagnostics.as_mut() {
                         let mut diagnostic = worker.r2o_diagnostic_event(&target);
@@ -29667,6 +29731,14 @@ impl ControlClient {
                     }
                     continue;
                 }
+                if frame.kind == r2k_core::control::EVENT_META_DNS_NAME {
+                    if let Some(meta) = &mut meta_traffic
+                        && let Ok(name) = std::str::from_utf8(&frame.body)
+                    {
+                        meta.observe_dns(name, dns_wall_now.max(0) as u64);
+                    }
+                    continue;
+                }
                 if frame.kind != EVENT_HELLO {
                     continue;
                 }
@@ -29677,6 +29749,9 @@ impl ControlClient {
                     .as_deref()
                     .and_then(|host| std::str::from_utf8(host).ok())
                 {
+                    if let Some(meta) = &mut meta_traffic {
+                        meta.observe(&hello, name, dns_wall_now.max(0) as u64);
+                    }
                     dns_services.observe(
                         &hello.key,
                         name,

@@ -3,7 +3,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io::BufReader;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +12,7 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error, RootCertStore, SignatureScheme};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
@@ -21,6 +22,17 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 const NEUTRAL_SNI: &str = "example.com";
 
 pub const META_HOSTS: &[&str] = &[
+    "www.facebook.com",
+    "graph.facebook.com",
+    "www.messenger.com",
+    "edge-chat.facebook.com",
+    "www.threads.com",
+    "www.threads.net",
+    "www.meta.com",
+    "auth.meta.com",
+    "www.oculus.com",
+    "graph.oculus.com",
+    "oculus.com",
     "instagram.com",
     "www.instagram.com",
     "graph.instagram.com",
@@ -72,6 +84,105 @@ pub async fn check_meta_edge(
     .map_err(|_| "истёк тайм-аут проверки Meta через TLS".to_string())?
 }
 
+pub(crate) struct MetaTls(TlsConnector);
+
+pub(crate) struct MetaEdgeEvidence {
+    pub certificate_names: Vec<String>,
+    pub http_status: Option<u16>,
+}
+
+impl MetaTls {
+    pub fn new(ca_bundle: Option<&Path>) -> Result<Self, String> {
+        let roots = match ca_bundle {
+            Some(path) => root_certs(path)?,
+            None => RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+        };
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        Ok(Self(TlsConnector::from(Arc::new(config))))
+    }
+
+    pub async fn check(&self, host: &str, peer: SocketAddr) -> Result<MetaEdgeEvidence, String> {
+        let name = ServerName::try_from(host.to_owned())
+            .map_err(|error| format!("недопустимое имя Meta: {error}"))?;
+        let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(peer))
+            .await
+            .map_err(|_| "TCP: тайм-аут".to_string())?
+            .map_err(|error| format!("TCP: {error}"))?;
+        let mut tls = timeout(
+            TOTAL_TIMEOUT - CONNECT_TIMEOUT,
+            self.0.connect(name, stream),
+        )
+        .await
+        .map_err(|_| "TLS: тайм-аут".to_string())?
+        .map_err(|error| format!("TLS: {error}"))?;
+        let names = tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+            .and_then(|cert| {
+                let (_, x509) = x509_parser::parse_x509_certificate(cert.as_ref()).ok()?;
+                let ext = x509.subject_alternative_name().ok().flatten()?;
+                Some(
+                    ext.value
+                        .general_names
+                        .iter()
+                        .filter_map(|name| match name {
+                            x509_parser::extensions::GeneralName::DNSName(name) => {
+                                let name = name.to_ascii_lowercase();
+                                r2k_core::meta::product(&name).is_some().then_some(name)
+                            }
+                            _ => None,
+                        })
+                        .take(8)
+                        .collect::<Vec<_>>(),
+                )
+            });
+        // Проверяется только ответ HTTP. Нативная авторизация и медиасеансы
+        // требуют клиента, поэтому рукопожатие остаётся отдельным результатом.
+        let request = format!("HEAD / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        let http_status = timeout(Duration::from_millis(800), async {
+            tls.write_all(request.as_bytes()).await.ok()?;
+            let mut buffer = [0u8; 256];
+            let mut used = 0;
+            while used < buffer.len() {
+                let n = tls.read(&mut buffer[used..]).await.ok()?;
+                if n == 0 {
+                    break;
+                }
+                used += n;
+                if let Some(end) = buffer[..used].iter().position(|&byte| byte == b'\n') {
+                    let line = std::str::from_utf8(&buffer[..end]).ok()?.trim_end();
+                    let (version, status) = line.split_once(' ')?;
+                    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
+                        return None;
+                    }
+                    return status
+                        .split_ascii_whitespace()
+                        .next()?
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|code| (100..=599).contains(code));
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten();
+        Ok(MetaEdgeEvidence {
+            certificate_names: names.unwrap_or_default(),
+            http_status,
+        })
+    }
+
+    pub async fn verify(&self, host: &str, ip: IpAddr) -> Result<MetaEdgeEvidence, String> {
+        self.check(host, SocketAddr::new(ip, 443)).await
+    }
+}
+
 async fn check_meta_edge_at(
     verify_name: &str,
     peer: SocketAddr,
@@ -96,7 +207,7 @@ async fn check_meta_edge_at(
         .map_err(|error| format!("проверка TLS-сертификата Meta не пройдена: {error}"))
 }
 
-fn tls_config(ca_bundle: &Path, verify_name: &str) -> Result<rustls::ClientConfig, String> {
+fn root_certs(ca_bundle: &Path) -> Result<RootCertStore, String> {
     let file = File::open(ca_bundle).map_err(|error| {
         format!(
             "не удалось прочитать набор сертификатов CA {}: {error}",
@@ -121,7 +232,11 @@ fn tls_config(ca_bundle: &Path, verify_name: &str) -> Result<rustls::ClientConfi
         ));
     }
 
-    let standard = WebPkiServerVerifier::builder(Arc::new(roots))
+    Ok(roots)
+}
+
+fn tls_config(ca_bundle: &Path, verify_name: &str) -> Result<rustls::ClientConfig, String> {
+    let standard = WebPkiServerVerifier::builder(Arc::new(root_certs(ca_bundle)?))
         .build()
         .map_err(|error| format!("не удалось создать проверку сертификатов Meta: {error}"))?;
     let expected_name = verify_name.to_owned();
@@ -281,6 +396,26 @@ mod tests {
             sni
         });
         (address, handle)
+    }
+
+    #[tokio::test]
+    async fn protection_sends_exact_sni_and_rejects_sibling_certificate() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (ca, leaf, key) = test_certificate("www.threads.com");
+        let config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![leaf], key)
+                .unwrap(),
+        );
+        let client = MetaTls::new(Some(&ca)).unwrap();
+        let (endpoint, sni) = sni_capture_server(config.clone()).await;
+        client.check("www.threads.com", endpoint).await.unwrap();
+        assert_eq!(sni.await.unwrap().as_deref(), Some("www.threads.com"));
+        let (endpoint, sni) = sni_capture_server(config).await;
+        assert!(client.check("www.threads.net", endpoint).await.is_err());
+        assert_eq!(sni.await.unwrap().as_deref(), Some("www.threads.net"));
+        std::fs::remove_file(ca).unwrap();
     }
 
     #[tokio::test]

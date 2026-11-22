@@ -1704,6 +1704,9 @@ mod app {
         )?;
         let mut flow_journal = R2oFlowJournal::with_capacity(options.journal_capacity as usize)?;
         let journal_origin = Instant::now();
+        let meta_disable_marker = std::env::var_os("R2O_META_STATE_DIR")
+            .map(|path| std::path::PathBuf::from(path).join("meta-protection.disabled"));
+        let mut meta_observed_dns_at = None;
         let journal_origin_ns = r2o_now_ns();
         let mut journal_seen = 0_u64;
         let mut journal_peer_connected = false;
@@ -2634,6 +2637,23 @@ mod app {
                         // делаем это на входе пакета до выбора плана.
                         name_plans.prune_expired_probes(now);
                         let packet_view = r2k_core::packet::PacketView::parse(bytes);
+                        if !controller_probe
+                            && let Some(marker) = meta_disable_marker.as_ref()
+                            && meta_observed_dns_at.is_none_or(|last| {
+                                now.saturating_duration_since(last)
+                                    >= std::time::Duration::from_millis(200)
+                            })
+                            && let Some(view) = packet_view.as_ref()
+                            && let Some(ctrl) = control.as_mut().filter(|ctrl| ctrl.is_connected())
+                            && let Some(host) = meta_dns_name(view, bytes)
+                            && !marker.exists()
+                        {
+                            meta_observed_dns_at = Some(now);
+                            let _ = ctrl.try_send_event(
+                                r2k_core::control::EVENT_META_DNS_NAME,
+                                host.as_bytes(),
+                            );
+                        }
                         let family = packet_view.as_ref().map(|view| view.family);
                         let (tls_source_port, tls_destination_port) = packet_view
                             .as_ref()
@@ -4904,6 +4924,23 @@ mod app {
         {
             control.record_shape_tcp_options(hello.key.low_address.family(), options);
         }
+    }
+
+    fn meta_dns_name(view: &r2k_core::packet::PacketView, packet: &[u8]) -> Option<String> {
+        let port = packet.get(view.l4_offset + 2..view.l4_offset + 4)?;
+        if port != 53_u16.to_be_bytes() {
+            return None;
+        }
+        let wire = match view.protocol {
+            17 => packet.get(view.udp_payload_range(packet)?)?,
+            6 => {
+                let payload = packet.get(view.tcp_segment(packet)?.payload)?;
+                let length = usize::from(u16::from_be_bytes(payload.get(..2)?.try_into().ok()?));
+                payload.get(2..2 + length)?
+            }
+            _ => return None,
+        };
+        r2k_core::dns::observed_meta_question(wire)
     }
 
     fn send_hello_event(

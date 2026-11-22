@@ -1,28 +1,24 @@
-//! Проверенный lifecycle статических Meta DNS pins на Keenetic.
+//! Проверка и управление точными DNS-записями Meta на роутере.
 
-use crate::meta_edge::{META_HOSTS, check_meta_edge};
-use r2k_core::dns::{DNS_RESOLVERS, DnsResolver, build_a_query, parse_a_reply};
+use crate::cf_proxy_doh::{doh_tls, protected_address_lookup};
+use crate::meta_edge::{META_HOSTS, MetaTls};
+use crate::meta_knowledge::{Address, Knowledge};
+use futures_util::{StreamExt, stream};
+use r2k_core::meta::product as meta_family;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::future::Future;
 use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::net::{UdpSocket, lookup_host};
-use tokio::time::{sleep, timeout};
-
-const DNS_TIMEOUT: Duration = Duration::from_secs(2);
-const SYSTEM_DNS_TIMEOUT: Duration = Duration::from_secs(5);
-const DNS_PACKET_LIMIT: usize = 4096;
-const DNS_ADDRESS_LIMIT: usize = 8;
-static NEXT_DNS_ID: AtomicU16 = AtomicU16::new(1);
+use tokio::time::sleep;
 
 const MAX_HOST_ADDRESSES: usize = 2;
-const MAX_PROBE_CANDIDATES: usize = 4;
+const MAX_PROBE_CANDIDATES: usize = 8;
+type DnsAnswers = BTreeMap<String, Vec<IpAddr>>;
 
 type NetFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type PinPair = (String, String);
@@ -34,143 +30,185 @@ struct ProbePolicy<'a> {
 }
 
 pub trait MetaNetwork: Send + Sync {
-    fn resolve<'a>(&'a self) -> NetFuture<'a, Result<BTreeMap<String, Vec<Ipv4Addr>>, String>>;
-    fn verify<'a>(&'a self, host: &'a str, address: Ipv4Addr) -> NetFuture<'a, bool>;
+    fn includes_host(&self, _host: &str) -> bool {
+        true
+    }
+    fn resolve<'a>(&'a self) -> NetFuture<'a, Result<BTreeMap<String, Vec<IpAddr>>, String>>;
+    fn verify<'a>(&'a self, host: &'a str, address: IpAddr) -> NetFuture<'a, bool>;
 }
 
 pub trait Ndm: Send {
+    fn supports_address(&self, _address: IpAddr) -> bool {
+        true
+    }
     fn running_config(&mut self) -> Result<String, String>;
-    fn add(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String>;
-    fn remove(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String>;
+    fn add(&mut self, host: &str, address: IpAddr) -> Result<(), String>;
+    fn remove(&mut self, host: &str, address: IpAddr) -> Result<(), String>;
     fn save(&mut self) -> Result<(), String>;
 }
 
 pub struct DirectMetaNetwork {
     ca_bundle: Option<PathBuf>,
+    hosts: Vec<String>,
+    prefixes: Vec<(IpAddr, u8)>,
+    tls: std::sync::OnceLock<Result<MetaTls, String>>,
+    candidates: std::sync::Mutex<BTreeMap<(String, IpAddr), String>>,
+    checks: std::sync::Mutex<BTreeMap<(String, IpAddr), Result<Option<u16>, String>>>,
+    cert_names: std::sync::Mutex<BTreeSet<String>>,
+    local_dns: std::sync::Mutex<BTreeMap<String, &'static str>>,
 }
 
 impl DirectMetaNetwork {
     pub fn new(ca_bundle: Option<PathBuf>) -> Self {
-        Self { ca_bundle }
+        Self {
+            ca_bundle,
+            hosts: META_HOSTS.iter().map(ToString::to_string).collect(),
+            prefixes: Vec::new(),
+            tls: std::sync::OnceLock::new(),
+            candidates: Default::default(),
+            checks: Default::default(),
+            cert_names: Default::default(),
+            local_dns: Default::default(),
+        }
     }
 }
 
 impl MetaNetwork for DirectMetaNetwork {
-    fn resolve<'a>(&'a self) -> NetFuture<'a, Result<BTreeMap<String, Vec<Ipv4Addr>>, String>> {
-        Box::pin(resolve_meta_direct())
+    fn includes_host(&self, host: &str) -> bool {
+        self.hosts.iter().any(|name| name == host)
     }
 
-    fn verify<'a>(&'a self, host: &'a str, address: Ipv4Addr) -> NetFuture<'a, bool> {
+    fn resolve<'a>(&'a self) -> NetFuture<'a, Result<DnsAnswers, String>> {
         Box::pin(async move {
-            let Some(ca_bundle) = self.ca_bundle.as_deref() else {
-                return false;
+            let tls = doh_tls(None)?;
+            let replies: Vec<_> = stream::iter(self.hosts.clone())
+                .map(|host| {
+                    let tls = &tls;
+                    async move {
+                        let lookup_name = host.clone();
+                        let system = tokio::time::timeout(
+                            Duration::from_millis(750),
+                            tokio::net::lookup_host((lookup_name.as_str(), 443)),
+                        );
+                        let (addresses, local) =
+                            tokio::join!(protected_address_lookup(&host, tls), system);
+                        let diagnosis = match local {
+                            Ok(Ok(ips)) if !self.prefixes.is_empty() => {
+                                let ips: Vec<_> = ips.take(16).map(|ip| ip.ip()).collect();
+                                if ips.is_empty() {
+                                    "нет адресов"
+                                } else if !ips.iter().any(|ip| is_meta_ip(&self.prefixes, *ip)) {
+                                    "адреса вне префиксов Meta"
+                                } else {
+                                    "получены адреса Meta"
+                                }
+                            }
+                            Ok(Ok(_)) => "получен ответ",
+                            _ => "не ответил",
+                        };
+                        self.local_dns
+                            .lock()
+                            .expect("поток локального DNS")
+                            .insert(host.clone(), diagnosis);
+                        (host, addresses)
+                    }
+                })
+                .buffer_unordered(2)
+                .collect()
+                .await;
+            let missing: Vec<_> = replies
+                .iter()
+                .filter(|(_, ips)| {
+                    ips.is_empty()
+                        || (!self.prefixes.is_empty()
+                            && !ips.iter().any(|(ip, _)| is_meta_ip(&self.prefixes, *ip)))
+                })
+                .map(|(name, _)| name.clone())
+                .take(8)
+                .collect();
+            let fallback = controller_dns_fallback(&missing).await;
+            let mut candidates = self.candidates.lock().expect("поток Meta DNS");
+            let mut results = DnsAnswers::new();
+            for (host, addresses) in replies {
+                for (ip, provider) in &addresses {
+                    candidates
+                        .entry((host.clone(), *ip))
+                        .or_insert_with(|| (*provider).into());
+                }
+                let mut ips: Vec<_> = addresses.into_iter().map(|(ip, _)| ip).collect();
+                for (ip, provider) in fallback.get(&host).into_iter().flatten() {
+                    if crate::cf_proxy_doh::is_usable_edge_ip(ip) && !ips.contains(ip) {
+                        candidates.insert((host.clone(), *ip), provider.clone());
+                        ips.push(*ip);
+                    }
+                }
+                results.insert(host, ips);
+            }
+            if results.values().all(Vec::is_empty) {
+                return Err("защищённые резолверы не вернули адресов Meta".into());
+            }
+            Ok(results)
+        })
+    }
+
+    fn verify<'a>(&'a self, host: &'a str, address: IpAddr) -> NetFuture<'a, bool> {
+        Box::pin(async move {
+            let result = match self
+                .tls
+                .get_or_init(|| MetaTls::new(self.ca_bundle.as_deref()))
+            {
+                Ok(tls) => tls.verify(host, address).await,
+                Err(error) => Err(error.clone()),
             };
-            check_meta_edge(host, address, ca_bundle).await.is_ok()
+            let verified = result.is_ok();
+            let result = result.map(|evidence| {
+                self.cert_names
+                    .lock()
+                    .expect("поток Meta TLS")
+                    .extend(evidence.certificate_names);
+                evidence.http_status
+            });
+            self.checks
+                .lock()
+                .expect("поток Meta TLS")
+                .insert((host.to_owned(), address), result);
+            verified
         })
     }
 }
 
-pub async fn resolve_meta_direct() -> Result<BTreeMap<String, Vec<Ipv4Addr>>, String> {
-    let answers =
-        futures_util::future::join_all(META_HOSTS.iter().map(|host| resolve_host(host))).await;
-    let mut results = BTreeMap::new();
-    let mut first_error = None;
-    for (host, answer) in META_HOSTS.iter().zip(answers) {
-        match answer {
-            Ok(addresses) => {
-                results.insert((*host).to_owned(), addresses);
-            }
-            Err(error) => {
-                first_error.get_or_insert(error);
-                results.insert((*host).to_owned(), Vec::new());
-            }
-        }
+async fn controller_dns_fallback(hosts: &[String]) -> BTreeMap<String, Vec<(IpAddr, String)>> {
+    let Some(manager) = std::env::var_os("R2O_MANAGER") else {
+        return BTreeMap::new();
+    };
+    if hosts.is_empty() {
+        return BTreeMap::new();
     }
-    if results.values().all(Vec::is_empty) {
-        return Err(first_error.unwrap_or_else(|| "DNS не вернул адреса Meta".to_owned()));
-    }
-    Ok(results)
-}
-
-async fn resolve_host(host: &'static str) -> Result<Vec<Ipv4Addr>, String> {
-    let id = NEXT_DNS_ID.fetch_add(1, Ordering::Relaxed);
-    let query = build_a_query(id, host).map_err(|_| format!("некорректное имя DNS: {host}"))?;
-    let system_lookup = timeout(SYSTEM_DNS_TIMEOUT, lookup_host((host, 443)));
-    let direct_lookups = futures_util::future::join_all(
-        DNS_RESOLVERS.map(|resolver| query_public_resolver(resolver, &query, host)),
-    );
-    let (system, direct) = tokio::join!(system_lookup, direct_lookups);
-    let mut addresses = Vec::with_capacity(DNS_ADDRESS_LIMIT);
-    if let Ok(Ok(results)) = system {
-        for address in results.filter_map(|address| match address.ip() {
-            IpAddr::V4(address) => Some(address),
-            IpAddr::V6(_) => None,
-        }) {
-            append_address(&mut addresses, address);
-        }
-    }
-    for answer in direct.into_iter().flatten() {
-        for address in answer {
-            append_address(&mut addresses, address);
-        }
-    }
-    if addresses.is_empty() {
-        return Err(format!(
-            "локальный DNS и прямые серверы не разрешили {host}"
-        ));
-    }
-    Ok(addresses)
-}
-
-async fn query_public_resolver(
-    resolver: DnsResolver,
-    query: &[u8],
-    host: &str,
-) -> Result<Vec<Ipv4Addr>, String> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+    let root = std::env::var_os("R2O_DIR").unwrap_or_else(|| "/opt/r2o".into());
+    let mut command = tokio::process::Command::new(manager);
+    command
+        .arg("exec")
+        .arg("--root")
+        .arg(root)
+        .args([
+            "--component",
+            "r2o-controller",
+            "--",
+            "--meta-encrypted-resolve",
+        ])
+        .args(hosts)
+        .kill_on_drop(true);
+    tokio::time::timeout(Duration::from_secs(30), command.output())
         .await
-        .map_err(|error| format!("не удалось открыть DNS-сокет: {error}"))?;
-    socket
-        .connect(SocketAddr::new(IpAddr::V4(resolver.address), 53))
-        .await
-        .map_err(|error| {
-            format!(
-                "не удалось подключиться к DNS {} {}: {error}",
-                resolver.provider.name(),
-                resolver.address
-            )
-        })?;
-    timeout(DNS_TIMEOUT, async {
-        socket
-            .send(query)
-            .await
-            .map_err(|error| format!("не удалось отправить DNS-запрос: {error}"))?;
-        let mut response = [0_u8; DNS_PACKET_LIMIT];
-        let length = socket
-            .recv(&mut response)
-            .await
-            .map_err(|error| format!("не удалось получить DNS-ответ: {error}"))?;
-        parse_a_reply(&response[..length], query, host).map_err(|_| {
-            format!(
-                "DNS {} вернул некорректный ответ для {host}",
-                resolver.provider.name()
-            )
-        })
-    })
-    .await
-    .map_err(|_| {
-        format!(
-            "истёк таймаут DNS-запроса к {} {}",
-            resolver.provider.name(),
-            resolver.address
-        )
-    })?
+        .ok()
+        .and_then(Result::ok)
+        .filter(|output| output.status.success() && output.stdout.len() <= 32 * 1024)
+        .and_then(|output| serde_json::from_slice(&output.stdout).ok())
+        .unwrap_or_default()
 }
 
-fn append_address(addresses: &mut Vec<Ipv4Addr>, address: Ipv4Addr) {
-    if addresses.len() < DNS_ADDRESS_LIMIT && !addresses.contains(&address) {
-        addresses.push(address);
-    }
+pub async fn resolve_meta_direct() -> Result<DnsAnswers, String> {
+    DirectMetaNetwork::new(None).resolve().await
 }
 
 pub struct SystemNdm {
@@ -203,6 +241,11 @@ impl Default for SystemNdm {
 }
 
 impl Ndm for SystemNdm {
+    fn supports_address(&self, address: IpAddr) -> bool {
+        // Синтаксис статического AAAA в ndmc зависит от прошивки.
+        address.is_ipv4() || matches!(self.backend, NdmBackend::Dnsmasq)
+    }
+
     fn running_config(&mut self) -> Result<String, String> {
         match &self.backend {
             NdmBackend::Ndmc(executable) => {
@@ -221,7 +264,7 @@ impl Ndm for SystemNdm {
         }
     }
 
-    fn add(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
+    fn add(&mut self, host: &str, address: IpAddr) -> Result<(), String> {
         match &self.backend {
             NdmBackend::Ndmc(executable) => ndmc(executable, &format!("ip host {host} {address}"))
                 .and_then(command_success("ndmc отклонил добавление DNS-записи")),
@@ -229,7 +272,7 @@ impl Ndm for SystemNdm {
         }
     }
 
-    fn remove(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
+    fn remove(&mut self, host: &str, address: IpAddr) -> Result<(), String> {
         match &self.backend {
             NdmBackend::Ndmc(executable) => {
                 ndmc(executable, &format!("no ip host {host} {address}"))
@@ -316,7 +359,12 @@ fn dnsmasq_config() -> Result<String, String> {
     Ok(config)
 }
 
-fn dnsmasq_section(host: &str, address: Ipv4Addr) -> String {
+fn dnsmasq_section(host: &str, address: IpAddr) -> String {
+    if address.is_ipv6() || host.len() > 72 {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(format!("{host} {address}").as_bytes());
+        return format!("r2o_meta_{}", hex::encode(&digest[..16]));
+    }
     let host = host
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
@@ -331,8 +379,25 @@ fn uci_set_argument(key: &str, value: Option<&str>) -> String {
     }
 }
 
-fn dnsmasq_add(host: &str, address: Ipv4Addr) -> Result<(), String> {
+fn dnsmasq_add(host: &str, address: IpAddr) -> Result<(), String> {
     let section = dnsmasq_section(host, address);
+    let key = format!("dhcp.{section}");
+    let existing = Command::new("uci")
+        .args(["-q", "show", &key])
+        .output()
+        .map_err(|error| format!("не удалось прочитать секцию {key}: {error}"))?;
+    if existing.status.success() {
+        return if uci_owned_record(
+            &String::from_utf8_lossy(&existing.stdout),
+            &key,
+            host,
+            address,
+        ) {
+            Ok(())
+        } else {
+            Err(format!("секция {key} уже занята"))
+        };
+    }
     for (key, value) in [
         (format!("dhcp.{section}=hostrecord"), None),
         (format!("dhcp.{section}.name"), Some(host.to_string())),
@@ -353,69 +418,36 @@ fn dnsmasq_add(host: &str, address: Ipv4Addr) -> Result<(), String> {
     Ok(())
 }
 
-fn dnsmasq_remove(host: &str, address: Ipv4Addr) -> Result<(), String> {
+fn dnsmasq_remove(host: &str, address: IpAddr) -> Result<(), String> {
+    let section = format!("dhcp.{}", dnsmasq_section(host, address));
     let output = Command::new("uci")
-        .args(["-q", "show", "dhcp"])
+        .args(["-q", "show", &section])
         .output()
         .map_err(|error| format!("не удалось запустить uci: {error}"))?;
-    let text = String::from_utf8(output.stdout)
-        .map_err(|_| "uci вернул конфигурацию в неподдерживаемой кодировке".to_string())?;
-    let wanted_ip = address.to_string();
-    let mut section = None;
-    let mut current = String::new();
-    let mut name = None;
-    let mut ip = None;
-    for line in text.lines().chain(std::iter::once("")) {
-        let Some((key, value)) = line.split_once('=') else {
-            if !current.is_empty()
-                && name.as_deref() == Some(host)
-                && ip.as_deref() == Some(wanted_ip.as_str())
-            {
-                section = Some(std::mem::take(&mut current));
-                break;
-            }
-            current.clear();
-            name = None;
-            ip = None;
-            continue;
-        };
-        let Some(rest) = key.strip_prefix("dhcp.") else {
-            continue;
-        };
-        let mut fields = rest.split('.');
-        let Some(found_section) = fields.next() else {
-            continue;
-        };
-        if found_section != current {
-            if !current.is_empty()
-                && name.as_deref() == Some(host)
-                && ip.as_deref() == Some(wanted_ip.as_str())
-            {
-                section = Some(std::mem::take(&mut current));
-                break;
-            }
-            current = found_section.to_string();
-            name = None;
-            ip = None;
-        }
-        let value = value.trim().trim_matches('\'').to_string();
-        match fields.next() {
-            Some("name") => name = Some(value),
-            Some("ip") => ip = Some(value),
-            _ => {}
-        }
-    }
-    let Some(section) = section else {
-        return Ok(());
-    };
-    let output = Command::new("uci")
-        .args(["delete", &format!("dhcp.{section}")])
-        .output()
-        .map_err(|error| format!("не удалось запустить uci delete: {error}"))?;
     if !output.status.success() {
-        return Err(format!("uci не удалил запись {section}"));
+        return Ok(());
     }
-    Ok(())
+    let text = String::from_utf8_lossy(&output.stdout);
+    if !uci_owned_record(&text, &section, host, address) {
+        return Ok(());
+    }
+    Command::new("uci")
+        .args(["delete", &section])
+        .output()
+        .map_err(|error| format!("не удалось запустить uci delete: {error}"))
+        .and_then(command_success("uci не удалил DNS-запись Meta"))
+}
+
+fn uci_owned_record(text: &str, section: &str, host: &str, address: IpAddr) -> bool {
+    let value = |key: &str| {
+        text.lines().find_map(|line| {
+            let (found, value) = line.split_once('=')?;
+            (found == key).then(|| value.trim_matches('\''))
+        })
+    };
+    value(section) == Some("hostrecord")
+        && value(&format!("{section}.name")) == Some(host)
+        && value(&format!("{section}.ip")).and_then(|ip| ip.parse().ok()) == Some(address)
 }
 
 fn dnsmasq_save() -> Result<(), String> {
@@ -504,7 +536,7 @@ pub struct MetaDnsManager<N, D> {
     network: N,
     ndm: D,
     paths: MetaDnsPaths,
-    meta_ranges: Vec<(u32, u8)>,
+    meta_ranges: Vec<(IpAddr, u8)>,
     probe_attempts: usize,
     probe_retry_delay: Duration,
     resolve_attempts: usize,
@@ -536,13 +568,15 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
     }
 
     pub async fn refresh(&mut self) -> Result<(), String> {
-        let ranges = std::fs::read_to_string(&self.paths.meta_ranges).map_err(|error| {
-            format!(
-                "не удалось прочитать диапазоны Meta из {}: {error}",
-                self.paths.meta_ranges.display()
-            )
-        })?;
-        self.meta_ranges = parse_meta_ranges(&ranges)?;
+        if self.meta_ranges.is_empty() {
+            let ranges = std::fs::read_to_string(&self.paths.meta_ranges).map_err(|error| {
+                format!(
+                    "не удалось прочитать диапазоны Meta из {}: {error}",
+                    self.paths.meta_ranges.display()
+                )
+            })?;
+            self.meta_ranges = parse_meta_ranges(&ranges)?;
+        }
         if self.meta_ranges.is_empty() {
             return Err("в файле диапазонов Meta нет допустимых сетей".into());
         }
@@ -559,7 +593,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
         let mut dead = Vec::new();
         let mut alive = 0_usize;
         for (host, address) in &prior {
-            if !is_managed_host(host) {
+            if !is_managed_host(host) || !self.network.includes_host(host) {
                 continue;
             }
             if !initial_config
@@ -568,15 +602,16 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             {
                 continue;
             }
-            if verify_with_retry(
-                &self.network,
-                host,
-                *address,
-                self.probe_attempts,
-                self.probe_retry_delay,
-                &self.paths.log,
-            )
-            .await
+            if is_meta_ip(&self.meta_ranges, *address)
+                && verify_with_retry(
+                    &self.network,
+                    host,
+                    *address,
+                    self.probe_attempts,
+                    self.probe_retry_delay,
+                    &self.paths.log,
+                )
+                .await
             {
                 alive += 1;
             } else {
@@ -628,40 +663,41 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             }
         };
 
-        let mut filtered = BTreeMap::<String, Vec<Ipv4Addr>>::new();
-        for host in META_HOSTS {
-            let mut candidates_tried = 0;
-            let mut verified = Vec::new();
-            for address in answers.get(*host).into_iter().flatten().take(8) {
-                if !is_meta_ip(&self.meta_ranges, *address) {
-                    append_log(
-                        &self.paths.log,
-                        &format!("отброшен адрес вне диапазонов Meta: {host} {address}"),
-                    );
-                    continue;
-                }
-                if candidates_tried >= MAX_PROBE_CANDIDATES {
-                    break;
-                }
-                candidates_tried += 1;
-                if verify_with_retry(
-                    &self.network,
-                    host,
-                    *address,
-                    self.probe_attempts,
-                    self.probe_retry_delay,
-                    &self.paths.log,
-                )
-                .await
-                {
-                    verified.push(*address);
-                    if verified.len() == MAX_HOST_ADDRESSES {
-                        break;
-                    }
-                }
+        let mut filtered = BTreeMap::<String, Vec<IpAddr>>::new();
+        for (host, ips) in &answers {
+            if !is_managed_host(host) {
+                continue;
             }
+            let manager = &*self;
+            let check_family = |ipv6| async move {
+                stream::iter(
+                    ips.iter()
+                        .copied()
+                        .filter(|ip| ip.is_ipv6() == ipv6 && is_meta_ip(&manager.meta_ranges, *ip))
+                        .take(MAX_PROBE_CANDIDATES),
+                )
+                .map(|address| async move {
+                    verify_with_retry(
+                        &manager.network,
+                        host,
+                        address,
+                        manager.probe_attempts,
+                        manager.probe_retry_delay,
+                        &manager.paths.log,
+                    )
+                    .await
+                    .then_some(address)
+                })
+                .buffered(2)
+                .filter_map(std::future::ready)
+                .take(MAX_HOST_ADDRESSES)
+                .collect::<Vec<_>>()
+                .await
+            };
+            let (mut verified, verified_v6) = tokio::join!(check_family(false), check_family(true));
+            verified.extend(verified_v6);
             if !verified.is_empty() {
-                filtered.insert((*host).to_string(), verified);
+                filtered.insert(host.clone(), verified);
             }
         }
 
@@ -679,17 +715,6 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             &mut filtered,
         )
         .await;
-        if !filtered.contains_key("instagram.com") {
-            let before = filtered.len();
-            filtered.retain(|host, _| meta_family(host) != Some("instagram"));
-            if filtered.len() != before {
-                append_log(
-                    &self.paths.log,
-                    "семейство instagram не изменено: нет проверенного адреса instagram.com",
-                );
-            }
-        }
-
         if filtered.is_empty() {
             if !dead.is_empty() && alive > 0 {
                 let mut view = NdmView::new(&mut self.ndm);
@@ -710,6 +735,9 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             return Err("нет проверенных адресов узлов Meta".into());
         }
 
+        if !enabled(&state_dirs(&self.paths).0) {
+            return Err("Meta Protection выключена".into());
+        }
         let mut view = NdmView::new(&mut self.ndm);
         view.config = initial_config;
         drop_dead_pins(
@@ -727,12 +755,15 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
         }
 
         let mut add_failed = false;
-        for host in META_HOSTS {
-            for address in filtered.get(*host).into_iter().flatten() {
+        for (host, addresses) in &filtered {
+            for address in addresses {
+                if !view.ndm.supports_address(*address) {
+                    continue;
+                }
                 if view.exists(host, *address)? {
                     continue;
                 }
-                let pair = ((*host).to_string(), address.to_string());
+                let pair = (host.clone(), address.to_string());
                 next.insert(pair.clone());
                 write_manifest(&self.paths.manifest, &next)?;
                 match view.add(host, *address) {
@@ -761,7 +792,8 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             let Some(fresh) = filtered.get(&host) else {
                 continue;
             };
-            if fresh.contains(&address) {
+            if fresh.contains(&address) || !fresh.iter().any(|ip| ip.is_ipv6() == address.is_ipv6())
+            {
                 continue;
             }
             if view.exists(&host, address)? {
@@ -774,8 +806,8 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             next.remove(&(host, address.to_string()));
         }
 
-        write_manifest(&self.paths.manifest, &next)?;
         view.save_if_changed()?;
+        write_manifest(&self.paths.manifest, &next)?;
         if let Err(error) = write_success_mark(&self.paths.success_mark) {
             append_log(
                 &self.paths.log,
@@ -810,7 +842,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
                 &format!("удалена R2O-запись {host} {address}"),
             );
         }
-        view.save_if_changed()?;
+        view.ndm.save()?;
         std::fs::remove_file(&self.paths.manifest).map_err(|error| {
             format!(
                 "не удалось удалить журнал принадлежащих записей {}: {error}",
@@ -826,7 +858,7 @@ async fn resolve_with_retry<N: MetaNetwork>(
     attempts: usize,
     retry_delay: Duration,
     log: &Path,
-) -> Result<BTreeMap<String, Vec<Ipv4Addr>>, String> {
+) -> Result<BTreeMap<String, Vec<IpAddr>>, String> {
     let mut last_error = None;
     for attempt in 1..=attempts {
         match network.resolve().await {
@@ -849,7 +881,7 @@ async fn resolve_with_retry<N: MetaNetwork>(
 async fn verify_with_retry<N: MetaNetwork>(
     network: &N,
     host: &str,
-    address: Ipv4Addr,
+    address: IpAddr,
     attempts: usize,
     retry_delay: Duration,
     log: &Path,
@@ -871,15 +903,15 @@ async fn verify_with_retry<N: MetaNetwork>(
 
 async fn apply_family_fallback<N: MetaNetwork>(
     network: &N,
-    ranges: &[(u32, u8)],
+    ranges: &[(IpAddr, u8)],
     policy: ProbePolicy<'_>,
-    answers: &BTreeMap<String, Vec<Ipv4Addr>>,
-    prior: &[(String, Ipv4Addr)],
-    dead: &[(String, Ipv4Addr)],
-    filtered: &mut BTreeMap<String, Vec<Ipv4Addr>>,
+    answers: &BTreeMap<String, Vec<IpAddr>>,
+    prior: &[(String, IpAddr)],
+    dead: &[(String, IpAddr)],
+    filtered: &mut BTreeMap<String, Vec<IpAddr>>,
 ) {
     for host in META_HOSTS {
-        if filtered.contains_key(*host) {
+        if !network.includes_host(host) || filtered.contains_key(*host) {
             continue;
         }
         let Some(family) = meta_family(host) else {
@@ -948,25 +980,33 @@ async fn apply_family_fallback<N: MetaNetwork>(
     }
 }
 
-fn is_meta_ip(ranges: &[(u32, u8)], address: Ipv4Addr) -> bool {
-    let value = u32::from(address);
-    ranges.iter().any(|(network, prefix)| {
-        let mask = if *prefix == 0 {
-            0
-        } else {
-            u32::MAX << (32 - u32::from(*prefix))
-        };
-        value & mask == *network & mask
-    })
+pub(crate) fn is_meta_ip(ranges: &[(IpAddr, u8)], address: IpAddr) -> bool {
+    use crate::cf_proxy_doh::is_usable_edge_ip;
+    if !is_usable_edge_ip(&address)
+        || matches!(address, IpAddr::V6(ip) if ip.to_ipv4_mapped().is_some())
+    {
+        return false;
+    }
+    ranges
+        .iter()
+        .any(|(network, prefix)| match (network, address) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                u32::from(*net) >> (32 - prefix) == u32::from(ip) >> (32 - prefix)
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                u128::from(*net) >> (128 - prefix) == u128::from(ip) >> (128 - prefix)
+            }
+            _ => false,
+        })
 }
 
-fn config_has_pair(config: &str, host: &str, address: Ipv4Addr) -> bool {
+fn config_has_pair(config: &str, host: &str, address: IpAddr) -> bool {
     config.lines().any(|line| {
         let mut fields = line.split_ascii_whitespace();
         matches!(
             (fields.next(), fields.next(), fields.next(), fields.next()),
             (Some("ip"), Some("host"), Some(found_host), Some(found_ip))
-                if found_host == host && found_ip == address.to_string()
+                if found_host == host && found_ip.parse::<IpAddr>().ok() == Some(address)
         )
     })
 }
@@ -975,8 +1015,8 @@ fn drop_dead_pins<D: Ndm>(
     view: &mut NdmView<'_, D>,
     manifest_path: &Path,
     log: &Path,
-    prior: &[(String, Ipv4Addr)],
-    dead: &[(String, Ipv4Addr)],
+    prior: &[(String, IpAddr)],
+    dead: &[(String, IpAddr)],
 ) -> Result<(), String> {
     if dead.is_empty() {
         return Ok(());
@@ -998,6 +1038,7 @@ fn drop_dead_pins<D: Ndm>(
         .filter(|pair| !dead_set.contains(*pair))
         .map(|(host, address)| (host.clone(), address.to_string()))
         .collect();
+    view.save_if_changed()?;
     write_manifest(manifest_path, &remaining)
 }
 
@@ -1027,18 +1068,22 @@ impl<'a, D: Ndm> NdmView<'a, D> {
         Ok(self.config.as_deref().expect("конфигурация уже загружена"))
     }
 
-    fn exists(&mut self, host: &str, address: Ipv4Addr) -> Result<bool, String> {
+    fn exists(&mut self, host: &str, address: IpAddr) -> Result<bool, String> {
         Ok(config_has_pair(self.config()?, host, address))
     }
 
-    fn add(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
+    fn add(&mut self, host: &str, address: IpAddr) -> Result<(), String> {
         let result = self.ndm.add(host, address);
         self.changed = true;
-        self.config = None;
+        if result.is_ok()
+            && let Some(config) = &mut self.config
+        {
+            config.push_str(&format!("\nip host {host} {address}\n"));
+        }
         result
     }
 
-    fn remove(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
+    fn remove(&mut self, host: &str, address: IpAddr) -> Result<(), String> {
         let result = self.ndm.remove(host, address);
         self.changed = true;
         self.config = None;
@@ -1054,39 +1099,259 @@ impl<'a, D: Ndm> NdmView<'a, D> {
     }
 }
 
+fn state_dirs(paths: &MetaDnsPaths) -> (PathBuf, PathBuf) {
+    let state = std::env::var_os("R2O_META_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| paths.r2o_dir.join("state"));
+    let runtime = std::env::var_os("R2O_RUNTIME_DIR")
+        .or_else(|| std::env::var_os("R2O_RUN_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| paths.r2o_dir.join("run"));
+    (state, runtime)
+}
+
+fn enabled(state: &Path) -> bool {
+    !state.join("meta-protection.disabled").exists()
+}
+
+fn state_lock(state: &Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(state).map_err(|error| error.to_string())?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state.join("meta-protection.lock"))
+        .map_err(|error| error.to_string())?;
+    lock.try_lock()
+        .map_err(|error| format!("Meta Protection: операция уже выполняется: {error}"))?;
+    Ok(lock)
+}
+
 pub async fn refresh_from_env() -> Result<(), String> {
+    refresh_knowledge(true).await
+}
+
+async fn refresh_knowledge(force: bool) -> Result<(), String> {
     let paths = MetaDnsPaths::from_env();
-    let ca_bundle = resolve_ca_bundle()?;
-    let network = DirectMetaNetwork::new(Some(ca_bundle));
+    let (state, runtime) = state_dirs(&paths);
+    let _lock = state_lock(&state)?;
+    if !enabled(&state) {
+        return Err("Meta Protection выключена".into());
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let mut knowledge = Knowledge::load(&state);
+    knowledge.refresh_sources(&crate::list_update::ListPaths::from_env(), &runtime, now);
+    let mut network =
+        DirectMetaNetwork::new(std::env::var_os("R2O_IP_CA_BUNDLE").map(PathBuf::from));
+    network.hosts = knowledge.due(now, force);
+    if network.hosts.is_empty() {
+        return knowledge.persist(&state);
+    }
+
+    network.prefixes = knowledge.ranges();
+    if network.prefixes.is_empty() || std::env::var_os("R2O_META_RANGES").is_some() {
+        let fallback = if std::env::var_os("R2O_META_RANGES").is_some() {
+            paths.meta_ranges.clone()
+        } else {
+            paths.r2o_dir.join("files/meta-ranges.txt")
+        };
+        if let Ok(body) = std::fs::read_to_string(fallback) {
+            network.prefixes = parse_meta_ranges(&body)?;
+        }
+    }
+    let ranges = network.prefixes.clone();
     let mut manager = MetaDnsManager::new(network, SystemNdm::default(), paths);
-    manager.refresh().await
+    manager.probe_attempts = 1;
+    manager.resolve_attempts = 1;
+    manager.meta_ranges = ranges;
+    if std::env::var_os("R2O_META_RANGES").is_none() {
+        manager.paths.meta_ranges = manager.paths.r2o_dir.join("files/meta-ranges.txt");
+    }
+    let result = manager.refresh().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let mut recovery = Vec::new();
+    let pins: BTreeSet<_> = read_manifest(&manager.paths.manifest)?
+        .into_iter()
+        .collect();
+    let candidates = manager
+        .network
+        .candidates
+        .into_inner()
+        .expect("поток Meta DNS");
+    let checks = manager.network.checks.into_inner().expect("поток Meta TLS");
+    let local_dns = manager
+        .network
+        .local_dns
+        .into_inner()
+        .expect("поток локального DNS");
+    for name in manager
+        .network
+        .cert_names
+        .into_inner()
+        .expect("поток Meta TLS")
+    {
+        knowledge.add_host(&name, "certificate", 0);
+    }
+
+    for host in manager.network.hosts {
+        let ips: BTreeSet<_> = candidates
+            .keys()
+            .chain(checks.keys())
+            .filter_map(|(name, ip)| (*name == host).then_some(*ip))
+            .collect();
+        let asns: BTreeMap<_, _> = ips.iter().map(|ip| (*ip, knowledge.asn(*ip))).collect();
+        let entry = knowledge.hosts.get_mut(&host).expect("имя из базы");
+        let mut verified_now = false;
+        let mut last_failure = None;
+        entry.local_dns = local_dns.get(&host).copied().unwrap_or_default().into();
+        entry.dns_addresses = candidates.keys().filter(|(name, _)| *name == host).count();
+        for ip in ips {
+            let key = (host.clone(), ip);
+            let resolver = candidates
+                .get(&key)
+                .map(String::as_str)
+                .unwrap_or("сохранённый адрес");
+            let (verified, detail) = match checks.get(&key) {
+                Some(Ok(status)) => (
+                    true,
+                    status.map_or_else(
+                        || "TLS подтверждён".to_owned(),
+                        |status| format!("TLS подтверждён · HTTP {status}"),
+                    ),
+                ),
+                Some(Err(error)) => (false, error.clone()),
+                None if !is_meta_ip(&manager.meta_ranges, ip) => {
+                    (false, "вне подтверждённых префиксов Meta".into())
+                }
+                None => (false, "ожидает проверки".into()),
+            };
+            let old = entry.addresses.iter().find(|record| record.ip == ip);
+            let verified_at = if verified {
+                now
+            } else {
+                old.map_or(0, |record| record.verified_at)
+            };
+            verified_now |= verified;
+            if !verified && !detail.starts_with("ожидает") {
+                last_failure = Some(detail.clone());
+            }
+            entry.addresses.retain(|record| record.ip != ip);
+            entry.addresses.push(Address {
+                ip,
+                asn: asns[&ip],
+                resolver: resolver.to_string(),
+                checked_at: now,
+                verified_at,
+                result: detail,
+                pinned: pins.contains(&key),
+            });
+        }
+        if !verified_now
+            && entry.observed_at != 0
+            && now.saturating_sub(entry.observed_at) <= 300
+            && let Some(address) = entry.addresses.iter().find(|record| {
+                record.checked_at == now
+                    && record.asn.is_some()
+                    && record.resolver != "сохранённый адрес"
+                    && (record.result.starts_with("TCP:")
+                        || record.result == "TLS: тайм-аут"
+                        || record.result.starts_with("TLS: Connection reset")
+                        || record.result.starts_with("TLS: unexpected end of file"))
+            })
+        {
+            recovery.push((host.clone(), address.ip));
+        }
+        entry.addresses.sort_unstable_by_key(|addr| {
+            (
+                !addr.pinned,
+                std::cmp::Reverse(addr.verified_at),
+                std::cmp::Reverse(addr.checked_at),
+            )
+        });
+        entry.addresses.truncate(12);
+        entry.checked_at = now;
+        entry.last_failure = if entry.dns_addresses == 0 {
+            Some("защищённый DNS не вернул адреса".into())
+        } else if !verified_now {
+            last_failure.or_else(|| result.as_ref().err().cloned())
+        } else {
+            None
+        };
+    }
+    for (host, entry) in &mut knowledge.hosts {
+        for address in &mut entry.addresses {
+            address.pinned = pins.contains(&(host.clone(), address.ip));
+        }
+    }
+    knowledge.checked_at = now;
+    knowledge.error = result.as_ref().err().cloned();
+    if enabled(&state) && !recovery.is_empty() {
+        std::fs::create_dir_all(&runtime).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(&(now, recovery)).map_err(|error| error.to_string())?;
+        atomic_write(&runtime.join("meta-discovery-requests.json"), &bytes)?;
+    }
+    knowledge.persist(&state)?;
+    result
 }
 
 pub fn remove_from_env() -> Result<(), String> {
     let paths = MetaDnsPaths::from_env();
+    let (state, runtime) = state_dirs(&paths);
+    let _lock = state_lock(&state)?;
     let mut manager =
         MetaDnsManager::new(DirectMetaNetwork::new(None), SystemNdm::default(), paths);
-    manager.remove_owned()
+    manager.remove_owned()?;
+    let mut knowledge = Knowledge::load(&state);
+    for host in knowledge.hosts.values_mut() {
+        for address in &mut host.addresses {
+            address.pinned = false;
+        }
+    }
+    let _ = std::fs::remove_file(runtime.join("meta-discovery-requests.json"));
+    for name in [
+        "meta-observed-v4.json",
+        "meta-observed-v6.json",
+        "meta-observed-dual.json",
+    ] {
+        let _ = std::fs::remove_file(runtime.join(name));
+    }
+    knowledge.persist(&state)
 }
 
 pub async fn run_scheduler() -> Result<(), String> {
+    let paths = MetaDnsPaths::from_env();
+    let (state, _) = state_dirs(&paths);
     let mut scheduler = MetaDnsScheduler::from_env();
     let mut lists = crate::list_update::ListUpdater::from_env();
     let meta_disabled = std::env::var("R2O_META_DNS_DISABLED").as_deref() == Ok("1");
+    let mut sync = Box::pin(async {
+        loop {
+            if enabled(&state) && !meta_disabled {
+                let _ = lists.update_meta().await;
+            }
+            sleep(Duration::from_secs(3600)).await;
+        }
+    });
     loop {
-        if let Err(error) = lists.tick().await {
-            append_log(
-                &scheduler.log,
-                &format!("ошибка обновления списков: {error}"),
-            );
+        let cycle = async {
+            if enabled(&state) && !meta_disabled {
+                if let Err(error) = scheduler.tick().await {
+                    append_log(&scheduler.log, &error);
+                }
+            }
+            sleep(scheduler.interval).await;
+        };
+        tokio::select! {
+            _ = &mut sync => unreachable!(),
+            _ = cycle => {},
         }
-        if !meta_disabled && let Err(error) = scheduler.tick().await {
-            append_log(
-                &scheduler.log,
-                &format!("ошибка планировщика Meta DNS: {error}"),
-            );
-        }
-        sleep(scheduler.interval).await;
     }
 }
 
@@ -1138,6 +1403,9 @@ impl MetaDnsScheduler {
     }
 
     async fn tick(&mut self) -> Result<(), String> {
+        if self.explicit_run_at.is_none() {
+            return refresh_knowledge(false).await;
+        }
         let clock = local_clock()?;
         let offset = self.refresh_offset()?;
         let run_at = self.run_at(offset);
@@ -1153,7 +1421,7 @@ impl MetaDnsScheduler {
         };
         write_attempt(&self.attempt, &next)?;
         append_log(&self.log, "обновление DNS Instagram/WhatsApp: старт");
-        match refresh_from_env().await {
+        match refresh_knowledge(false).await {
             Ok(()) => {
                 write_attempt(
                     &self.attempt,
@@ -1366,30 +1634,7 @@ pub(crate) fn random_u16() -> Result<u16, String> {
     Ok(u16::from_ne_bytes(bytes))
 }
 
-fn resolve_ca_bundle() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("R2O_IP_CA_BUNDLE") {
-        let path = PathBuf::from(path);
-        return if path.is_file() {
-            Ok(path)
-        } else {
-            Err(format!(
-                "набор сертификатов CA недоступен для чтения: {}",
-                path.display()
-            ))
-        };
-    }
-    for candidate in [
-        PathBuf::from("/opt/etc/ssl/certs/ca-certificates.crt"),
-        PathBuf::from("/etc/ssl/certs/ca-certificates.crt"),
-    ] {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err("системный набор сертификатов CA для проверки узлов Meta недоступен".into())
-}
-
-pub fn parse_meta_ranges(input: &str) -> Result<Vec<(u32, u8)>, String> {
+pub fn parse_meta_ranges(input: &str) -> Result<Vec<(IpAddr, u8)>, String> {
     let mut ranges = Vec::new();
     for line in input.lines() {
         let line = line.split('#').next().unwrap_or_default().trim();
@@ -1399,44 +1644,25 @@ pub fn parse_meta_ranges(input: &str) -> Result<Vec<(u32, u8)>, String> {
         let Some((address, prefix)) = line.split_once('/') else {
             continue;
         };
-        let (Ok(address), Ok(prefix)) = (address.parse::<Ipv4Addr>(), prefix.parse::<u8>()) else {
+        let (Ok(address), Ok(prefix)) = (address.parse::<IpAddr>(), prefix.parse::<u8>()) else {
             continue;
         };
-        if prefix > 32 {
-            continue;
+        let valid = match address {
+            IpAddr::V4(_) => (8..=32).contains(&prefix),
+            IpAddr::V6(_) => (16..=128).contains(&prefix),
+        };
+        if valid {
+            ranges.push((address, prefix));
         }
-        let network = u32::from(address);
-        let mask = if prefix == 0 {
-            0
-        } else {
-            u32::MAX << (32 - u32::from(prefix))
-        };
-        ranges.push((network & mask, prefix));
     }
     Ok(ranges)
 }
 
 fn is_managed_host(host: &str) -> bool {
-    META_HOSTS.contains(&host)
+    meta_family(host).is_some()
 }
 
-fn meta_family(host: &str) -> Option<&'static str> {
-    if host == "instagram.com"
-        || (host.ends_with(".instagram.com") && host != "instagram.c10r.instagram.com")
-        || host.ends_with(".cdninstagram.com")
-        || host == "instagram.c10r.instagram.com"
-    {
-        Some("instagram")
-    } else if host.ends_with(".fbcdn.net") {
-        Some("fbcdn")
-    } else if host.ends_with(".whatsapp.net") || host.ends_with(".whatsapp.com") {
-        Some("whatsapp")
-    } else {
-        None
-    }
-}
-
-fn read_manifest(path: &Path) -> Result<Vec<(String, Ipv4Addr)>, String> {
+fn read_manifest(path: &Path) -> Result<Vec<(String, IpAddr)>, String> {
     let input = match std::fs::read_to_string(path) {
         Ok(input) => input,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1457,7 +1683,7 @@ fn read_manifest(path: &Path) -> Result<Vec<(String, Ipv4Addr)>, String> {
         if !is_managed_host(host) {
             continue;
         }
-        if let Ok(address) = address.parse::<Ipv4Addr>() {
+        if let Ok(address) = address.parse::<IpAddr>() {
             pairs.insert((host.to_string(), address.to_string()));
         }
     }
@@ -1631,28 +1857,16 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[test]
-    fn direct_dns_results_are_unique_and_bounded() {
-        let mut addresses = Vec::new();
-        for last_octet in 1..=10 {
-            append_address(&mut addresses, Ipv4Addr::new(157, 240, 0, last_octet));
-        }
-        append_address(&mut addresses, Ipv4Addr::new(157, 240, 0, 1));
-        assert_eq!(addresses.len(), DNS_ADDRESS_LIMIT);
-        assert_eq!(addresses[0], Ipv4Addr::new(157, 240, 0, 1));
-        assert_eq!(addresses[7], Ipv4Addr::new(157, 240, 0, 8));
-    }
-
     struct FakeNetwork {
-        answers: Mutex<Result<BTreeMap<String, Vec<Ipv4Addr>>, String>>,
+        answers: Mutex<Result<BTreeMap<String, Vec<IpAddr>>, String>>,
         default_verified: bool,
-        verified: BTreeSet<(String, Ipv4Addr)>,
-        rejected: BTreeSet<(String, Ipv4Addr)>,
-        probes: Mutex<Vec<(String, Ipv4Addr)>>,
+        verified: BTreeSet<(String, IpAddr)>,
+        rejected: BTreeSet<(String, IpAddr)>,
+        probes: Mutex<Vec<(String, IpAddr)>>,
     }
 
     impl FakeNetwork {
-        fn with_answers(answers: BTreeMap<String, Vec<Ipv4Addr>>) -> Self {
+        fn with_answers(answers: BTreeMap<String, Vec<IpAddr>>) -> Self {
             Self {
                 answers: Mutex::new(Ok(answers)),
                 default_verified: true,
@@ -1664,11 +1878,11 @@ mod tests {
     }
 
     impl MetaNetwork for FakeNetwork {
-        fn resolve<'a>(&'a self) -> NetFuture<'a, Result<BTreeMap<String, Vec<Ipv4Addr>>, String>> {
+        fn resolve<'a>(&'a self) -> NetFuture<'a, Result<BTreeMap<String, Vec<IpAddr>>, String>> {
             Box::pin(async move { self.answers.lock().unwrap().clone() })
         }
 
-        fn verify<'a>(&'a self, host: &'a str, address: Ipv4Addr) -> NetFuture<'a, bool> {
+        fn verify<'a>(&'a self, host: &'a str, address: IpAddr) -> NetFuture<'a, bool> {
             Box::pin(async move {
                 self.probes
                     .lock()
@@ -1685,7 +1899,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeNdm {
-        records: BTreeSet<(String, Ipv4Addr)>,
+        records: BTreeSet<(String, IpAddr)>,
         fail_add: bool,
         empty_config: bool,
         saves: usize,
@@ -1704,7 +1918,7 @@ mod tests {
             Ok(config)
         }
 
-        fn add(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
+        fn add(&mut self, host: &str, address: IpAddr) -> Result<(), String> {
             self.mutations.push(format!("add {host} {address}"));
             if self.fail_add {
                 return Err("injected add failure".into());
@@ -1713,7 +1927,7 @@ mod tests {
             Ok(())
         }
 
-        fn remove(&mut self, host: &str, address: Ipv4Addr) -> Result<(), String> {
+        fn remove(&mut self, host: &str, address: IpAddr) -> Result<(), String> {
             self.mutations.push(format!("remove {host} {address}"));
             self.records.remove(&(host.to_string(), address));
             Ok(())
@@ -1881,7 +2095,7 @@ esac
         manager
     }
 
-    fn answer(host: &str, addresses: &[&str]) -> (String, Vec<Ipv4Addr>) {
+    fn answer(host: &str, addresses: &[&str]) -> (String, Vec<IpAddr>) {
         (
             host.to_string(),
             addresses
@@ -2102,7 +2316,7 @@ esac
     #[tokio::test]
     async fn empty_ndm_read_fails_closed_without_changing_manifest_or_dns() {
         let paths = paths("empty-config");
-        let owned: Ipv4Addr = "157.240.9.170".parse().unwrap();
+        let owned: IpAddr = "157.240.9.170".parse().unwrap();
         std::fs::write(&paths.manifest, format!("instagram.com {owned}\n")).unwrap();
         let network = FakeNetwork::with_answers(BTreeMap::from([answer(
             "instagram.com",
@@ -2126,7 +2340,7 @@ esac
     #[tokio::test]
     async fn family_fallback_rechecks_the_borrowed_name_and_never_crosses_families() {
         let paths = paths("family-fallback");
-        let borrowed: Ipv4Addr = "57.144.245.32".parse().unwrap();
+        let borrowed: IpAddr = "57.144.245.32".parse().unwrap();
         let network = FakeNetwork {
             answers: Mutex::new(Ok(BTreeMap::from([
                 answer("web.whatsapp.com", &["57.144.245.32"]),
@@ -2180,8 +2394,8 @@ esac
     #[test]
     fn remove_uses_the_ownership_manifest_and_keeps_user_mappings() {
         let paths = paths("remove");
-        let owned: Ipv4Addr = "157.240.9.174".parse().unwrap();
-        let user: Ipv4Addr = "157.240.9.175".parse().unwrap();
+        let owned: IpAddr = "157.240.9.174".parse().unwrap();
+        let user: IpAddr = "157.240.9.175".parse().unwrap();
         std::fs::write(&paths.manifest, format!("instagram.com {owned}\n")).unwrap();
         let mut ndm = FakeNdm::default();
         ndm.records.insert(("instagram.com".into(), owned));
@@ -2208,6 +2422,77 @@ esac
         assert!(!paths.manifest.exists());
         assert_eq!(manager.ndm.saves, 1);
         let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
+    #[tokio::test]
+    async fn new_meta_hostname_needs_bgp_and_exact_tls_before_aaaa_is_pinned() {
+        let paths = paths("new-whatsapp-ipv6");
+        let edge: IpAddr = "2a03:2880:f001:face::2".parse().unwrap();
+        let wrong_tls: IpAddr = "2a03:2880:f001:face::3".parse().unwrap();
+        let outside: IpAddr = "2606:4700::1111".parse().unwrap();
+        std::fs::write(&paths.meta_ranges, "2a03:2880::/32\n157.240.0.0/16\n").unwrap();
+        let host = "media-new.whatsapp.net";
+        let mut network = FakeNetwork::with_answers(BTreeMap::from([(
+            host.into(),
+            vec![outside, wrong_tls, edge],
+        )]));
+        network.rejected.insert((host.into(), wrong_tls));
+        let mut manager = manager(network, FakeNdm::default(), paths.clone());
+        manager.refresh().await.unwrap();
+        assert_eq!(
+            read_manifest(&paths.manifest).unwrap(),
+            [(host.into(), edge)]
+        );
+        assert!(!manager.ndm.records.contains(&(host.into(), outside)));
+        assert!(!manager.ndm.records.contains(&(host.into(), wrong_tls)));
+        assert!(
+            !manager
+                .network
+                .probes
+                .lock()
+                .unwrap()
+                .contains(&(host.into(), outside))
+        );
+        manager.remove_owned().unwrap();
+        assert!(manager.ndm.records.is_empty());
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
+    }
+
+    #[test]
+    fn dnsmasq_removal_matches_only_an_owned_section_and_its_current_fields() {
+        let ip = "2a03:2880::1".parse().unwrap();
+        let host = "media-new.whatsapp.net";
+        let key = format!("dhcp.{}", dnsmasq_section(host, ip));
+        let record = format!("{key}=hostrecord\n{key}.name='{host}'\n{key}.ip='{ip}'\n");
+        assert!(uci_owned_record(&record, &key, host, ip));
+        assert!(!uci_owned_record(
+            &record.replace(&key, "dhcp.user"),
+            &key,
+            host,
+            ip
+        ));
+        assert!(!uci_owned_record(
+            &record,
+            &key,
+            host,
+            "2a03:2880::2".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn persistent_disable_marker_survives_reload_and_lock_is_exclusive() {
+        let paths = paths("disabled");
+        let state = paths.r2o_dir.join("state");
+        let lock = state_lock(&state).unwrap();
+        assert!(state_lock(&state).is_err());
+        assert!(enabled(&state));
+        atomic_write(&state.join("meta-protection.disabled"), b"0\n").unwrap();
+        drop(lock);
+        assert!(state_lock(&state).is_ok());
+        assert!(!enabled(&state));
+        std::fs::remove_file(state.join("meta-protection.disabled")).unwrap();
+        assert!(enabled(&state));
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
     }
 
     #[test]

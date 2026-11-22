@@ -71,7 +71,7 @@ pub(crate) struct DohTls {
 static DOH_TLS_CACHE: LazyLock<Mutex<HashMap<Option<PathBuf>, Result<Arc<DohTls>, String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn doh_tls(ca_bundle: Option<&Path>) -> Result<Arc<DohTls>, String> {
+pub(crate) fn doh_tls(ca_bundle: Option<&Path>) -> Result<Arc<DohTls>, String> {
     let key = ca_bundle.map(Path::to_path_buf);
     let mut cache = DOH_TLS_CACHE.lock().expect("кэш TLS DoH повреждён");
     if let Some(cached) = cache.get(&key) {
@@ -400,21 +400,31 @@ async fn query_endpoint(
     qtype: u16,
     outbound: &OutboundConnector,
 ) -> Result<Vec<IpAddr>, String> {
-    let query_id: u16 = rand::random();
+    let query_id = rand::random();
     let query = crate::doh_wire::encode_question(domain, qtype, query_id)?;
-    let body = if endpoint.http2 {
+    let body = query_wire(tls, endpoint, &query, outbound).await?;
+    crate::doh_wire::parse_response(&body, query_id)
+}
+
+async fn query_wire(
+    tls: &DohTls,
+    endpoint: &DohEndpoint,
+    query: &[u8],
+    outbound: &OutboundConnector,
+) -> Result<Vec<u8>, String> {
+    if endpoint.http2 {
         https_post_h2_with_tls_config(
             endpoint.ip,
             endpoint.host,
             "/dns-query",
             &[],
             "application/dns-message",
-            &query,
+            query,
             outbound,
             Arc::clone(&tls.h2),
             DOH_REQUEST_TIMEOUT,
         )
-        .await?
+        .await
     } else {
         https_post_with_tls_config_timeout(
             endpoint.ip,
@@ -422,14 +432,46 @@ async fn query_endpoint(
             "/dns-query",
             &[],
             "application/dns-message",
-            &query,
+            query,
             outbound,
             Arc::clone(&tls.h1),
             DOH_REQUEST_TIMEOUT,
         )
-        .await?
-    };
-    crate::doh_wire::parse_response(&body, query_id)
+        .await
+    }
+}
+
+pub(crate) async fn protected_address_lookup(
+    domain: &str,
+    tls: &DohTls,
+) -> Vec<(IpAddr, &'static str)> {
+    let outbound = OutboundConnector::direct();
+    let replies = futures_util::future::join_all(DOH_ENDPOINTS.iter().flat_map(|endpoint| {
+        let outbound = &outbound;
+        [1, 28].map(move |qtype| async move {
+            let parsed = async {
+                let query =
+                    r2k_core::dns::build_address_query(rand::random(), domain, qtype).ok()?;
+                let wire = query_wire(tls, endpoint, &query, outbound).await.ok()?;
+                r2k_core::dns::parse_address_reply(&wire, &query, domain).ok()
+            };
+            (endpoint.host, parsed.await.unwrap_or_default())
+        })
+    }))
+    .await;
+    // Каждый источник получает место в очереди до повторного адреса другого источника.
+    let mut result = Vec::new();
+    for i in 0..crate::doh_wire::MAX_ADDRESSES {
+        for (source, addresses) in &replies {
+            if let Some(ip) = addresses.get(i)
+                && is_usable_edge_ip(ip)
+                && !result.iter().any(|(found, _)| found == ip)
+            {
+                result.push((*ip, *source));
+            }
+        }
+    }
+    result
 }
 
 /// Проверить CA bundle до старта, как C `tg_tls_client_context` в main.c:

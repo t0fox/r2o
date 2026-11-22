@@ -1705,13 +1705,31 @@ async fn probe_doq_on_with_roots(
     timeout: Duration,
     roots: Arc<RootCertStore>,
 ) -> DnsHealthResult {
+    probe_doq_wire(socket, address, host, timeout, roots, None)
+        .await
+        .0
+}
+
+async fn probe_doq_wire(
+    socket: std::net::UdpSocket,
+    address: SocketAddr,
+    host: &str,
+    timeout: Duration,
+    roots: Arc<RootCertStore>,
+    question: Option<(&[u8], &str)>,
+) -> (DnsHealthResult, Vec<std::net::IpAddr>) {
     let started = Instant::now();
     let mut result = DnsHealthResult::default();
     let endpoint = match trusted_quic_dns_endpoint(socket, b"doq", roots) {
         Ok(endpoint) => endpoint,
-        Err(error) => return result.fail(DnsHealthFailure::Local, format!("DoQ: {error}")),
+        Err(error) => {
+            return (
+                result.fail(DnsHealthFailure::Local, format!("DoQ: {error}")),
+                Vec::new(),
+            );
+        }
     };
-    let query = dns_query_frame(0);
+    let query = question.map_or_else(|| dns_query_frame(0), |(wire, _)| frame_query(wire));
     let result_from_runtime = tokio::time::timeout(timeout, async {
         let connection = connect_quic_dns(&endpoint, address, host)
             .await
@@ -1769,9 +1787,17 @@ async fn probe_doq_on_with_roots(
     })
     .await;
     endpoint.close(quinn::VarInt::from_u32(0), b"");
+    let mut addresses = Vec::new();
     match result_from_runtime {
         Ok(Ok((body, roundtrip))) => {
-            result.dns_reply = dns_probe_reply(&body, 0);
+            result.dns_reply = match question {
+                Some((query, name)) => {
+                    addresses =
+                        r2k_core::dns::parse_address_reply(&body, query, name).unwrap_or_default();
+                    !addresses.is_empty()
+                }
+                None => dns_probe_reply(&body, 0),
+            };
             result.answer_rtt_ms = result.dns_reply.then(|| roundtrip.as_millis() as u64);
             result.reason = if result.dns_reply {
                 "DoQ: получен корректный DNS-ответ".into()
@@ -1784,7 +1810,7 @@ async fn probe_doq_on_with_roots(
         Err(_) => result = result.fail(DnsHealthFailure::Network, "DoQ: истёк срок проверки"),
     }
     result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
-    result
+    (result, addresses)
 }
 
 async fn probe_doh3_on(
@@ -1937,6 +1963,83 @@ fn dns_roots() -> Arc<RootCertStore> {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         })
     }))
+}
+
+fn frame_query(query: &[u8]) -> Vec<u8> {
+    let mut frame = (query.len() as u16).to_be_bytes().to_vec();
+    frame.extend_from_slice(query);
+    frame
+}
+
+/// Строгий A/AAAA fallback через те же DoT и DoQ транспорты, что и DNS recovery.
+pub async fn meta_address_fallback(name: &str) -> Vec<(std::net::IpAddr, &'static str)> {
+    use r2k_core::dns::{build_address_query, parse_address_reply};
+    use std::net::{Ipv4Addr, UdpSocket};
+    if r2k_core::meta::product(name).is_none() {
+        return Vec::new();
+    }
+    let name_for_dot = name.to_owned();
+    let dot = tokio::task::spawn_blocking(move || -> Option<Vec<std::net::IpAddr>> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let address = SocketAddr::new(Ipv4Addr::new(8, 8, 8, 8).into(), 853);
+        let stream = connect_tcp(address, None, Duration::from_secs(3)).ok()?;
+        let mut tls = tls_connect(
+            stream,
+            "dns.google",
+            &[b"dot".to_vec()],
+            deadline,
+            dns_roots(),
+            None,
+        )
+        .ok()?;
+        let mut ips = Vec::new();
+        for (id, qtype) in [(1, 1), (2, 28)] {
+            let query = build_address_query(id, &name_for_dot, qtype).ok()?;
+            let reply = set_tcp_timeout(&tls.sock, deadline)
+                .and_then(|()| tls.write_all(&frame_query(&query)))
+                .and_then(|()| tls.flush())
+                .and_then(|()| read_dns_frame(&mut tls, deadline));
+            if let Ok(reply) = reply {
+                ips.extend(parse_address_reply(&reply, &query, &name_for_dot).unwrap_or_default());
+            } else {
+                break;
+            }
+        }
+        Some(ips)
+    });
+    let quic_query = |qtype| async move {
+        let Ok(query) = build_address_query(0, name, qtype) else {
+            return Vec::new();
+        };
+        let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+            return Vec::new();
+        };
+        if socket.set_nonblocking(true).is_err() {
+            return Vec::new();
+        }
+        probe_doq_wire(
+            socket,
+            SocketAddr::new(Ipv4Addr::new(94, 140, 14, 140).into(), 853),
+            "unfiltered.adguard-dns.com",
+            Duration::from_secs(3),
+            dns_roots(),
+            Some((&query, name)),
+        )
+        .await
+        .1
+    };
+    let (dot, ipv4, ipv6) = tokio::join!(dot, quic_query(1), quic_query(28));
+    ipv4.into_iter()
+        .chain(ipv6)
+        .map(|ip| (ip, "doq:unfiltered.adguard-dns.com"))
+        .chain(
+            dot.ok()
+                .flatten()
+                .into_iter()
+                .flatten()
+                .map(|ip| (ip, "dot:dns.google")),
+        )
+        .collect()
 }
 
 /// Проверить DNS endpoint из конфигурации `dns_services`.

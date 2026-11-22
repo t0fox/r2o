@@ -149,3 +149,43 @@ fn configured_resolvers_cover_all_three_requested_providers() {
         ]
     );
 }
+
+#[test]
+fn aaaa_reply_requires_correct_question_and_rejects_unrelated_answers() {
+    use r2k_core::dns::{build_address_query, parse_address_reply};
+    use std::net::{IpAddr, Ipv6Addr};
+    let host = "cdn.whatsapp.net";
+    let query = build_address_query(37, host, 28).unwrap();
+    let mut answer = answer_header(&query, 2);
+    let ip: Ipv6Addr = "2a03:2880:f100:83:face:b00c:0:25de".parse().unwrap();
+    answer.extend_from_slice(&[0xc0, 0x0c, 0, 28, 0, 1, 0, 0, 0, 30, 0, 16]);
+    answer.extend_from_slice(&ip.octets());
+    push_a(&mut answer, 0xc00c, [157, 240, 0, 174]);
+    assert_eq!(
+        parse_address_reply(&answer, &query, host).unwrap(),
+        [IpAddr::V6(ip)]
+    );
+    let wrong_host = build_address_query(37, "cdn.facebook.net", 28).unwrap();
+    let wrong_type = build_address_query(37, host, 1).unwrap();
+    for wrong in [wrong_host, wrong_type] {
+        assert_eq!(
+            parse_address_reply(&answer, &wrong, host),
+            Err(DnsError::Mismatch)
+        );
+    }
+}
+
+#[test]
+fn observation_only_accepts_meta_questions_and_supported_types() {
+    use r2k_core::dns::{build_address_query, observed_meta_question};
+    let query = build_address_query(5, "New-CDN.WhatsApp.net", 28).unwrap();
+    assert_eq!(
+        observed_meta_question(&query).as_deref(),
+        Some("new-cdn.whatsapp.net")
+    );
+    assert!(observed_meta_question(&answer_header(&query, 0)).is_none());
+    assert!(
+        observed_meta_question(&build_a_query(5, "whatsapp.net.example.org").unwrap()).is_none()
+    );
+    assert!(observed_meta_question(&query[..query.len() - 3]).is_none());
+}
