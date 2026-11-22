@@ -549,8 +549,7 @@ pub fn mark_bad_previous_release(root: &Path) -> Result<Value, UpdateError> {
     state["last_ok"] = json!(false);
     state["install_stage"] = json!(3);
     state["last_release"] = json!(bad_release);
-    state["last_message"] =
-        json!("Релиз не прошёл runtime-проверку; предыдущая версия восстановлена");
+    state["last_message"] = json!("Релиз не прошёл проверку служб; предыдущий слот снова активен");
     write_state(root, &state)?;
     Ok(json!({"current":slots.current,"bad_release":bad_release}))
 }

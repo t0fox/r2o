@@ -6,6 +6,18 @@ export PATH
 [ ! -r "$SCRIPT_DIR/r2o-policy-mark.sh" ] || . "$SCRIPT_DIR/r2o-policy-mark.sh"
 
 ROOT=${R2O_DIR:-/opt/r2o}
+
+clear_inherited_release_paths() {
+    # После смены слота его скрипты определяет новый адаптер.
+    case "${R2O_FIREWALL:-}" in
+        "${ROOT%/}"/releases/*/router/r2o-firewall.sh) unset R2O_FIREWALL ;;
+    esac
+    case "${R2O_PPE_ADAPTER:-}" in
+        "${ROOT%/}"/releases/*/router/r2o-ppe-deoffload.sh) unset R2O_PPE_ADAPTER ;;
+    esac
+}
+clear_inherited_release_paths
+
 CONF=${R2O_CONFIG:-$ROOT/config}
 INIT=${R2O_INIT:-/opt/etc/init.d/S99r2o}
 PROC=${R2O_PROC:-/proc}
@@ -21,8 +33,6 @@ R2O_INSTAGRAM_SCHED_ATTEMPT=${R2O_INSTAGRAM_SCHED_ATTEMPT:-$RUNTIME/r2o-instagra
 SOCK4=$RUN/r2o-datapath4.sock
 SOCK6=$RUN/r2o-datapath6.sock
 CATALOG=$STATE/catalog.json
-FIREWALL=${R2O_FIREWALL:-$SCRIPT_DIR/r2o-firewall.sh}
-PPE_ADAPTER=${R2O_PPE_ADAPTER:-$SCRIPT_DIR/r2o-ppe-deoffload.sh}
 # Объединённый режим: один процесс на компонент, внутри независимые
 # IPv4/IPv6-обработчики. Раздельные PID-файлы остаются для аварийного
 # отката и для совместимости со старыми release.
@@ -86,6 +96,7 @@ RT_DIRECT_ECH_DOMAINS=${R2O_RT_DIRECT_ECH_DOMAINS:-"rutracker.org www.rutracker.
 
 # shellcheck disable=SC1090  # конфигурация owner-managed, путь задаётся выше
 [ ! -r "$CONF" ] || . "$CONF"
+FIREWALL=${R2O_FIREWALL:-$SCRIPT_DIR/r2o-firewall.sh}
 STATE=${STATE_DIR:-$ROOT/state}
 QUEUE4=${QUEUE_NUM:-2000}
 QUEUE6=${QUEUE_NUM6:-2001}
@@ -1662,6 +1673,7 @@ case "${1:-}" in
     start)
         if [ -e "$ROOT/state/update-pending.json" ]; then
             "$MANAGER" update-recover --root "$ROOT" || exit 1
+            clear_inherited_release_paths
             exec "$INIT" start
         fi
         if [ -f "$SCRIPT_DIR/update-schema" ]; then

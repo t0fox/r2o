@@ -754,6 +754,10 @@ fn router_update_recovers_after_kill_and_preserves_operator_data() {
         &service,
         format!(
             r#"#!/bin/sh
+if [ -n "${{R2O_FIXTURE_PPE:-}}" ]; then
+    [ -z "${{R2O_FIREWALL+x}}" ] || exit 3
+    [ "$R2O_PPE_ADAPTER" = "$R2O_FIXTURE_PPE" ] || exit 4
+fi
 printf '%s %s\n' "$1" "$(sed -n '2p' '{root}/release-slots')" >> '{dir}/events'
 case "$1" in
     update-start)
@@ -792,6 +796,9 @@ esac
     fs::write(temp.0.join("hold"), []).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-manager"))
         .args(args)
+        .env("R2O_FIREWALL", root.join("releases/r2o-pruned/router/r2o-firewall.sh"))
+        .env("R2O_PPE_ADAPTER", temp.0.join("custom-ppe"))
+        .env("R2O_FIXTURE_PPE", temp.0.join("custom-ppe"))
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);

@@ -1733,10 +1733,11 @@ fn start_update_worker(
         command.arg(action).arg("--root").arg(&config.manager_root);
         command
     };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    command.stdin(Stdio::null());
+    // Вывод установки и отката сохраняется в журнале панели после её остановки.
+    if !matches!(action, "update-install" | "update-rollback") {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

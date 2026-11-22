@@ -37,9 +37,22 @@ fn clear(root: &Path) -> Result<(), UpdateError> {
 }
 
 /// Вызов адаптера ограничен, даже если дочерняя служба зависла.
-fn service(adapter: &Path, action: &str) -> Result<(), UpdateError> {
+fn service(root: &Path, adapter: &Path, action: &str) -> Result<(), UpdateError> {
     let mut command = Command::new(adapter);
     command.arg(action).stdin(Stdio::null());
+    // Встроенные пути определяет адаптер запускаемого слота, включая старые выпуски.
+    let releases = root.join("releases");
+    for (variable, relative) in [
+        ("R2O_FIREWALL", "router/r2o-firewall.sh"),
+        ("R2O_PPE_ADAPTER", "router/r2o-ppe-deoffload.sh"),
+    ] {
+        if std::env::var_os(variable).is_some_and(|value| {
+            let path = Path::new(&value);
+            path.starts_with(&releases) && path.ends_with(relative)
+        }) {
+            command.env_remove(variable);
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -93,7 +106,7 @@ fn health(root: &Path, adapter: &Path, target: &str) -> Result<(), UpdateError> 
         if current.current != target {
             return Err(io::Error::other("активный слот изменился во время проверки").into());
         }
-        if service(adapter, "update-health").is_ok() {
+        if service(root, adapter, "update-health").is_ok() {
             consecutive += 1;
             if consecutive == 3 {
                 return Ok(());
@@ -215,13 +228,13 @@ fn recover_running(
 ) -> Result<(), UpdateError> {
     if !tx.committed
         && read_install_slots(root)?.is_some_and(|slots| slots.current == tx.target)
-        && let Err(error) = service(adapter, "update-stop")
+        && let Err(error) = service(root, adapter, "update-stop")
     {
         // Ошибка остановки кандидата не должна оставлять его активным.
         eprintln!("r2o-manager: остановка при восстановлении: {error}");
     }
     recover(root, tx, reason)?;
-    service(adapter, "update-start")
+    service(root, adapter, "update-start")
 }
 
 fn watch_command(root: &Path, adapter: &Path) -> Result<std::process::Child, UpdateError> {
@@ -315,9 +328,9 @@ pub fn run_router_update(
             state["phase"] = json!("activate");
             write_state(root, &state)?;
         }
-        service(adapter, "update-stop")?;
+        service(root, adapter, "update-stop")?;
         let activated = activate_staged_update(root)?;
-        service(adapter, "update-start")?;
+        service(root, adapter, "update-start")?;
         health(root, adapter, &tx.target)?;
         let _lock = UpdateLock::acquire(root)?;
         tx.committed = true;
