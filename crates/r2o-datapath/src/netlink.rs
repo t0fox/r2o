@@ -19,6 +19,7 @@ pub const NFQA_IFINDEX_OUTDEV: u16 = 6;
 pub const NFQA_PAYLOAD: u16 = 10;
 pub const NFQA_CAP_LEN: u16 = 13;
 pub const NFQA_SKB_INFO: u16 = 14;
+pub const NFQA_UID: u16 = 16;
 pub const NFQA_CFG_CMD: u16 = 1;
 pub const NFQA_CFG_PARAMS: u16 = 2;
 pub const NFQA_CFG_QUEUE_MAXLEN: u16 = 3;
@@ -29,6 +30,7 @@ pub const NFQNL_CFG_CMD_UNBIND: u8 = 2;
 pub const NFQNL_COPY_PACKET: u8 = 2;
 pub const NFQA_CFG_F_FAIL_OPEN: u32 = 1;
 pub const NFQA_CFG_F_GSO: u32 = 1 << 2;
+pub const NFQA_CFG_F_UID_GID: u32 = 1 << 3;
 pub const NF_DROP: u32 = 0;
 pub const NF_ACCEPT: u32 = 1;
 
@@ -115,6 +117,7 @@ pub struct QueuePacket<'a> {
     pub hardware_protocol: Option<u16>,
     pub hook: Option<u8>,
     pub mark: Option<u32>,
+    pub socket_uid: Option<u32>,
     pub cap_len: Option<u32>,
     pub skb_info: Option<u32>,
     pub payload: Option<&'a [u8]>,
@@ -154,6 +157,9 @@ impl<'a> QueuePacket<'a> {
                 }
                 NFQA_MARK if value.len() >= 4 => {
                     packet.mark = Some(u32::from_be_bytes(value[..4].try_into().ok()?));
+                }
+                NFQA_UID if value.len() == 4 => {
+                    packet.socket_uid = Some(u32::from_be_bytes(value.try_into().ok()?));
                 }
                 NFQA_TIMESTAMP if value.len() >= 16 => {
                     let sec = u64::from_be_bytes(value[..8].try_into().ok()?);
@@ -253,6 +259,17 @@ pub fn config_params(
     max_len: u32,
     fail_open: bool,
 ) -> Vec<u8> {
+    config_params_with_owner(queue, sequence, copy_range, max_len, fail_open, false)
+}
+
+pub fn config_params_with_owner(
+    queue: u16,
+    sequence: u32,
+    copy_range: u32,
+    max_len: u32,
+    fail_open: bool,
+    socket_owner: bool,
+) -> Vec<u8> {
     let mut message = header(
         queue,
         message_type(NFQNL_MSG_CONFIG),
@@ -264,12 +281,13 @@ pub fn config_params(
     params[4] = NFQNL_COPY_PACKET;
     push_attr(&mut message, NFQA_CFG_PARAMS, &params);
     push_attr(&mut message, NFQA_CFG_QUEUE_MAXLEN, &max_len.to_be_bytes());
-    let flags = if fail_open { NFQA_CFG_F_FAIL_OPEN } else { 0 };
+    let owner_flag = if socket_owner { NFQA_CFG_F_UID_GID } else { 0 };
+    let flags = if fail_open { NFQA_CFG_F_FAIL_OPEN } else { 0 } | owner_flag;
     push_attr(&mut message, NFQA_CFG_FLAGS, &flags.to_be_bytes());
     push_attr(
         &mut message,
         NFQA_CFG_MASK,
-        &(NFQA_CFG_F_FAIL_OPEN | NFQA_CFG_F_GSO).to_be_bytes(),
+        &(NFQA_CFG_F_FAIL_OPEN | NFQA_CFG_F_GSO | owner_flag).to_be_bytes(),
     );
     finish(&mut message);
     message
@@ -377,6 +395,15 @@ mod tests {
             &params[52..56],
             &[0, 0, 0, (NFQA_CFG_F_FAIL_OPEN | NFQA_CFG_F_GSO) as u8]
         );
+        let params = config_params_with_owner(1, 4, 0xffff, 1024, true, true);
+        assert_eq!(
+            &params[44..48],
+            &(NFQA_CFG_F_FAIL_OPEN | NFQA_CFG_F_UID_GID).to_be_bytes()
+        );
+        assert_eq!(
+            &params[52..56],
+            &(NFQA_CFG_F_FAIL_OPEN | NFQA_CFG_F_GSO | NFQA_CFG_F_UID_GID).to_be_bytes()
+        );
     }
 
     #[test]
@@ -404,6 +431,7 @@ mod tests {
         packet_header[6] = 3;
         add_test_attr(&mut body, NFQA_PACKET_HDR, &packet_header, true);
         add_test_attr(&mut body, NFQA_MARK, &0x1234_u32.to_be_bytes(), true);
+        add_test_attr(&mut body, NFQA_UID, &411_u32.to_be_bytes(), true);
         add_test_attr(&mut body, NFQA_IFINDEX_OUTDEV, &7_u32.to_be_bytes(), true);
         let mut timestamp = [0; 16];
         timestamp[4..8].copy_from_slice(&1_700_000_000_u32.to_be_bytes());
@@ -422,6 +450,7 @@ mod tests {
         assert_eq!(parsed.hardware_protocol, Some(0x0800));
         assert_eq!(parsed.hook, Some(3));
         assert_eq!(parsed.mark, Some(0x1234));
+        assert_eq!(parsed.socket_uid, Some(411));
         assert_eq!(parsed.output_device, Some(7));
         assert_eq!(parsed.timestamp_ns, Some(1_700_000_000_123_456_000));
         assert_eq!(parsed.payload, Some(&[0xa5; 91][..]));

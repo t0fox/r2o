@@ -1,4 +1,5 @@
 use crate::engine::validate_runtime_plan;
+use crate::r2o_udp_hold::R2oUdpHoldBatch;
 use r2k_core::addr::Address;
 use r2k_core::control::{
     self, Ack, AppliedEvent, BindingContext, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR,
@@ -29,6 +30,12 @@ use std::time::{Duration, Instant};
 
 /// C `D2K_CTL_OUT_RING` (`datapath/ctl.c:21`) — ровно 65536 байт.
 const MAX_CONTROL_OUTPUT: usize = 64 * 1024;
+#[derive(Clone, Copy)]
+pub enum QuicSocketOwner<'a> {
+    Packet(u32),
+    Batch(&'a R2oUdpHoldBatch),
+}
+
 pub const MAX_NAME_PLANS: usize = 2048;
 /// C `probes[cap]` создаётся на `d2k_plantab_new(d2k_track_capacity(flows))`,
 /// где `--flows` по умолчанию 2048 (`d2kd.c:1141`, `session.c:334`).
@@ -594,6 +601,7 @@ impl NamePlans {
             controller_probe,
             hook == Some(crate::netlink::R2O_NF_INET_LOCAL_OUT),
             None,
+            None,
         )
     }
 
@@ -605,6 +613,7 @@ impl NamePlans {
         controller_probe: bool,
         local_output: bool,
         snapshot: Option<&[u8]>,
+        socket_owner: Option<QuicSocketOwner<'_>>,
     ) -> Option<&Plan> {
         let view = PacketView::parse(packet)?;
         if view.protocol == 17 {
@@ -663,10 +672,11 @@ impl NamePlans {
             }
             if local_output
                 && !controller_probe
-                && let Some(plan) = self.find_dns_doq_plan(
+                && let Some(plan) = self.find_dns_quic_plan(
                     SocketAddr::new(view.dst.as_ip_addr(), destination_port),
                     payload,
                     snapshot,
+                    socket_owner,
                 )
             {
                 return Some(plan);
@@ -2083,7 +2093,9 @@ impl NamePlans {
             return (true, control::ACK_OK);
         };
         let transport = body[1 + name_len];
-        let kind = if control::dns_doq_plan_endpoint(host.as_bytes()).is_some() {
+        let kind = if control::dns_doq_plan_endpoint(host.as_bytes()).is_some()
+            || control::dns_doh3_plan_scope(host.as_bytes()).is_some()
+        {
             2
         } else {
             1
@@ -2284,21 +2296,33 @@ impl NamePlans {
         Some(&entry.installed.plan)
     }
 
-    fn find_dns_doq_plan(
+    fn find_dns_quic_plan(
         &self,
         endpoint: SocketAddr,
         payload: &[u8],
         snapshot: Option<&[u8]>,
+        socket_owner: Option<QuicSocketOwner<'_>>,
     ) -> Option<&Plan> {
         if self.dns_plans.is_empty() {
             return None;
         }
+        let socket_uid = socket_owner.and_then(|owner| match owner {
+            QuicSocketOwner::Packet(uid) => Some(uid),
+            QuicSocketOwner::Batch(batch) => batch.socket_uid,
+        });
         let now = Instant::now();
-        if !self.dns_plans.iter().any(|(key, entry)| {
-            key.shape == SHAPE_QUIC
-                && entry.expires > now
-                && control::dns_doq_plan_endpoint(key.host.as_bytes()) == Some(endpoint)
-        }) {
+        let mut doq = false;
+        let mut doh3 = false;
+        for (key, entry) in &self.dns_plans {
+            if key.shape != SHAPE_QUIC || entry.expires <= now {
+                continue;
+            }
+            doq |= control::dns_doq_plan_endpoint(key.host.as_bytes()) == Some(endpoint);
+            doh3 |= socket_uid.is_some_and(|uid| {
+                control::dns_doh3_plan_scope(key.host.as_bytes()) == Some((endpoint, uid))
+            });
+        }
+        if !doq && !doh3 {
             return None;
         }
         let batch = snapshot.and_then(r2k_core::quic_snapshot::r2k_quic_snapshot_parse);
@@ -2306,9 +2330,31 @@ impl NamePlans {
         let datagrams = batch
             .as_ref()
             .map_or(single.as_slice(), |batch| batch.datagrams());
-        let sni = r2k_core::quic::r2k_quic_doq_sni(datagrams).ok()?;
+        let host = if doq && let Ok(sni) = r2k_core::quic::r2k_quic_doq_sni(datagrams) {
+            control::dns_doq_plan_key(endpoint, sni.as_deref().unwrap_or_default())?
+        } else if doh3 {
+            // Общий снимок QUIC не хранит UID. Для DoH3 нужен только вход с проверенным владельцем.
+            let sni = match socket_owner {
+                Some(QuicSocketOwner::Batch(batch)) => {
+                    let datagrams = batch
+                        .packets
+                        .iter()
+                        .map(|held| {
+                            let view = PacketView::parse(&held.packet)?;
+                            held.packet.get(view.udp_payload_range(&held.packet)?)
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    r2k_core::quic::r2k_quic_doh3_sni(&datagrams)
+                }
+                _ => r2k_core::quic::r2k_quic_doh3_sni(&single),
+            }
+            .ok()?;
+            control::dns_doh3_plan_key(endpoint, sni.as_deref().unwrap_or_default(), socket_uid?)?
+        } else {
+            return None;
+        };
         let key = NamePlanKey {
-            host: control::dns_doq_plan_key(endpoint, sni.as_deref().unwrap_or_default())?,
+            host,
             family: if endpoint.is_ipv4() { 4 } else { 6 },
             shape: SHAPE_QUIC,
         };
@@ -2987,7 +3033,8 @@ fn canonical_plan_name(bytes: &[u8], shape: u8) -> Option<String> {
 
 fn dns_bound_name(name: &[u8], family: u8, shape: u8) -> Option<String> {
     let endpoint = if shape == SHAPE_QUIC {
-        control::dns_doq_plan_endpoint(name)?
+        control::dns_doq_plan_endpoint(name)
+            .or_else(|| control::dns_doh3_plan_scope(name).map(|(endpoint, _)| endpoint))?
     } else if shape != SHAPE_HTTP && control::is_tcp_plan_shape(shape) {
         control::dns_tcp_plan_endpoint(name)?
     } else {
@@ -6800,10 +6847,12 @@ mod tests {
     }
 
     #[test]
-    fn doq_binding_requires_exact_local_endpoint_and_unambiguous_alpn() {
+    fn dns_quic_bindings_require_exact_endpoint_alpn_and_doh3_owner() {
+        use super::QuicSocketOwner;
         use crate::netlink::{
             R2O_NF_INET_LOCAL_IN, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
         };
+        use crate::r2o_udp_hold::R2oUdpHoldTable;
         use std::io::Cursor;
 
         let host = "resolver.example";
@@ -6888,6 +6937,7 @@ mod tests {
                 false,
                 true,
                 Some(&snapshot),
+                None,
             )
             .unwrap();
         let applied = plans.applied_event_for_plan(&split, 2, plan).unwrap();
@@ -6900,7 +6950,8 @@ mod tests {
                     out,
                     false,
                     false,
-                    Some(&snapshot)
+                    Some(&snapshot),
+                    None,
                 )
                 .is_none()
         );
@@ -6978,6 +7029,131 @@ mod tests {
                 .select_with_quic_host_at_hook(&packet6, None, out)
                 .is_none()
         );
+
+        let uid = 411;
+        assert!(control::dns_doh3_plan_key(endpoint, host.as_bytes(), 0).is_none());
+        assert!(control::dns_doh3_plan_key(endpoint, host.as_bytes(), u32::MAX).is_none());
+        let key = control::dns_doh3_plan_key(endpoint, host.as_bytes(), uid).unwrap();
+        assert_eq!(
+            control::dns_doh3_plan_scope(key.as_bytes()),
+            Some((endpoint, uid))
+        );
+        assert!(!plans.handle(&set(&key, 6)).ok);
+        let binding = plans.handle(&set(&key, 4)).binding_context.unwrap();
+        assert_eq!(binding.kind, 2);
+        let h3 = initial(host, b"\x02h3", 853);
+        let owner = Some(QuicSocketOwner::Packet(uid));
+        let plan = plans
+            .select_with_quic_snapshot_at_hook_probe(&h3, None, out, false, true, None, owner)
+            .unwrap();
+        assert_eq!(
+            plans.applied_event_for_plan(&h3, 4, plan).unwrap().binding,
+            binding
+        );
+        for other_uid in [None, Some(0), Some(uid + 1)] {
+            assert!(
+                plans
+                    .select_with_quic_snapshot_at_hook_probe(
+                        &h3,
+                        None,
+                        out,
+                        false,
+                        true,
+                        None,
+                        other_uid.map(QuicSocketOwner::Packet)
+                    )
+                    .is_none()
+            );
+        }
+        assert!(
+            plans
+                .select_with_quic_snapshot_at_hook_probe(&h3, None, out, true, true, None, owner)
+                .is_none()
+        );
+        assert!(
+            plans
+                .select_with_quic_snapshot_at_hook_probe(
+                    &h3,
+                    None,
+                    Some(R2O_NF_INET_POST_ROUTING),
+                    false,
+                    false,
+                    None,
+                    owner
+                )
+                .is_none()
+        );
+        for other in [
+            initial(host, b"\x03doq", 853),
+            initial(host, b"\x02h3\x03doq", 853),
+            initial(host, b"\x02h3", 8853),
+            initial("healthy.example", b"\x02h3", 853),
+        ] {
+            assert!(
+                plans
+                    .select_with_quic_snapshot_at_hook_probe(
+                        &other, None, out, false, true, None, owner
+                    )
+                    .is_none()
+            );
+        }
+        let (head, tail) = r2k_core::quic::r2k_quic_hello_split(&h3[28..], host).unwrap();
+        let snapshot = r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&head, &tail]).unwrap();
+        let head = udp_packet(&head, 853);
+        let tail = udp_packet(&tail, 853);
+        assert!(
+            plans
+                .select_with_quic_snapshot_at_hook_probe(
+                    &head,
+                    None,
+                    out,
+                    false,
+                    true,
+                    Some(&snapshot),
+                    owner,
+                )
+                .is_none()
+        );
+        let now = Instant::now();
+        for tail_uid in [Some(uid), Some(uid + 1), None] {
+            let mut holds = R2oUdpHoldTable::new();
+            holds.r2o_feed_owned(1, 0, Some(uid), &head, now);
+            holds.r2o_feed_owned(2, 0, tail_uid, &tail, now);
+            let batch = holds.r2o_take(&head).unwrap();
+            let plan = plans.select_with_quic_snapshot_at_hook_probe(
+                &head,
+                None,
+                out,
+                false,
+                true,
+                None,
+                Some(QuicSocketOwner::Batch(&batch)),
+            );
+            assert_eq!(plan.is_some(), tail_uid == Some(uid));
+        }
+        let key6 = control::dns_doh3_plan_key(ipv6, host.as_bytes(), uid).unwrap();
+        let binding6 = plans.handle(&set(&key6, 6)).binding_context.unwrap();
+        packet6.truncate(40);
+        packet6.extend_from_slice(&h3[20..]);
+        let plan = plans
+            .select_with_quic_snapshot_at_hook_probe(&packet6, None, out, false, true, None, owner)
+            .unwrap();
+        assert_eq!(
+            plans
+                .applied_event_for_plan(&packet6, 5, plan)
+                .unwrap()
+                .binding,
+            binding6
+        );
+        for (key, binding) in [(key, binding), (key6, binding6)] {
+            let del = control::encode_delete_name_bound(&key, 17, binding).unwrap();
+            assert!(
+                plans
+                    .handle(&control::read_frame(&mut Cursor::new(del)).unwrap())
+                    .ok
+            );
+        }
+        assert!(plans.dns_plans.is_empty());
     }
 
     #[test]

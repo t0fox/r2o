@@ -85,6 +85,7 @@ pub const COMMAND_DEL_NAME_BOUND: u16 = 0x0093;
 
 const DNS_TCP_PLAN_PREFIX: &str = "@dns-tcp/";
 const DNS_DOQ_PLAN_PREFIX: &str = "@dns-doq/";
+const DNS_DOH3_PLAN_PREFIX: &str = "@dns-doh3/";
 pub const DNS_PLAN_LEASE: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Ключ TLS-привязки с адресом, портом и видимым SNI. Пустое имя обозначает TLS без SNI.
@@ -94,6 +95,14 @@ pub fn dns_tcp_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
 
 pub fn dns_doq_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
     dns_plan_key(DNS_DOQ_PLAN_PREFIX, endpoint, sni)
+}
+
+/// У DoH3 и обычного HTTP/3 общий ALPN, поэтому ключ включает UID отдельного DNS-процесса.
+pub fn dns_doh3_plan_key(endpoint: SocketAddr, sni: &[u8], uid: u32) -> Option<String> {
+    if matches!(uid, 0 | u32::MAX) {
+        return None;
+    }
+    dns_plan_key(&format!("{DNS_DOH3_PLAN_PREFIX}{uid}/"), endpoint, sni)
 }
 
 fn dns_plan_key(prefix: &str, endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
@@ -131,6 +140,18 @@ pub fn dns_tcp_plan_endpoint(key: &[u8]) -> Option<SocketAddr> {
 
 pub fn dns_doq_plan_endpoint(key: &[u8]) -> Option<SocketAddr> {
     dns_plan_endpoint(DNS_DOQ_PLAN_PREFIX, key)
+}
+
+pub fn dns_doh3_plan_scope(key: &[u8]) -> Option<(SocketAddr, u32)> {
+    let key = std::str::from_utf8(key)
+        .ok()?
+        .strip_prefix(DNS_DOH3_PLAN_PREFIX)?;
+    let (raw_uid, endpoint) = key.split_once('/')?;
+    let uid = raw_uid.parse::<u32>().ok()?;
+    if matches!(uid, 0 | u32::MAX) || uid.to_string() != raw_uid {
+        return None;
+    }
+    Some((dns_plan_endpoint("", endpoint.as_bytes())?, uid))
 }
 
 fn dns_plan_endpoint(prefix: &str, key: &[u8]) -> Option<SocketAddr> {
@@ -2142,13 +2163,14 @@ pub fn encode_delete_name_bound(
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err("имя должно занимать от 1 до 255 байт");
     }
-    let doq = transport == 17
+    let dns_quic = transport == 17
         && binding.kind == 2
         && binding.shape == SHAPE_QUIC
-        && dns_doq_plan_endpoint(name.as_bytes()).is_some();
+        && (dns_doq_plan_endpoint(name.as_bytes()).is_some()
+            || dns_doh3_plan_scope(name.as_bytes()).is_some());
     if !matches!(transport, 6 | 17)
         || !binding.is_known()
-        || binding.kind != 1 && !doq
+        || binding.kind != 1 && !dns_quic
         || binding.temporary
     {
         return Err("DEL_NAME_BOUND требует известную постоянную привязку имени");

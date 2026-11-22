@@ -1,6 +1,6 @@
 use crate::netlink::{
     MessageIter, NF_ACCEPT, NF_DROP, NFQNL_CFG_CMD_BIND, NFQNL_CFG_CMD_UNBIND, config_command,
-    config_params, kernel_error, verdict, verdict_payload,
+    config_params, config_params_with_owner, kernel_error, verdict, verdict_payload,
 };
 use std::cell::Cell;
 use std::io;
@@ -219,14 +219,31 @@ impl QueueSocket {
             libc::AF_INET as u16,
         );
         socket.configure(&bind)?;
-        let params = config_params(
+        let params = config_params_with_owner(
             queue,
             socket.next_sequence(),
             copy_range,
             max_len,
             fail_open,
+            true,
         );
-        socket.configure(&params)?;
+        if let Err(error) = socket.configure(&params) {
+            if !matches!(
+                error.raw_os_error(),
+                Some(libc::EINVAL | libc::EOPNOTSUPP | libc::ENOPROTOOPT)
+            ) {
+                return Err(error);
+            }
+            // Старые ядра продолжают работу без владельца пакета и адресных планов DoH3.
+            let params = config_params(
+                queue,
+                socket.next_sequence(),
+                copy_range,
+                max_len,
+                fail_open,
+            );
+            socket.configure(&params)?;
+        }
         // C ставит SO_TIMESTAMP сразу после открытия очереди и не считает
         // отказ смертельным.
         if let Err(error) = r2o_enable_receive_timestamps(socket.fd.as_raw_fd()) {

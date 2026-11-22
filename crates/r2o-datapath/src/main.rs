@@ -2458,9 +2458,14 @@ mod app {
                         if r2o_udp_hold_candidate(bytes, queue_hook)
                             && udp_sessions.r2o_begin_hold_at_mark(bytes, packet.mark.unwrap_or(0))
                         {
-                            match udp_holds.r2o_feed(
+                            match udp_holds.r2o_feed_owned(
                                 packet_id,
                                 packet.mark.unwrap_or(0),
+                                packet.socket_uid.filter(|_| {
+                                    !controller_probe
+                                        && queue_hook
+                                            == Some(r2o_datapath::netlink::R2O_NF_INET_LOCAL_OUT)
+                                }),
                                 bytes,
                                 now,
                             ) {
@@ -2709,6 +2714,16 @@ mod app {
                                 quic_hello
                                     .as_ref()
                                     .and_then(|hello| hello.snapshot.as_deref()),
+                                udp_replay.as_ref().map_or_else(
+                                    || {
+                                        packet
+                                            .socket_uid
+                                            .map(r2o_datapath::control::QuicSocketOwner::Packet)
+                                    },
+                                    |batch| {
+                                        Some(r2o_datapath::control::QuicSocketOwner::Batch(batch))
+                                    },
+                                ),
                             )
                         };
                         if packet_view.as_ref().is_some_and(|view| view.protocol == 17) {

@@ -58,6 +58,7 @@ pub struct R2oUdpHeldPacket {
 #[derive(Debug, Eq, PartialEq)]
 pub struct R2oUdpHoldBatch {
     pub(crate) key: R2oUdpFlowKey,
+    pub(crate) socket_uid: Option<u32>,
     pub packets: Vec<R2oUdpHeldPacket>,
 }
 
@@ -152,6 +153,7 @@ pub enum R2oUdpHoldFeed {
 
 struct R2oUdpHoldSlot {
     key: R2oUdpFlowKey,
+    socket_uid: Option<u32>,
     deadline: Instant,
     packets: Vec<R2oUdpHeldPacket>,
 }
@@ -170,6 +172,17 @@ impl R2oUdpHoldTable {
 
     /// Сохранить полную датаграмму и её mark, не перенося владение при отказе.
     pub fn r2o_feed(&mut self, id: u32, mark: u32, packet: &[u8], now: Instant) -> R2oUdpHoldFeed {
+        self.r2o_feed_owned(id, mark, None, packet, now)
+    }
+
+    pub fn r2o_feed_owned(
+        &mut self,
+        id: u32,
+        mark: u32,
+        socket_uid: Option<u32>,
+        packet: &[u8],
+        now: Instant,
+    ) -> R2oUdpHoldFeed {
         if packet.len() > R2O_UDP_HOLD_PACKET_MAX {
             return R2oUdpHoldFeed::Refused;
         }
@@ -188,8 +201,12 @@ impl R2oUdpHoldTable {
                 let slot = self.slots[index].take().expect("занятая ячейка найдена");
                 return R2oUdpHoldFeed::Overflow(R2oUdpHoldBatch {
                     key: slot.key,
+                    socket_uid: slot.socket_uid,
                     packets: slot.packets,
                 });
+            }
+            if slot.socket_uid != socket_uid {
+                slot.socket_uid = None;
             }
             slot.packets.push(R2oUdpHeldPacket {
                 id,
@@ -205,6 +222,7 @@ impl R2oUdpHoldTable {
             });
             self.slots[index] = Some(R2oUdpHoldSlot {
                 key,
+                socket_uid,
                 deadline: now + R2O_UDP_HOLD_WAIT,
                 packets,
             });
@@ -222,6 +240,7 @@ impl R2oUdpHoldTable {
         let slot = self.slots[index].take()?;
         Some(R2oUdpHoldBatch {
             key: slot.key,
+            socket_uid: slot.socket_uid,
             packets: slot.packets,
         })
     }
@@ -235,6 +254,7 @@ impl R2oUdpHoldTable {
             {
                 expired.push(R2oUdpHoldBatch {
                     key: slot.key,
+                    socket_uid: slot.socket_uid,
                     packets: slot.packets,
                 });
             }
@@ -249,6 +269,7 @@ impl R2oUdpHoldTable {
             .filter_map(Option::take)
             .map(|slot| R2oUdpHoldBatch {
                 key: slot.key,
+                socket_uid: slot.socket_uid,
                 packets: slot.packets,
             })
             .collect()
@@ -946,6 +967,7 @@ mod tests {
         let packet = udp_packet();
         let batch = R2oUdpHoldBatch {
             key: flow_key_from_packet(&packet).unwrap(),
+            socket_uid: None,
             packets: vec![
                 R2oUdpHeldPacket {
                     id: 1,
@@ -979,6 +1001,7 @@ mod tests {
         let packet = udp_packet();
         let batch = R2oUdpHoldBatch {
             key: flow_key_from_packet(&packet).unwrap(),
+            socket_uid: None,
             packets: (1_u32..5)
                 .map(|id| R2oUdpHeldPacket {
                     id,
@@ -1044,6 +1067,7 @@ mod tests {
         fn batch_of_four(packet: &[u8]) -> R2oUdpHoldBatch {
             R2oUdpHoldBatch {
                 key: flow_key_from_packet(packet).unwrap(),
+                socket_uid: None,
                 packets: (10_u32..14)
                     .map(|id| R2oUdpHeldPacket {
                         id,
