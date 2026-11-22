@@ -879,7 +879,7 @@ fn read_release_architecture(root: &Path, release_id: &str) -> Result<String, In
 }
 
 fn link_controller_applets(staging: &Path, architecture: &str) -> io::Result<()> {
-    const FORMAT: &[u8] = b"R2O-CONTROLLER-APPLETS-1\n";
+    const FORMAT: &[u8] = b"R2O-CONTROLLER-APPLETS-2\n";
     let marker = staging.join("router/controller-applets");
     let file = match File::open(marker) {
         Ok(file) => file,
@@ -888,13 +888,15 @@ fn link_controller_applets(staging: &Path, architecture: &str) -> io::Result<()>
     };
     let mut bytes = Vec::with_capacity(FORMAT.len());
     file.take(FORMAT.len() as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes != FORMAT {
-        return Ok(());
-    }
+    let applets: &[&str] = match bytes.as_slice() {
+        b"R2O-CONTROLLER-APPLETS-1\n" => &["r2o-fetch", "r2o-detect"],
+        FORMAT => &["r2o-fetch", "r2o-detect", "r2o-telegram"],
+        _ => return Ok(()),
+    };
 
     let builds = staging.join("builds");
     let controller = builds.join(format!("r2o-controller-linux-{architecture}"));
-    for applet in ["r2o-fetch", "r2o-detect"] {
+    for applet in applets {
         let installed = builds.join(format!("{applet}-linux-{architecture}"));
         let temporary = builds.join(format!(".{applet}.link"));
         // На ФС без жёстких ссылок оставляем отдельный проверенный ELF из архива.
@@ -1346,7 +1348,7 @@ mod tests {
         fs::create_dir(incoming.join("router")).unwrap();
         fs::write(
             incoming.join("router/controller-applets"),
-            "R2O-CONTROLLER-APPLETS-1\n",
+            "R2O-CONTROLLER-APPLETS-2\n",
         )
         .unwrap();
         let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
@@ -1363,11 +1365,13 @@ mod tests {
         activate_download(&root, &prepared).unwrap();
         let controller =
             fs::metadata(active_component_path(&root, "r2o-controller").unwrap()).unwrap();
-        let fetch = fs::metadata(active_component_path(&root, "r2o-fetch").unwrap()).unwrap();
-        assert_eq!(
-            (fetch.dev(), fetch.ino()),
-            (controller.dev(), controller.ino())
-        );
+        for name in ["r2o-fetch", "r2o-telegram"] {
+            let applet = fs::metadata(active_component_path(&root, name).unwrap()).unwrap();
+            assert_eq!(
+                (applet.dev(), applet.ino()),
+                (controller.dev(), controller.ino())
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1423,7 +1427,7 @@ mod tests {
         fs::create_dir(previous.join("router")).unwrap();
         fs::write(
             previous.join("router/controller-applets"),
-            "R2O-CONTROLLER-APPLETS-1\n",
+            "R2O-CONTROLLER-APPLETS-2\n",
         )
         .unwrap();
         let detect = previous.join("builds/r2o-detect-linux-mipsel");
@@ -1459,7 +1463,7 @@ mod tests {
         let controller = active_component_path(&root, "r2o-controller").unwrap();
         assert_eq!(fs::read(&controller).unwrap(), controller_bytes);
         let inode = fs::metadata(&controller).unwrap().ino();
-        for name in ["r2o-fetch", "r2o-detect"] {
+        for name in ["r2o-fetch", "r2o-detect", "r2o-telegram"] {
             assert_eq!(
                 fs::metadata(active_component_path(&root, name).unwrap())
                     .unwrap()

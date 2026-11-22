@@ -137,7 +137,7 @@ pub(super) fn restore(root: &Path, id: &str) -> Result<(), InstallError> {
 }
 
 fn is_applet(name: &std::ffi::OsStr, architecture: &str) -> bool {
-    ["r2o-fetch", "r2o-detect"]
+    ["r2o-fetch", "r2o-detect", "r2o-telegram"]
         .iter()
         .any(|applet| name == std::ffi::OsStr::new(&format!("{applet}-linux-{architecture}")))
 }

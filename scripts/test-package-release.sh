@@ -41,7 +41,7 @@ printf '%s\n' \
 printf '%s\n' router/uninstall.sh router/update-schema router/update-sequence router/update-r2 router/controller-applets router/rollback-xz >> "$TEMP/expected"
 sort -o "$TEMP/expected" "$TEMP/expected"
 cmp "$TEMP/expected" "$TEMP/entries"
-[ "$(tar -xOzf "$TEMP/out/r2o-mipsel.tar.gz" router/controller-applets)" = R2O-CONTROLLER-APPLETS-1 ]
+[ "$(tar -xOzf "$TEMP/out/r2o-mipsel.tar.gz" router/controller-applets)" = R2O-CONTROLLER-APPLETS-2 ]
 [ "$(tar -xOzf "$TEMP/out/r2o-mipsel.tar.gz" router/rollback-xz)" = R2O-ROLLBACK-XZ-1 ]
 tar -xOzf "$TEMP/out/r2o-mipsel.tar.gz" router/files/meta-ranges.txt |
     cmp - "$ROOT/router/files/meta-ranges.txt"
