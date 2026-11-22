@@ -376,6 +376,8 @@ jobs:
                 -H "Accept: application/octet-stream" \
                 -o "$verify/$name" "$url"
             done
+          test -s "$verify/catalog.json"
+          test -s "$verify/catalog.json.sig"
           sh scripts/verify-release-assets.sh "$verify" "$RELEASE_ID"
           if [ -n "$R2O_R2_PUBLIC_URL" ]; then
             : "${R2O_R2_ENDPOINT:?}" "${R2O_R2_BUCKET:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
