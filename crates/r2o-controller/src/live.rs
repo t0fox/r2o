@@ -166,7 +166,7 @@ pub struct DnsServiceLive {
     pub failure: Option<crate::dns_health::DnsHealthFailure>,
     pub consecutive_network_failures: u8,
     pub recovery_retry_at: Option<std::time::Instant>,
-    pub recovery_in_progress: bool,
+    pub recovery_phase: Option<DnsRecoveryPhase>,
     pub verified_recovery: Option<DnsVerifiedRecovery>,
     /// C `dns_service_live.next_check_ms`: монотонные миллисекунды
     /// планировщика; 0 — срок не задан.
@@ -184,6 +184,12 @@ pub struct DnsVerifiedRecovery {
     pub plan_id: String,
     pub checked_at: i64,
     pub rtt_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DnsRecoveryPhase {
+    Discovery,
+    Recheck,
 }
 
 impl Default for DnsServiceLive {
@@ -206,7 +212,7 @@ impl Default for DnsServiceLive {
             failure: None,
             consecutive_network_failures: 0,
             recovery_retry_at: None,
-            recovery_in_progress: false,
+            recovery_phase: None,
             verified_recovery: None,
             next_check_ms: 0,
             plan_applied_at: None,
@@ -742,7 +748,10 @@ fn r2o_live_dns_services(
             let mut tcp_reachable = state.tcp_reachable;
             let mut tls_handshake = state.tls_handshake;
             let mut http_status = state.http_status;
-            if let Some(task) = task {
+            if let Some(task) = task
+                && state.state != DnsServiceState::DirectOk
+                && state.recovery_phase != Some(DnsRecoveryPhase::Recheck)
+            {
                 candidate_plan_applied = task.ver_ok;
                 answered = answered || task.ver.dns_reply;
                 candidate_answer = candidate_plan_applied && task.ver.dns_reply
@@ -764,8 +773,14 @@ fn r2o_live_dns_services(
                     "Получен корректный DNS-ответ на повторной проверке установленного плана."
                         .to_owned(),
                 )
-            } else if state.recovery_in_progress {
-                ("bypass_ok", "Проверяется DNS-сервис через Discovery.".to_owned())
+            } else if let Some(phase) = state.recovery_phase {
+                let reason = match phase {
+                    DnsRecoveryPhase::Discovery => "Проверяется DNS-сервис через Discovery.",
+                    DnsRecoveryPhase::Recheck => {
+                        "Проверяем DNS-ответ через установленный адресный план."
+                    }
+                };
+                ("bypass_ok", reason.to_owned())
             } else if candidate_answer {
                 let probe = match service.protocol.as_str() {
                     "doh" => "DoH",
@@ -2134,7 +2149,7 @@ mod tests {
             plan_applied_at: Some(1000),
             ..DnsServiceLive::default()
         };
-        let mut task = DnsTask {
+        let task = DnsTask {
             state: DnsTaskState::Verify,
             name: "dns.example".into(),
             ip: "198.51.100.80".into(),
@@ -2196,10 +2211,24 @@ mod tests {
             assert_eq!(rows[0]["dns_answer_via_plan"], false);
         }
 
+        live.recovery_phase = Some(super::DnsRecoveryPhase::Recheck);
+        let rows = super::r2o_live_dns_services(
+            &Catalog::default(),
+            std::slice::from_ref(&service),
+            std::slice::from_ref(&live),
+            std::slice::from_ref(&task),
+        );
+        assert_eq!(rows[0]["state"], "bypass_ok");
+        assert_eq!(
+            rows[0]["status_reason"],
+            "Проверяем DNS-ответ через установленный адресный план."
+        );
+        assert_eq!(rows[0]["dns_answer_confirmed"], false);
+        assert_eq!(rows[0]["dns_answer_via_plan"], false);
+
         live.dns_answer = true;
         live.state = DnsServiceState::DirectOk;
-        task.ver.level = D2K_VER_HANDSHAKE;
-        task.ver.dns_reply = false;
+        live.recovery_phase = None;
         let rows = super::r2o_live_dns_services(&Catalog::default(), &[service], &[live], &[task]);
         assert_eq!(rows[0]["state"], "direct_ok");
         assert_eq!(rows[0]["dns_answer_via_plan"], false);

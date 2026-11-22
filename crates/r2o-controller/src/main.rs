@@ -3089,7 +3089,7 @@ impl R2oDnsServices {
             live.failure = None;
             live.consecutive_network_failures = 0;
             live.recovery_retry_at = None;
-            live.recovery_in_progress = false;
+            live.recovery_phase = None;
             live.verified_recovery = None;
             live.next_check_ms = mono_ms;
             live.reason.clear();
@@ -3216,7 +3216,7 @@ impl R2oDnsServices {
                     live.ip = task_ip;
                     live.consecutive_network_failures = 0;
                     live.recovery_retry_at = None;
-                    live.recovery_in_progress = false;
+                    live.recovery_phase = None;
                     live.verified_recovery = None;
                     live.plan_applied = false;
                     live.applied_plan_id.clear();
@@ -3290,7 +3290,7 @@ impl R2oDnsServices {
                 || !self
                     .live
                     .get(index)
-                    .is_some_and(|live| live.router_seen || live.recovery_in_progress)
+                    .is_some_and(|live| live.router_seen || live.recovery_phase.is_some())
             {
                 if let Some(slot) = self.task_of_service(&service)
                     && self.tasks[slot].state != r2o_controller::live::DnsTaskState::DnsHealth
@@ -14019,6 +14019,16 @@ fn r2o_discovery_plan_result(
     };
     let last_result = match result {
         Err(error) => format!("проба не завершилась: {error}"),
+        Ok(fetch) if fetch.dns_probe.is_some() && applied => {
+            if verified && fetch.verified_dns_reply() {
+                "План применён; получен корректный DNS-ответ.".into()
+            } else {
+                "APPLIED получен, но корректный DNS-ответ не подтверждён.".into()
+            }
+        }
+        Ok(fetch) if fetch.dns_probe.is_some() => {
+            "Датапат не подтвердил применение плана к DNS-пробе.".into()
+        }
         Ok(fetch) if verified && fetch.handshake_verified && !fetch.application_verified => {
             if fetch.tls.is_some() {
                 "План применён. TLS-рукопожатие завершено.".into()
@@ -18365,7 +18375,7 @@ group_block_proven: false,
                         outcome.plan_text = Some(candidate);
                         outcome.retry_after = None;
                         outcome.detail.push_str(
-                            "; запасной кандидат подтверждён полным HTTPS-ответом и точным APPLIED",
+                            "; запасной кандидат прошёл прикладную проверку и получил точный APPLIED",
                         );
                         return outcome;
                     }
@@ -18805,7 +18815,7 @@ group_block_proven: false,
                 outcome.plan_text = Some(plan);
                 outcome.retry_after = None;
                 outcome.detail.push_str(
-                    "; запасной кандидат подтверждён полным HTTPS-ответом и точным APPLIED",
+                    "; запасной кандидат прошёл прикладную проверку и получил точный APPLIED",
                 );
             } else if primary_from_owned_fallback && outcome.plan_text.is_none() {
                 outcome.retry_after = Some(if challenge_or_denial {
@@ -25694,7 +25704,14 @@ impl ControlClient {
                     if active_dns || measured_dns || configured_tcp_dns {
                         let _ = r2o_confirmed_proof_take(&target);
                         let _ = r2o_budget_cut_pending_take(&target);
-                        worker.record_panel_search_result(&target, None, &outcome_reason);
+                        // Итог адресного плана публикует карточка DNS после повторной проверки.
+                        let task = r2o_discovery_task_key(&target);
+                        worker
+                            .searches
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .panel_results
+                            .retain(|(key, _, _)| key != &task);
                         continue;
                     }
                     // C `select_resource_path` выбирает путь до испытания и
@@ -38897,10 +38914,18 @@ mod tests {
             let decision =
                 |fetch, applied| super::r2o_family_recovery_decision(&Ok(fetch), applied);
             assert_eq!(decision(fetch.clone(), true), Reclassify);
+            assert_eq!(
+                super::r2o_discovery_plan_result(&Ok(fetch.clone()), true, false).1,
+                "APPLIED получен, но корректный DNS-ответ не подтверждён."
+            );
 
             fetch.dns_reply = true;
             assert_eq!(decision(fetch.clone(), false), Reclassify);
             assert_eq!(decision(fetch.clone(), true), Verified);
+            assert_eq!(
+                super::r2o_discovery_plan_result(&Ok(fetch.clone()), true, true).1,
+                "План применён; получен корректный DNS-ответ."
+            );
             fetch.peer_name_ok = None;
             assert_eq!(decision(fetch, true), Reclassify);
         }

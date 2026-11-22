@@ -8,7 +8,7 @@ use super::{
 use r2k_core::dns_config::DnsService;
 use r2o_controller::discovery::DiscoveryTarget;
 use r2o_controller::dns_health::{DnsHealthResult, probe_dns_health};
-use r2o_controller::live::{DnsServiceState, DnsVerifiedRecovery};
+use r2o_controller::live::{DnsRecoveryPhase, DnsServiceState, DnsVerifiedRecovery};
 use r2o_controller::r2o_resource_limit::R2oMeasurementGate;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -467,7 +467,7 @@ impl Recovery {
                 live.applied_plan_id.clear();
                 live.plan_applied_at = None;
             }
-            live.recovery_in_progress = false;
+            live.recovery_phase = None;
             live.verified_recovery = None;
             if let Some(reason) = reason.filter(|_| live.state == DnsServiceState::Failed) {
                 live.reason = reason.to_owned();
@@ -589,7 +589,11 @@ impl Recovery {
     ) {
         if let Some(command) = self.route(&request, true, now) {
             if let Some(index) = request.index(state) {
-                state.live[index].recovery_in_progress = true;
+                state.live[index].recovery_phase = Some(if binding.is_some() {
+                    DnsRecoveryPhase::Recheck
+                } else {
+                    DnsRecoveryPhase::Discovery
+                });
             }
             self.attempt = Some(Attempt {
                 request,
@@ -773,7 +777,7 @@ impl Recovery {
                 if let Some(index) = current.filter(|_| ready == Some(true)) {
                     let result = recheck.result.expect("повторная DNS-проверка завершена");
                     let live = &mut state.live[index];
-                    live.recovery_in_progress = false;
+                    live.recovery_phase = None;
                     live.verified_recovery = Some(DnsVerifiedRecovery {
                         plan_id: recheck
                             .binding
@@ -928,6 +932,7 @@ impl Recovery {
                 proof,
             )
         {
+            state.live[index].recovery_phase = Some(DnsRecoveryPhase::Recheck);
             attempt.phase = Phase::Recheck(Recheck::new(
                 binding,
                 &attempt.request,
