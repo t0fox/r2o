@@ -148,7 +148,9 @@ async function main() {
     ],
   }));
   const enginePidPath = path.join(work, "engine.pid");
+  const splitEnginePidPath = path.join(work, "engine4.pid");
   const controllerPidPath = path.join(work, "controller.pid");
+  const splitControllerPidPath = path.join(work, "controller4.pid");
   fs.writeFileSync(configPath, `MODE=observe\nSTATE_DIR=${path.join(work, "state")}\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=0\nONLY_MARK=\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099,1400,3478:3481,5349,19294:19344\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nTG_ENABLED=1\nTG_MODE=local\nTG_PORT=1443\nR2O_PPE_DEOFFLOAD=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\n`);
   fs.writeFileSync(enginePidPath, String(process.pid));
   fs.writeFileSync(controllerPidPath, String(process.pid));
@@ -306,7 +308,9 @@ async function main() {
     "--state-dir", work,
     "--live", livePath,
     "--engine-pid", enginePidPath,
+    "--engine-pid-fallback", splitEnginePidPath,
     "--controller-pid", controllerPidPath,
+    "--controller-pid-fallback", splitControllerPidPath,
     "--health-file", path.join(work, "panel.health"),
   ], { stdio: ["ignore", "pipe", "pipe"] });
   let panelOutput = "";
@@ -400,12 +404,25 @@ async function main() {
     return status.textContent.includes('Движок перезапускается') && status.querySelector('.lamp').dataset.tone === 'live';
   })()`), true, "запрос перезапуска сразу меняет единственный статус");
   await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок работает')"), "возврат к статусу движка после команды");
+  fs.writeFileSync(splitEnginePidPath, String(process.pid));
+  fs.writeFileSync(splitControllerPidPath, String(process.pid));
   fs.unlinkSync(enginePidPath);
+  fs.unlinkSync(controllerPidPath);
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  assert.deepEqual(
+    await evaluate(`fetch('/api/status').then(response => response.json()).then(({snapshot, knowledge}) =>
+      [snapshot.engine_running, snapshot.controller_running, knowledge.linked])`),
+    [true, true, true],
+    "переход на раздельные процессы сохраняет актуальное состояние без перезапуска панели",
+  );
+  fs.unlinkSync(splitEnginePidPath);
+  fs.unlinkSync(splitControllerPidPath);
   await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок остановлен')"), "опрос отражает фактическую остановку");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent === 'Подбор приостановлен'"), "карточка обзора показывает состояние подбора");
   assert.equal(await evaluate("document.querySelector('#dns-protection-list .meta-chip').textContent"), "Устарело");
   assert.equal(await evaluate("document.querySelector('#nav-now').textContent"), "");
   fs.writeFileSync(enginePidPath, String(process.pid));
+  fs.writeFileSync(controllerPidPath, String(process.pid));
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок работает')"), "опрос отражает возобновление работы");
   await evaluate(`(() => {

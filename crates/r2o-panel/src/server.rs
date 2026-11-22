@@ -41,7 +41,9 @@ pub struct Config {
     pub manager_path: PathBuf,
     pub manager_root: PathBuf,
     pub engine_pid_path: PathBuf,
+    pub engine_pid_fallback: Option<PathBuf>,
     pub controller_pid_path: PathBuf,
+    pub controller_pid_fallback: Option<PathBuf>,
     pub telegram_pid_path: PathBuf,
     pub telegram_status_path: PathBuf,
     pub telegram_stats_path: PathBuf,
@@ -93,7 +95,9 @@ impl Default for Config {
             manager_path: "/opt/r2o/r2o-manager".into(),
             manager_root: "/opt/r2o".into(),
             engine_pid_path: "/opt/r2o/run/r2o-datapath.pid".into(),
+            engine_pid_fallback: None,
             controller_pid_path: "/opt/r2o/run/r2o.pid".into(),
+            controller_pid_fallback: None,
             telegram_pid_path: "/opt/r2o/run/r2o-telegram.pid".into(),
             telegram_status_path: "/opt/r2o/state/telegram.status".into(),
             telegram_stats_path: "/opt/r2o/state/telegram.stats.sock".into(),
@@ -942,8 +946,18 @@ fn api_status(config: &Config, query: &str) -> Response {
         .and_then(|raw| serde_json::from_slice::<Value>(raw).ok())
         .filter(Value::is_object);
     drop(live_bytes);
-    let engine_pid = pid_path_running(&config.engine_pid_path);
-    let controller_running = pid_path_running(&config.controller_pid_path).is_some();
+    let engine_pid = pid_path_running(&config.engine_pid_path).or_else(|| {
+        config
+            .engine_pid_fallback
+            .as_deref()
+            .and_then(pid_path_running)
+    });
+    let controller_running = pid_path_running(&config.controller_pid_path).is_some()
+        || config
+            .controller_pid_fallback
+            .as_deref()
+            .and_then(pid_path_running)
+            .is_some();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());

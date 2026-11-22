@@ -1418,17 +1418,14 @@ panel_start() {
     [ -x "$MANAGER" ] || return 1
     if component_running r2o-panel "$PN_PID"; then return 0; fi
     rm -f "$RUNTIME/r2o-panel.health"
-    panel_engine_pid=$DP_PID
-    component_running r2o-datapath "$DP_PID" || panel_engine_pid=$DP4_PID
-    panel_controller_pid=$CT_PID
-    component_running r2o-controller "$CT_PID" || panel_controller_pid=$CT4_PID
     spawn_component r2o-panel "$PN_PID" "$LOG/panel.log" serve \
         --health-file "$RUNTIME/r2o-panel.health" --config "$CONF" \
         --live "$RUNTIME/live4.json" --live-extra "$RUNTIME/live6.json" \
         --assets "$ROOT/panel" --listen "$PANEL_LISTEN" \
         --state-dir "$STATE" --mode "$MODE" --queue "$QUEUE4" \
         --service "$INIT" --manager "$MANAGER" --manager-root "$ROOT" \
-        --engine-pid "$panel_engine_pid" --controller-pid "$panel_controller_pid" \
+        --engine-pid "$DP_PID" --engine-pid-fallback "$DP4_PID" \
+        --controller-pid "$CT_PID" --controller-pid-fallback "$CT4_PID" \
         --telegram-pid "$TG_PID" --telegram-status "$TG_STATUS" \
         --telegram-stats "$TG_STATS_SOCKET" --log "$LOG/panel.log"
 }

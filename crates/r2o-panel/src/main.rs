@@ -115,7 +115,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             "--manager" => config.manager_path = PathBuf::from(value),
             "--manager-root" => config.manager_root = PathBuf::from(value),
             "--engine-pid" => config.engine_pid_path = PathBuf::from(value),
+            "--engine-pid-fallback" => config.engine_pid_fallback = Some(PathBuf::from(value)),
             "--controller-pid" => config.controller_pid_path = PathBuf::from(value),
+            "--controller-pid-fallback" => {
+                config.controller_pid_fallback = Some(PathBuf::from(value))
+            }
             "--telegram-pid" => config.telegram_pid_path = PathBuf::from(value),
             "--telegram-status" => config.telegram_status_path = PathBuf::from(value),
             "--telegram-stats" => config.telegram_stats_path = PathBuf::from(value),
@@ -196,7 +200,7 @@ fn redirect_logs(path: &std::path::Path) -> std::io::Result<()> {
 
 fn usage() {
     println!(
-        "r2o-panel --version | --release-id | --self-check | serve [--config FILE] [--live FILE] [--live-extra FILE] [--assets DIR] [--listen HOST:PORT] [--state-dir DIR] [--mode MODE] [--queue N] [--service FILE] [--manager FILE] [--manager-root DIR] [--engine-pid FILE] [--controller-pid FILE] [--telegram-stats PATH] [--log FILE]"
+        "r2o-panel --version | --release-id | --self-check | serve [--config FILE] [--live FILE] [--live-extra FILE] [--assets DIR] [--listen HOST:PORT] [--state-dir DIR] [--mode MODE] [--queue N] [--service FILE] [--manager FILE] [--manager-root DIR] [--engine-pid FILE] [--engine-pid-fallback FILE] [--controller-pid FILE] [--controller-pid-fallback FILE] [--telegram-stats PATH] [--log FILE]"
     );
 }
 
