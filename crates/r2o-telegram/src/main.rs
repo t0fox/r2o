@@ -287,9 +287,15 @@ fn init_logging(config: &Config) {
         // виртуального терминала. Отключать их также при перенаправлении stderr,
         // например в канал или файл.
         let use_ansi = std::io::stderr().is_terminal() && !cfg!(windows);
+        let writer = if config.check {
+            tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr)
+        } else {
+            tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stdout)
+        };
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .with_ansi(use_ansi)
+            .with_writer(writer)
             .init();
     }
 }
