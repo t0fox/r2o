@@ -19,10 +19,15 @@ async function main() {
     const search = wide.locator('.search-concept');
     await search.and(wide.locator('[data-call-state=queued]')).waitFor();
     await search.and(wide.locator('[data-call-state=running]')).waitFor();
+    await search.locator('.search-call .search-findings').getByText('Обрывается ли соединение после приветствия?').waitFor();
     await search.and(wide.locator('[data-call-state=saved]')).waitFor({ timeout: 22000 });
-    assert.match(await search.locator('.search-proof').textContent(), /Точный APPLIED/);
+    assert.equal(await search.locator('.search-proof').isVisible(), false);
+    assert.equal(await search.locator('.search-findings').isVisible(), false);
     await search.locator('.search-plan-details summary').press('Enter');
     assert.equal(await search.locator('.search-plan-details').getAttribute('open'), '');
+    const applied = search.locator('.search-plan-body .search-findings');
+    assert.equal(await applied.getByText('Применён для проверки', { exact: true }).isVisible(), true);
+    assert.equal(await applied.getByText('Сервис ответил на проверку', { exact: true }).isVisible(), true);
     await wide.getByRole('button', { name: 'Демо · Повторить поиск' }).click();
     await search.and(wide.locator('[data-call-state=queued]')).waitFor();
     assert.deepEqual(errors, []);
@@ -30,8 +35,8 @@ async function main() {
 
     for (const width of [1440, 390, 320]) {
       const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch: width < 500, reducedMotion: 'reduce' });
-      for (const [episode, state, progress] of [['plan', 'running', 5 / 7], ['applied', 'saved', 1],
-        ['partial', 'partial', 5 / 7], ['failed', 'failed', 5 / 7]]) {
+      for (const [episode, state, progress, result] of [['plan', 'running', 5 / 7], ['applied', 'saved', 1, 'Сервис ответил на проверку'],
+        ['partial', 'partial', 5 / 7, 'Соединение установлено'], ['failed', 'failed', 5 / 7, 'Ответ не пришёл вовремя']]) {
         await page.goto(url + '/?search-ui=1&episode=' + episode);
         const card = page.locator('.search-concept[data-call-state=' + state + ']');
         await card.waitFor();
@@ -39,6 +44,13 @@ async function main() {
         assert.equal(await card.evaluate(el => el.scrollWidth <= el.clientWidth), true, width + ' / ' + episode);
         assert.ok(await card.locator('.status-mark-arc').evaluate(el => parseFloat(getComputedStyle(el).transitionDuration) <= .001));
         if (width !== 320) await card.screenshot({ path: path.join(capture, episode + '-' + width + '.png') });
+        if (result) {
+          await card.locator('.search-plan-details summary').click();
+          assert.equal(await card.locator('.search-findings').getByText(result, { exact: true }).isVisible(), true);
+          if (episode === 'applied' && width !== 320) {
+            await card.screenshot({ path: path.join(capture, 'verification-' + width + '.png') });
+          }
+        }
       }
       await page.close();
     }

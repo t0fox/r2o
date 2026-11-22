@@ -83,7 +83,8 @@
     const active=engine && params.has('episode') && step>=0 && step<phases.length;
     const outcome=step!==6?'':searchConcept && (params.get('result')==='failed' || params.get('episode')==='failed')?'closed':
       searchConcept && (params.get('result')==='partial' || params.get('episode')==='partial')?'partial':'saved';
-    const phase=outcome==='closed'?'проверка завершена без ответа':outcome==='partial'?'соединение есть, прикладного ответа нет':
+    const phase=outcome==='closed'?'проверка завершена без ответа':outcome==='partial'?'соединение есть, сервис не ответил':
+      searchConcept && outcome==='saved'?'обход проверен':
       searchConcept && step===5?'проверяем план':phases[step];
     const sessions=proxy && params.get('telegram')!=='idle'?[{id:1,dc:2,stage:'first_wss_binary_response',direct_state:'selected',
       direct_transport:'direct_wss',selected_transport:'direct_wss',fallback_state:'idle',telegram_response_seen:true,
@@ -99,6 +100,7 @@
         measurements:{active:active && step<6?1:0,limit:2,queued:0,free_pct:95,cores:2},searches:active?[{
           target:'edge-a.googlevideo.com',ip:'192.0.2.42',family:4,transport:6,port:443,shape:1,
           phase,plan_id:step>=5?groups[0].plan_id:'',applied_plan_id:outcome==='saved'||outcome==='partial'?groups[0].plan_id:'',
+          ...(searchConcept && step===2?{question:'Обрывается ли соединение после приветствия?'}:{}),
           ...(redesign && outcome?{outcome,probe_applied:outcome!=='closed',verified:outcome!=='closed',
             verify_level:outcome==='saved'?3:outcome==='partial'?1:0,last_result:outcome==='saved'?'Получен прикладной ответ':
               outcome==='partial'?'Установлено транспортное соединение':'Истекло время ожидания ответа'}:{}),

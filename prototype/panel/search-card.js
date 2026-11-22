@@ -10,6 +10,13 @@
     partial: 'M7 12h10',
     failed: 'm8 8 8 8m0-8-8 8'
   };
+  const resultLabels = new Map([
+    ['Получен прикладной ответ', 'Сервис ответил на проверку'],
+    ['Подтверждён ответ сервера', 'Сервер ответил на проверку'],
+    ['Установлено транспортное соединение', 'Соединение установлено'],
+    ['Истекло время ожидания ответа', 'Ответ не пришёл вовремя']
+  ]);
+  const checkedLevels = ['', 'Соединение установлено', 'Сервер ответил на проверку', 'Сервис ответил на проверку'];
 
   function mount(row) {
     const {visual, phase, clock} = row.__parts;
@@ -24,15 +31,47 @@
     phase.before(chip);
     chip.append(phase, clock);
     row.classList.add('search-concept');
+    const findings = document.createElement('dl');
+    findings.className = 'search-findings';
     return {
-      chip,
+      chip, findings,
       icon: chip.querySelector('.search-call-icon'),
       glyph: visual.querySelector('.status-mark-glyph')
     };
   }
 
+  function renderFindings(ui, parts, search) {
+    const last = String(search.last_result ?? '').trim().replace(/\.$/, '');
+    const rows = [
+      ['Что проверяем', !parts.question.hidden && search.question],
+      ['Применение плана', search.probe_applied === true ? 'Применён для проверки' : search.application],
+      ['Результат проверки', resultLabels.get(last) || last || (search.verified && checkedLevels[search.verify_level])]
+    ].filter(([, value]) => value);
+    if (!rows.length) {
+      ui.findings.remove();
+      return;
+    }
+    const key = JSON.stringify(rows);
+    if (ui.findingsKey !== key) {
+      ui.findingsKey = key;
+      ui.findings.replaceChildren(...rows.flatMap(([label, value]) => {
+        const term = document.createElement('dt');
+        const description = document.createElement('dd');
+        term.textContent = label;
+        description.textContent = value;
+        return [term, description];
+      }));
+    }
+    const owner = parts.plan.hidden ? ui.chip : parts.planBody;
+    if (ui.findings.parentNode !== owner) {
+      if (parts.plan.hidden) owner.append(ui.findings);
+      else owner.prepend(ui.findings);
+    }
+  }
+
   window.R2oSearchConcept = (row, search) => {
     const ui = row.__searchConcept || (row.__searchConcept = mount(row));
+    renderFindings(ui, row.__parts, search);
     const track = row.__parts.track;
     const steps = track.querySelectorAll('.track-step');
     const at = track.hidden ? undefined : track.__r2oAt;
