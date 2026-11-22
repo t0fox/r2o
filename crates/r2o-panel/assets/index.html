@@ -305,10 +305,10 @@
               </div>
               <div id="update-selection" class="update-selection" hidden>
                 <label for="update-target">Выпуск</label>
-                <select id="update-target"></select>
+                <select class="panel-select" id="update-target"></select>
                 <p class="upd-meta" id="update-target-meta"></p>
                 <label for="update-source">Источник загрузки</label>
-                <select id="update-source"></select>
+                <select class="panel-select" id="update-source"></select>
                 <button type="button" class="btn" id="update-selected">Установить выбранную версию</button>
               </div>
               <div class="update-transfer">
@@ -436,7 +436,7 @@
             <section class="diag-card diag-search-panel" aria-labelledby="diagnostic-search-title">
               <div class="diag-card-head">
                 <div><h4 id="diagnostic-search-title">Журнал подбора</h4><p id="diagnostic-event-summary"></p></div>
-                <select id="diagnostic-event-filter" name="journal" aria-label="Фильтр журнала подбора">
+                <select class="panel-select" id="diagnostic-event-filter" name="journal" aria-label="Фильтр журнала подбора">
                   <option value="all">Все исходы</option>
                   <option value="unconfirmed">Без подтверждения</option>
                 </select>

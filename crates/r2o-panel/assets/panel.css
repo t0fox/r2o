@@ -1752,11 +1752,47 @@ main { min-width: 0; }
 .update-selection { display: grid; gap: 8px; margin: 12px 0; }
 .update-selection[hidden] { display: none; }
 .update-selection label { color: var(--ink-2); font-size: .85rem; }
-.update-selection select {
+.update-selection :is(.panel-select, .select-trigger) {
   min-height: 44px; width: 100%; min-width: 0; padding: 6px 10px;
-  background: var(--surface, #222329); color: var(--ink); border: 1px solid var(--bronze-line);
+  background: var(--surface); color: var(--ink); border: 1px solid var(--bronze-line);
   border-radius: 6px; font: inherit;
 }
+.panel-select[hidden] { display: none; }
+.select-trigger {
+  display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  overflow-wrap: anywhere; text-align: left; cursor: pointer;
+}
+.select-trigger::after {
+  content: ""; width: 7px; height: 7px; margin-inline: 2px; flex: none;
+  border: solid var(--ink-2); border-width: 0 1px 1px 0; rotate: 45deg;
+}
+.select-trigger[aria-expanded="true"]::after { rotate: 225deg; }
+.select-trigger:is(:hover, [aria-expanded="true"]):not(:disabled) { border-color: var(--acc-line); }
+.select-trigger:disabled { color: var(--ink-3); cursor: default; }
+.select-popup {
+  position: fixed; inset: auto; margin: 0; padding: 5px; overflow: auto;
+  overscroll-behavior: contain; border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  box-shadow: 0 18px 38px -17px var(--bg-deep), inset 0 1px 0 var(--line-soft);
+  color: var(--ink); font: 650 .84rem/1.38 var(--sans);
+}
+.select-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; min-height: 40px; padding: 7px 10px; overflow-wrap: anywhere;
+  border: 1px solid transparent; border-radius: 6px; background: transparent;
+  color: var(--ink-2); font: inherit; text-align: left; cursor: pointer;
+}
+.select-option[aria-selected="true"] { border-color: var(--bronze-line); background: var(--bronze-wash); color: var(--ink); }
+.select-option[aria-selected="true"]::after {
+  content: ""; width: 6px; height: 10px; margin-inline: 3px; flex: none;
+  border: solid var(--bronze); border-width: 0 1.5px 1.5px 0; rotate: 42deg;
+}
+.select-option:is(:hover, :focus-visible):not(:disabled) {
+  border-color: var(--acc-line); background: var(--acc-wash); color: var(--ink);
+}
+.select-option:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+.select-option:disabled { color: var(--ink-3); cursor: default; }
+@media (pointer: coarse) { .select-option { min-height: 44px; } }
 #update-target-meta, #update-history-list { overflow-wrap: anywhere; }
 #update-history-list { padding: 0 12px 10px 27px; }
 #update-history-list li + li { margin-top: 5px; }
@@ -1952,10 +1988,11 @@ main { min-width: 0; }
 .diag-engine-details .screen-head-meta { justify-content: start; margin-bottom: 10px; }
 .diag-more-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .diag-more-grid > .diag-card { grid-column: auto; }
-#diagnostic-event-filter {
+#diagnostic-event-filter, #diagnostic-event-filter-trigger {
   min-height: 32px; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 4px;
   color: var(--ink); background: var(--bg); font: inherit; font-size: .73rem;
 }
+#diagnostic-event-filter-trigger { padding-inline: 9px; }
 .diag-event-list { margin: 8px 0; max-height: 420px; overflow: auto; list-style: none; }
 .diag-event-list li { content-visibility: auto; contain-intrinsic-block-size: auto 44px; }
 .diag-event-list li + li { border-top: 1px solid var(--line-soft); }
@@ -2327,7 +2364,7 @@ main { min-width: 0; }
   .diag-cursor input { min-height: 44px; }
   .diag-card-head .diag-range button { padding-inline: 8px; }
   .diag-plot { block-size: 218px; }
-  #diagnostics :is(.btn, .diag-range button, .diag-series label, select) { min-height: 44px; }
+  #diagnostics :is(.btn, .diag-range button, .diag-series label, select, .select-trigger) { min-height: 44px; }
   .diag-more-grid { grid-template-columns: minmax(0, 1fr); }
   .diag-cursor { grid-template-columns: minmax(0, 1fr); }
   .diag-event-list summary { grid-template-columns: minmax(0, 1fr) auto; }

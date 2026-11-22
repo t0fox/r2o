@@ -415,6 +415,11 @@ esac
     return result.result.value;
   }
 
+  async function press(key, windowsVirtualKeyCode) {
+    await call("Input.dispatchKeyEvent", { type: "rawKeyDown", key, code: key, windowsVirtualKeyCode });
+    await call("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode });
+  }
+
   await call("Page.enable");
   await call("Runtime.enable");
   await call("Page.navigate", { url: `http://localhost:${port}/` });
@@ -622,6 +627,14 @@ esac
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.phase === 'ready'"), "первый отчёт появляется после короткого опроса");
   assert.equal(await evaluate("document.querySelector('#diagnostic-data').hidden"), false, "появились данные");
   assert.equal(await evaluate("document.querySelector('#diagnostic-memory-chart').getBoundingClientRect().height > 0"), true, "график виден после первого отчёта");
+  await evaluate("document.querySelector('#diagnostic-event-filter-trigger').scrollIntoView({block:'center', behavior:'instant'})");
+  await evaluate("document.querySelector('#diagnostic-event-filter-trigger').click()");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-event-filter-options').matches(':popover-open')"), "меню фильтра открывается в панели");
+  await press("End", 35);
+  assert.equal(await evaluate("document.activeElement.textContent.trim()"), "Без подтверждения");
+  await press("Enter", 13);
+  assert.equal(await evaluate("document.querySelector('#diagnostic-event-filter').value"), "unconfirmed");
+  await evaluate("const f = document.querySelector('#diagnostic-event-filter'); f.value = 'all'; f.dispatchEvent(new Event('change'))");
   for (const [width, height] of [[1440, 1050], [1024, 900], [768, 1024], [390, 1020], [320, 900]]) {
     await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 600 });
     await waitFor(() => evaluate("(() => {const svg = document.querySelector('#diagnostic-memory-chart'); return getComputedStyle(svg).visibility === 'visible' && Math.abs(svg.viewBox.baseVal.width - svg.clientWidth) <= 2})()"), "график занимает доступную ширину " + width);
@@ -942,7 +955,7 @@ esac
 
   const latest = { release_id: "r2o-test-2", version: "R2O 2", title: "Последний выпуск", created_utc: failedAt,
     sequence: 2, notes: "Новый выпуск", commit: "2".repeat(40), architecture: "mipsel", size: 8192,
-    sources: ["github", "r2", "gh-proxy"] };
+    sources: ["github", "gh-proxy", "ghproxy", "ghfast"] };
   const older = { ...latest, release_id: "r2o-test-1", version: "R2O 1", title: "Базовый выпуск",
     sequence: 1, notes: "Изменения базы", commit: "1".repeat(40) };
   fs.writeFileSync(path.join(managerRoot, "state/update-catalog.json"), JSON.stringify({ releases: [latest, older] }));
@@ -950,12 +963,44 @@ esac
     history: [{ utc: failedAt, message: "Проверка пройдена", release_id: "r2o-test-2" }] });
   await call("Page.reload");
   await waitFor(() => evaluate("document.querySelector('#update-target').options.length === 2"), "каталог подписанных выпусков");
-  await evaluate("document.querySelector('#update-target').value = 'r2o-test-1'; document.querySelector('#update-target').dispatchEvent(new Event('change'))");
+  await evaluate("document.querySelector('#update-target-trigger').scrollIntoView({block:'center', behavior:'instant'})");
+  await evaluate("document.querySelector('#update-target-trigger').focus()");
+  await press("ArrowDown", 40);
+  await waitFor(() => evaluate("document.querySelector('#update-target-options').matches(':popover-open')"), "список выпусков открывается с клавиатуры");
+  await press("End", 35);
+  await press("Enter", 13);
+  assert.equal(await evaluate("document.querySelector('#update-target').value"), "r2o-test-1");
   assert.equal(await evaluate("document.querySelector('#update-notes-text').textContent"), "Изменения базы");
   assert.equal(await evaluate("document.querySelector('#update-rollback').hidden"), false);
   assert.match(await evaluate("document.querySelector('#update-history-list').textContent"), /Проверка пройдена/);
-  await evaluate("document.querySelector('#update-source').value = 'r2'; document.querySelector('#update-selected').click(); document.querySelector('[data-ask=yes]').click()");
-  await waitFor(() => fs.readFileSync(serviceLog, "utf8").includes("update-install --release r2o-test-1 --source r2"),
+  for (const [width, height] of [[1280, 900], [390, 844]]) {
+    await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 600 });
+    await evaluate("document.querySelector('#update-source-trigger').scrollIntoView({block:'center', behavior:'instant'})");
+    await evaluate("document.querySelector('#update-source-trigger').click()");
+    await waitFor(() => evaluate("document.querySelector('#update-source-options').matches(':popover-open')"), "фирменное меню источника " + width);
+    const popup = await evaluate(`(() => {
+      const menu = document.querySelector('#update-source-options');
+      const rect = menu.getBoundingClientRect();
+      return { bg: getComputedStyle(menu).backgroundImage,
+        fits: rect.top >= 0 && rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight };
+    })()`);
+    assert.match(popup.bg, /linear-gradient/);
+    assert.equal(popup.fits, true, "меню вписывается в экран " + width);
+    if (captureDir) {
+      const screenshot = await call("Page.captureScreenshot", { format: "png" });
+      fs.writeFileSync(path.join(captureDir, `update-source-${width}.png`), Buffer.from(screenshot.data, "base64"));
+    }
+    await press("Escape", 27);
+    assert.equal(await evaluate("document.activeElement.id"), "update-source-trigger");
+    assert.equal(await evaluate("document.querySelector('#update-source-options').matches(':popover-open')"), false);
+  }
+  await press("ArrowDown", 40);
+  await press("ArrowDown", 40);
+  await press("ArrowDown", 40);
+  await press("Enter", 13);
+  assert.equal(await evaluate("document.querySelector('#update-source').value"), "gh-proxy");
+  await evaluate("document.querySelector('#update-selected').click(); document.querySelector('[data-ask=yes]').click()");
+  await waitFor(() => fs.readFileSync(serviceLog, "utf8").includes("update-install --release r2o-test-1 --source gh-proxy"),
     "выбранный downgrade и зеркало переданы обновлятору");
   assert.deepEqual(runtimeErrors, [], `ошибки JavaScript в браузере: ${runtimeErrors.join("; ")}`);
   console.log("Проверка Chrome-панели R2O: ПРОЙДЕНА");

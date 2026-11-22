@@ -3615,8 +3615,148 @@
     App: App
   };
   if (typeof module === "object" && module.exports) module.exports = api;
+
+  function styleSelect(select, doc) {
+    var trigger = el(doc, "button", "select-trigger");
+    var popup = el(doc, "div", "select-popup");
+    if (typeof popup.showPopover !== "function") return;
+    var label = select.getAttribute("aria-label") || select.labels[0]?.textContent.trim() || select.id;
+    var typed = "", typedAt = 0;
+    trigger.type = "button";
+    trigger.id = select.id + "-trigger";
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    popup.id = select.id + "-options";
+    popup.setAttribute("popover", "auto");
+    popup.setAttribute("role", "listbox");
+    popup.setAttribute("aria-label", label);
+    trigger.setAttribute("aria-controls", popup.id);
+    trigger.setAttribute("popovertarget", popup.id);
+    select.after(trigger, popup);
+    Array.from(select.labels).forEach(function (node) { node.htmlFor = trigger.id; });
+    select.hidden = true;
+
+    function sync() {
+      var labelText = select.selectedOptions[0]?.textContent || "";
+      trigger.textContent = labelText;
+      trigger.setAttribute("aria-label", labelText ? label + ": " + labelText : label);
+      trigger.disabled = select.disabled || !select.options.length;
+    }
+
+    function positionPopup() {
+      var rect = trigger.getBoundingClientRect();
+      if (!rect.width || rect.bottom <= 0 || rect.top >= global.innerHeight) return;
+      var width = Math.min(Math.max(rect.width, 200), doc.documentElement.clientWidth - 16);
+      popup.style.width = width + "px";
+      popup.style.left = Math.max(8, Math.min(rect.left, doc.documentElement.clientWidth - width - 8)) + "px";
+      var below = global.innerHeight - rect.bottom - 14;
+      var above = rect.top - 14;
+      var upward = below < Math.min(popup.scrollHeight, 320) && above > below;
+      popup.style.maxHeight = Math.max(0, Math.min(320, upward ? above : below)) + "px";
+      popup.style.top = (upward ? rect.top - 6 - popup.offsetHeight : rect.bottom + 6) + "px";
+      return true;
+    }
+
+    function open() {
+      if (trigger.disabled || popup.matches(":popover-open")) return;
+      typed = "";
+      popup.replaceChildren(...Array.from(select.options, function (option, index) {
+        var item = el(doc, "button", "select-option", option.textContent);
+        item.type = "button";
+        item.disabled = option.disabled;
+        item.tabIndex = -1;
+        item.dataset.index = index;
+        item.setAttribute("role", "option");
+        item.setAttribute("aria-selected", String(option.selected));
+        return item;
+      }));
+      popup.showPopover({ source: trigger });
+      if (!positionPopup()) { popup.hidePopover(); return; }
+      trigger.setAttribute("aria-expanded", "true");
+      (popup.querySelector('[aria-selected="true"]:enabled') || popup.querySelector(":enabled"))?.focus({ preventScroll: true });
+    }
+
+    trigger.addEventListener("pointerdown", function (event) {
+      if (popup.matches(":popover-open")) event.preventDefault();
+    });
+    trigger.addEventListener("click", function (event) {
+      event.preventDefault();
+      if (popup.matches(":popover-open")) {
+        popup.hidePopover();
+        trigger.focus();
+      } else open();
+    });
+    trigger.addEventListener("keydown", function (event) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        open();
+      }
+    });
+    popup.addEventListener("click", function (event) {
+      var item = event.target.closest(".select-option");
+      if (!item || item.disabled) return;
+      var previous = select.selectedIndex;
+      select.selectedIndex = Number(item.dataset.index);
+      popup.hidePopover();
+      sync();
+      trigger.focus();
+      if (select.selectedIndex !== previous) {
+        select.dispatchEvent(new Event("input", { bubbles: true }));
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    popup.addEventListener("keydown", function (event) {
+      var items = Array.from(popup.querySelectorAll(":enabled"));
+      var index = items.indexOf(doc.activeElement);
+      var next;
+      switch (event.key) {
+        case "ArrowDown": next = items[Math.min(index + 1, items.length - 1)]; break;
+        case "ArrowUp": next = items[Math.max(index - 1, 0)]; break;
+        case "Home": next = items[0]; break;
+        case "End": next = items[items.length - 1]; break;
+        case "Enter": case " ": items[index]?.click(); break;
+        case "Escape": popup.hidePopover(); trigger.focus(); break;
+        default:
+          if (event.key.length !== 1 || event.key === " " || event.ctrlKey || event.metaKey || event.altKey) return;
+          var now = Date.now();
+          typed = (now - typedAt > 500 ? "" : typed) + event.key.toLowerCase();
+          typedAt = now;
+          next = items.slice(index + 1).concat(items.slice(0, index + 1)).find(function (item) {
+            return item.textContent.trim().toLowerCase().startsWith(typed);
+          });
+      }
+      event.preventDefault();
+      next?.focus();
+    });
+    popup.addEventListener("focusout", function (event) {
+      if (event.relatedTarget && !popup.contains(event.relatedTarget)) popup.hidePopover();
+    });
+    function keepAnchored(event) {
+      if ((event.type === "resize" || !popup.contains(event.target)) && !positionPopup()) popup.hidePopover();
+    }
+    popup.addEventListener("toggle", function () {
+      var visible = popup.matches(":popover-open");
+      trigger.setAttribute("aria-expanded", String(visible));
+      if (visible) {
+        global.addEventListener("scroll", keepAnchored, true);
+        global.addEventListener("resize", keepAnchored);
+      } else {
+        global.removeEventListener("scroll", keepAnchored, true);
+        global.removeEventListener("resize", keepAnchored);
+      }
+    });
+    select.addEventListener("change", sync);
+    new MutationObserver(function () { popup.hidePopover(); sync(); })
+      .observe(select, { childList: true, subtree: true, attributes: true });
+    sync();
+  }
+
   if (global && global.document && global.document.getElementById) {
-    var boot = function () { new App(global.document, global).start(); };
+    var boot = function () {
+      var doc = global.document;
+      doc.querySelectorAll(".panel-select").forEach(function (select) { styleSelect(select, doc); });
+      new App(doc, global).start();
+    };
     if (global.document.readyState === "loading") global.document.addEventListener("DOMContentLoaded", boot);
     else boot();
   }
