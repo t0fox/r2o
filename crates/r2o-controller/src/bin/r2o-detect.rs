@@ -3,7 +3,7 @@
 //! Отдельный бинарник нужен для построчной сверки `print_json`/`print_human`
 //! и кодов возврата с донором `detect/main.c`, не затрагивая CLI контроллера.
 
-fn main() {
+pub(crate) fn main() {
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();

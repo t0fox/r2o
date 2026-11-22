@@ -288,7 +288,25 @@ struct ServeBothOptions {
     live6: Option<PathBuf>,
 }
 
+#[path = "bin/r2o-detect.rs"]
+mod r2o_detect_applet;
+#[path = "bin/r2o-fetch.rs"]
+mod r2o_fetch_applet;
+
 fn main() {
+    let program = std::env::args_os().next().unwrap_or_default();
+    let filename = std::path::Path::new(&program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    match filename
+        .split_once("-linux-")
+        .map_or(filename, |(name, _)| name)
+    {
+        "r2o-detect" => return r2o_detect_applet::main(),
+        "r2o-fetch" => return r2o_fetch_applet::main(),
+        _ => {}
+    }
     let mut r2o_arguments: Vec<_> = std::env::args_os().skip(1).collect();
     if let Err(error) = r2o_take_control_wire_args(&mut r2o_arguments) {
         eprintln!("r2o-controller: {error}");

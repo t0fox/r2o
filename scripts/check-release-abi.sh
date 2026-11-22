@@ -91,7 +91,15 @@ for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager 
         r2o-controller|r2o-panel) timeout 30 "$@" "$bin" --self-check ;;
         r2o-detect)
             output=$(timeout 30 "$@" "$bin" classify 127.0.0.1:443 --sni example.com --dump-trigger)
-            printf '%s\n' "$output" | grep -Eq '^1603[0-9a-f]+$' || fail 'неверный TLS ClientHello' ;;
+            printf '%s\n' "$output" | grep -Eq '^1603[0-9a-f]+$' || fail 'неверный TLS ClientHello'
+            alias_output=$(timeout 30 "$@" -0 "r2o-detect-linux-$abi" "$dir/r2o-controller" \
+                classify 127.0.0.1:443 --raw 00ff --dump-trigger)
+            [ "$alias_output" = 00ff ] || fail 'режим detect в контроллере' ;;
+        r2o-fetch)
+            output=$(timeout 30 "$@" "$bin" --version)
+            alias_output=$(timeout 30 "$@" -0 "r2o-fetch-linux-$abi" "$dir/r2o-controller" --version)
+            [ "$alias_output" = "$output" ] || fail 'режим fetch в контроллере'
+            printf '%s\n' "$output" ;;
         *) timeout 30 "$@" "$bin" --version ;;
     esac
 done

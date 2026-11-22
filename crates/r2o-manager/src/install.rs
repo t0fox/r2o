@@ -387,6 +387,7 @@ fn activate_bundle_locked(
 
     let staging = create_staging_dir(&releases, release_id)?;
     let copy_result = copy_tree(bundle, &staging).and_then(|()| {
+        link_controller_applets(&staging, architecture)?;
         write_synced(&staging.join("release-id"), release_id.as_bytes())?;
         write_synced(
             &staging.join("release-architecture"),
@@ -856,6 +857,33 @@ fn read_release_architecture(root: &Path, release_id: &str) -> Result<String, In
     Ok(architecture)
 }
 
+fn link_controller_applets(staging: &Path, architecture: &str) -> io::Result<()> {
+    const FORMAT: &[u8] = b"R2O-CONTROLLER-APPLETS-1\n";
+    let marker = staging.join("router/controller-applets");
+    let file = match File::open(marker) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::with_capacity(FORMAT.len());
+    file.take(FORMAT.len() as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes != FORMAT {
+        return Ok(());
+    }
+
+    let builds = staging.join("builds");
+    let controller = builds.join(format!("r2o-controller-linux-{architecture}"));
+    for applet in ["r2o-fetch", "r2o-detect"] {
+        let installed = builds.join(format!("{applet}-linux-{architecture}"));
+        let temporary = builds.join(format!(".{applet}.link"));
+        // На ФС без жёстких ссылок оставляем отдельный проверенный ELF из архива.
+        if installed.is_file() && fs::hard_link(&controller, &temporary).is_ok() {
+            fs::rename(temporary, installed)?;
+        }
+    }
+    sync_directory(&builds)
+}
+
 fn install_manager_launcher(
     root: &Path,
     release: &Path,
@@ -1276,6 +1304,44 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&tar_bytes).unwrap();
         encoder.finish().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installation_shares_controller_applets_and_keeps_old_release() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = TestDir::new();
+        let root = temp.0.join("install");
+        let legacy = bundle(&temp.0, "legacy", "mipsel");
+        let modern = bundle(&temp.0, "modern", "mipsel");
+        fs::create_dir(modern.join("router")).unwrap();
+        fs::write(
+            modern.join("router/controller-applets"),
+            "R2O-CONTROLLER-APPLETS-1\n",
+        )
+        .unwrap();
+        let detect = modern.join("builds/r2o-detect-linux-mipsel");
+        fs::write(&detect, "detect").unwrap();
+        fs::set_permissions(&detect, fs::Permissions::from_mode(0o755)).unwrap();
+
+        activate_bundle(&root, &legacy, "r2o-legacy", "mipsel").unwrap();
+        activate_bundle(&root, &modern, "r2o-modern", "mipsel").unwrap();
+        let controller = active_component_path(&root, "r2o-controller").unwrap();
+        let controller = fs::metadata(controller).unwrap();
+        for applet in ["r2o-fetch", "r2o-detect"] {
+            let path = active_component_path(&root, applet).unwrap();
+            let metadata = fs::metadata(path).unwrap();
+            assert_eq!(
+                (metadata.dev(), metadata.ino()),
+                (controller.dev(), controller.ino())
+            );
+        }
+
+        rollback(&root).unwrap();
+        let fetch = active_component_path(&root, "r2o-fetch").unwrap();
+        assert_eq!(fs::read_to_string(fetch).unwrap(), "legacy:r2o-fetch");
+        assert!(active_component_path(&root, "r2o-detect").is_err());
     }
 
     #[test]

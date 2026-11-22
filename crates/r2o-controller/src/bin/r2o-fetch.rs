@@ -20,7 +20,7 @@ fn r2o_vol_verdict_code(r2o_verdict: R2oFetchVolumeTxVerdict) -> &'static str {
     }
 }
 
-fn main() {
+pub(crate) fn main() {
     let code = match run() {
         Ok(code) => code,
         Err(error) => {
