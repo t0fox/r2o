@@ -336,6 +336,7 @@ impl NamePlans {
 
     pub fn handle(&mut self, frame: &Frame) -> Ack {
         let addr_probe = matches!(frame.kind, COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE);
+        let endpoint_bound = frame.kind == control::COMMAND_SET_ENDPOINT_BOUND;
         let area_command = matches!(
             frame.kind,
             COMMAND_SET_SUFFIX | COMMAND_DEL_SUFFIX | COMMAND_SET_BYPASS | COMMAND_DEL_BYPASS
@@ -347,7 +348,7 @@ impl NamePlans {
                 .and_then(|bytes| bytes.try_into().ok())
         } else if frame.kind == COMMAND_DEL_NAME_PROBE {
             control::name_probe_delete_trial_id(&frame.body)
-        } else if frame.kind == COMMAND_SET_NAME_BOUND {
+        } else if frame.kind == COMMAND_SET_NAME_BOUND || endpoint_bound {
             Some(
                 frame
                     .body
@@ -385,14 +386,18 @@ impl NamePlans {
         } else {
             &frame.body
         };
-        let (ok, reason) = if area_command && frame.body.len() < 16 {
+        let (ok, reason) = if (area_command && frame.body.len() < 16)
+            || (endpoint_bound && trial_id == Some([0; 16]))
+        {
             (false, control::ACK_BAD_ARGS)
         } else {
             match frame.kind {
                 COMMAND_SET_NAME => self.set_name(body),
                 COMMAND_SET_NAME_BOUND => self.set_name_bound(body),
                 COMMAND_SET_ADDR => self.set_addr(body),
-                control::COMMAND_SET_ENDPOINT => self.set_endpoint(body),
+                control::COMMAND_SET_ENDPOINT | control::COMMAND_SET_ENDPOINT_BOUND => {
+                    self.set_endpoint(body)
+                }
                 control::COMMAND_DEL_ENDPOINT => self.delete_endpoint(body),
                 COMMAND_SET_SUFFIX => self.set_suffix(body),
                 COMMAND_DEL_SUFFIX => self.delete_domain_area(body, true),
@@ -436,7 +441,13 @@ impl NamePlans {
             reason,
             trial_id,
             area_id,
-            binding_context: if frame.kind == COMMAND_SET_NAME_BOUND {
+            binding_context: if endpoint_bound {
+                Some(if ok {
+                    self.endpoint_binding_context(body).unwrap_or_default()
+                } else {
+                    control::BindingContext::default()
+                })
+            } else if frame.kind == COMMAND_SET_NAME_BOUND {
                 Some(if ok {
                     self.http_name_binding_context(body).unwrap_or_default()
                 } else {
@@ -1373,6 +1384,25 @@ impl NamePlans {
             },
             plan,
         )
+    }
+
+    fn endpoint_binding_context(&self, body: &[u8]) -> Option<control::BindingContext> {
+        let (endpoint, shape) =
+            control::decode_endpoint_key(body.get(..control::ENDPOINT_KEY_LEN)?)?;
+        let key = AddrPlanKey {
+            address: endpoint.ip().into(),
+            shape,
+            port: endpoint.port(),
+        };
+        let installed = self.addr_plans.get(&key)?;
+        Some(control::BindingContext {
+            generation: installed.generation,
+            kind: 2,
+            family: key.address.family(),
+            shape,
+            temporary: false,
+            epoch: self.epoch,
+        })
     }
 
     fn delete_endpoint(&mut self, body: &[u8]) -> (bool, u8) {

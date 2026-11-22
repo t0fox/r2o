@@ -1882,6 +1882,72 @@ pub fn add_confirmed_quic_endpoint_binding(
     )
 }
 
+pub fn add_confirmed_stun_endpoint_binding(
+    catalog: &mut Catalog,
+    endpoint: std::net::SocketAddr,
+    source_text: &str,
+    now: i64,
+) -> Result<String, String> {
+    let shape = r2k_core::control::SHAPE_VOICE;
+    r2k_core::control::encode_delete_endpoint(endpoint, shape)?;
+    if now < 0 {
+        return Err("недопустимое время подтверждения STUN".into());
+    }
+    let family = if endpoint.is_ipv4() { 4 } else { 6 };
+    let canonical = canonical_plan_text(source_text)?;
+    let plan_id = stable_plan_id(family, shape, &canonical);
+    let plan_text = text_with_id(&canonical, &plan_id)?;
+    let bytes = crate::plan_text::compile_text(&plan_text)?;
+    let plan = RuntimePlan::parse(&bytes).map_err(|error| error.to_string())?;
+    if plan.transport != 17 || plan.proto != r2k_core::plan::PROTO_VOICE || plan.ipfrag != 1 {
+        return Err("адресный STUN-план требует UDP voice с ipfrag 1".into());
+    }
+    r2o_datapath::engine::validate_runtime_plan(&plan)?;
+    bind_confirmed(
+        catalog,
+        &format!("auto-{plan_id}"),
+        &plan_id,
+        &plan_text,
+        "voice",
+        &endpoint.ip().to_string(),
+        "addr",
+        17,
+        family,
+        shape,
+        0,
+        3,
+        1,
+        now,
+        endpoint.port(),
+        None,
+    )?;
+    Ok(plan_id)
+}
+
+pub fn has_confirmed_stun_endpoint(catalog: &Catalog, endpoint: std::net::SocketAddr) -> bool {
+    let target = endpoint.ip().to_string();
+    let family = if endpoint.is_ipv4() { 4 } else { 6 };
+    catalog.boxes.iter().any(|record| {
+        record.bindings.iter().any(|binding| {
+            binding.kind == "addr"
+                && binding.transport == 17
+                && binding.shape == r2k_core::control::SHAPE_VOICE
+                && binding.family == family
+                && binding.target == target
+                && binding.port == endpoint.port()
+                && binding.port != 0
+                && binding.enabled
+                && binding.level >= 3
+                && binding.verified_by == 3
+                && binding.recheck_since.unwrap_or(0) == 0
+                && record
+                    .plans
+                    .iter()
+                    .any(|plan| plan.enabled && plan.id == binding.plan_id)
+        })
+    })
+}
+
 pub fn add_confirmed_quic_name_binding(
     catalog: &mut Catalog,
     host: &str,

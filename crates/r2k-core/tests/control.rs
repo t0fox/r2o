@@ -1481,8 +1481,9 @@ fn http_portal_and_response_bodies_match_donor_shapes() {
 #[ignore = "запускается с C-оракулом через test-ip-udp-endpoint-differential.sh"]
 fn d2k_udp_endpoint_совпадает_по_ipv4_и_ipv6() {
     use r2k_core::control::{
-        COMMAND_DEL_ENDPOINT, COMMAND_SET_ENDPOINT, ENDPOINT_KEY_LEN, SHAPE_QUIC, SHAPE_VOICE,
-        decode_endpoint_key, encode_delete_endpoint, encode_set_endpoint, read_frame,
+        COMMAND_DEL_ENDPOINT, COMMAND_SET_ENDPOINT, COMMAND_SET_ENDPOINT_BOUND, ENDPOINT_KEY_LEN,
+        SHAPE_QUIC, SHAPE_VOICE, decode_endpoint_key, encode_delete_endpoint, encode_set_endpoint,
+        encode_set_endpoint_bound, read_frame,
     };
 
     let mut actual = String::new();
@@ -1490,9 +1491,12 @@ fn d2k_udp_endpoint_совпадает_по_ipv4_и_ipv6() {
         let endpoint: std::net::SocketAddr = endpoint.parse().unwrap();
         let set = encode_set_endpoint(endpoint, SHAPE_QUIC, &[0xaa, 0xbb]).unwrap();
         let del = encode_delete_endpoint(endpoint, SHAPE_VOICE).unwrap();
+        let set_bound =
+            encode_set_endpoint_bound(endpoint, SHAPE_VOICE, &[0xaa, 0xbb], [0x5a; 16]).unwrap();
         for (wire, command, shape) in [
             (set, COMMAND_SET_ENDPOINT, SHAPE_QUIC),
             (del, COMMAND_DEL_ENDPOINT, SHAPE_VOICE),
+            (set_bound, COMMAND_SET_ENDPOINT_BOUND, SHAPE_VOICE),
         ] {
             let frame = read_frame(&mut wire.as_slice()).unwrap();
             assert_eq!(frame.kind, command);

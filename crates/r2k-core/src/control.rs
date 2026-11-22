@@ -90,6 +90,7 @@ pub const COMMAND_DEL_VOICE_ADDR_PROBE: u16 = 0x0096;
 // Команды R2OP: номера D2K для endpoint пересекаются с уже занятыми voice-командами.
 pub const COMMAND_SET_ENDPOINT: u16 = 0x00a0;
 pub const COMMAND_DEL_ENDPOINT: u16 = 0x00a1;
+pub const COMMAND_SET_ENDPOINT_BOUND: u16 = 0x00a2;
 pub const ENDPOINT_KEY_LEN: usize = 20;
 pub const COMMAND_SET_ADDR_PROBE: u16 = 0x0089;
 pub const COMMAND_DEL_ADDR_PROBE: u16 = 0x008a;
@@ -1701,6 +1702,22 @@ pub fn encode_delete_endpoint(endpoint: SocketAddr, shape: u8) -> Result<Vec<u8>
     encode_frame(COMMAND_DEL_ENDPOINT, &endpoint_key(endpoint, shape)?)
 }
 
+pub fn encode_set_endpoint_bound(
+    endpoint: SocketAddr,
+    shape: u8,
+    plan_records: &[u8],
+    token: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    if token == [0; 16] {
+        return Err("подтверждаемая UDP-привязка требует ненулевой токен");
+    }
+    let mut body = Vec::with_capacity(ENDPOINT_KEY_LEN + plan_records.len() + token.len());
+    body.extend_from_slice(&endpoint_key(endpoint, shape)?);
+    body.extend_from_slice(plan_records);
+    body.extend_from_slice(&token);
+    encode_frame(COMMAND_SET_ENDPOINT_BOUND, &body)
+}
+
 pub fn encode_set_addr(
     address: IpAddr,
     shape: u8,
@@ -2268,13 +2285,15 @@ pub fn encode_ack_with_identifiers_profile(
     area_id: Option<[u8; 16]>,
     binding_context: Option<BindingContext>,
 ) -> Result<Vec<u8>, &'static str> {
-    if command == COMMAND_SET_NAME_BOUND && (trial_id.is_none() || binding_context.is_none()) {
-        return Err("SET_NAME_BOUND ACK требует trial ID и контекст привязки");
+    let bound_install = matches!(command, COMMAND_SET_NAME_BOUND | COMMAND_SET_ENDPOINT_BOUND);
+    if bound_install && (trial_id.is_none() || binding_context.is_none()) {
+        return Err("ACK подтверждаемой установки требует токен и контекст привязки");
     }
     if trial_id.is_some()
         && !matches!(
             command,
             COMMAND_SET_NAME_BOUND
+                | COMMAND_SET_ENDPOINT_BOUND
                 | COMMAND_SET_NAME_PROBE
                 | COMMAND_SET_VOICE_ADDR_PROBE
                 | COMMAND_DEL_VOICE_ADDR_PROBE
@@ -2294,16 +2313,12 @@ pub fn encode_ack_with_identifiers_profile(
         return Err("area ID ACK разрешён только для команды области");
     }
     if let Some(binding) = binding_context {
-        let valid_http_binding = binding.is_known()
-            && binding.kind == 1
-            && matches!(binding.family, 4 | 6)
-            && binding.shape == SHAPE_HTTP
-            && !binding.temporary;
-        if command == COMMAND_SET_NAME_BOUND {
-            if ok && !valid_http_binding || !ok && binding != BindingContext::default() {
-                return Err("SET_NAME_BOUND ACK содержит неверный контекст привязки");
+        let valid_binding = valid_install_ack_binding(command, &binding);
+        if bound_install {
+            if ok && !valid_binding || !ok && binding != BindingContext::default() {
+                return Err("ACK подтверждаемой установки содержит неверный контекст привязки");
             }
-        } else if !ok || trial_id.is_some() || command != COMMAND_SET_NAME || !valid_http_binding {
+        } else if !ok || trial_id.is_some() || command != COMMAND_SET_NAME || !valid_binding {
             return Err("контекст привязки ACK допустим только для постоянного HTTP-плана имени");
         }
     }
@@ -2363,9 +2378,11 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
     if ok && reason != ACK_OK {
         return Err("успешное подтверждение содержит код отказа");
     }
+    let bound_install = matches!(command, COMMAND_SET_NAME_BOUND | COMMAND_SET_ENDPOINT_BOUND);
     let supports_trial_id = matches!(
         command,
         COMMAND_SET_NAME_BOUND
+            | COMMAND_SET_ENDPOINT_BOUND
             | COMMAND_SET_NAME_PROBE
             | COMMAND_SET_VOICE_ADDR_PROBE
             | COMMAND_DEL_VOICE_ADDR_PROBE
@@ -2380,7 +2397,7 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
     let remaining = frame.body.len() - cursor;
     let trial_id = if supports_trial_id
         && (remaining == 16
-            || command == COMMAND_SET_NAME_BOUND
+            || bound_install
                 && (remaining == 16 + ACK_BINDING_CONTEXT_LEN
                     || remaining == 16 + BINDING_CONTEXT_LEN))
     {
@@ -2404,7 +2421,7 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
     };
     let binding_context = if cursor == frame.body.len() {
         None
-    } else if matches!(command, COMMAND_SET_NAME | COMMAND_SET_NAME_BOUND) {
+    } else if bound_install || command == COMMAND_SET_NAME {
         let context = if frame.body.len() == cursor + ACK_BINDING_CONTEXT_LEN
             && frame.body[cursor..cursor + 4] == *ACK_BINDING_CONTEXT_MAGIC
         {
@@ -2432,24 +2449,20 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
                 .try_into()
                 .map_err(|_| "неверная эпоха таблицы привязок ACK")?,
         };
-        let valid_http_binding = binding.is_known()
-            && binding.kind == 1
-            && matches!(binding.family, 4 | 6)
-            && binding.shape == SHAPE_HTTP
-            && !binding.temporary;
-        if command == COMMAND_SET_NAME_BOUND {
-            if ok && !valid_http_binding || !ok && binding != BindingContext::default() {
-                return Err("ACK содержит неверный контекст SET_NAME_BOUND");
+        let valid_binding = valid_install_ack_binding(command, &binding);
+        if bound_install {
+            if ok && !valid_binding || !ok && binding != BindingContext::default() {
+                return Err("ACK содержит неверный контекст подтверждаемой установки");
             }
-        } else if !valid_http_binding || !ok {
+        } else if !valid_binding || !ok {
             return Err("ACK содержит неверный HTTP-контекст привязки");
         }
         Some(binding)
     } else {
         return Err("неверная длина подтверждения команды");
     };
-    if command == COMMAND_SET_NAME_BOUND && (trial_id.is_none() || binding_context.is_none()) {
-        return Err("SET_NAME_BOUND ACK не содержит trial ID или контекст привязки");
+    if bound_install && (trial_id.is_none() || binding_context.is_none()) {
+        return Err("ACK подтверждаемой установки не содержит токен или контекст привязки");
     }
     Ok(Ack {
         command,
@@ -2459,6 +2472,17 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
         area_id,
         binding_context,
     })
+}
+
+fn valid_install_ack_binding(command: u16, binding: &BindingContext) -> bool {
+    binding.is_known()
+        && matches!(binding.family, 4 | 6)
+        && !binding.temporary
+        && if command == COMMAND_SET_ENDPOINT_BOUND {
+            binding.kind == 2 && matches!(binding.shape, SHAPE_QUIC | SHAPE_VOICE)
+        } else {
+            binding.kind == 1 && binding.shape == SHAPE_HTTP
+        }
 }
 
 #[cfg(test)]

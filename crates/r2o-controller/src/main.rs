@@ -7626,6 +7626,148 @@ struct R2oQuicDiscoveryOutcome {
 }
 
 #[cfg(unix)]
+const STUN_ADDRESS_PLAN: &str =
+    "r2o-plan 1 7\nid 00000000000000000000000000000000\nproto udp voice\nipfrag 1\n";
+
+#[cfg(unix)]
+struct StunDiscoveryJob {
+    client: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+    measure_mark: u32,
+    probe_mark: u32,
+    permit: r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
+}
+
+#[cfg(unix)]
+struct StunClientTrial {
+    client: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+    id: [u8; 16],
+    expires: std::time::Instant,
+    applied: Option<control::AppliedEvent>,
+}
+
+#[cfg(unix)]
+impl StunClientTrial {
+    fn new(
+        client: std::net::SocketAddr,
+        server: std::net::SocketAddr,
+    ) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            client,
+            server,
+            id: random_id()?,
+            expires: std::time::Instant::now()
+                + std::time::Duration::from_millis(u64::from(ADDR_PROBE_LEASE_MAX_MS)),
+            applied: None,
+        })
+    }
+
+    fn set(&self) -> Result<Vec<u8>, Box<dyn Error>> {
+        let text = r2o_controller::discovery::plan_text_for_trial(STUN_ADDRESS_PLAN, self.id)?;
+        let records = r2o_plan_records_for_wire(&compile_text(&text)?)?;
+        Ok(encode_set_addr_probe(
+            self.client,
+            self.server,
+            ADDR_PROBE_LEASE_MAX_MS,
+            &records,
+            self.id,
+        )?)
+    }
+
+    fn delete(&self) -> Result<Vec<u8>, &'static str> {
+        encode_delete_addr_probe(self.client, self.server, self.id)
+    }
+
+    fn matches(&self, applied: &control::AppliedEvent) -> bool {
+        applied.is_stun_trial_execution()
+            && applied_quic_trial_matches(applied, self.id, self.id, self.client, self.server)
+    }
+}
+
+#[cfg(unix)]
+enum StunDiagnosticVerdict {
+    Direct,
+    Candidate,
+    Unconfirmed,
+}
+
+#[cfg(unix)]
+struct StunDiscoveryOutcome {
+    client: std::net::SocketAddr,
+    server: std::net::SocketAddr,
+    result: Result<StunDiagnosticVerdict, String>,
+}
+
+#[cfg(unix)]
+fn run_address_stun_discovery(
+    job: &mut StunDiscoveryJob,
+    commands: &dyn HttpSearchCommandSink,
+    cancel: &AtomicBool,
+) -> Result<StunDiagnosticVerdict, Box<dyn Error>> {
+    use r2o_controller::r2o_quic_http3::{
+        r2o_quic_http3_set_socket_mark, r2o_quic_http3_udp_socket_fresh,
+    };
+    use r2o_controller::voice_measure::probe_stun_on;
+    use std::time::Duration;
+
+    let (socket, marked) = r2o_quic_http3_udp_socket_fresh(job.server, Some(job.measure_mark))
+        .map_err(|error| error.source)?;
+    if !marked || cancel.load(Ordering::Relaxed) {
+        return Err("прямой STUN-зонд отменён или не получил SO_MARK".into());
+    }
+    if probe_stun_on(&socket, Duration::from_secs(3))?.is_some() {
+        return Ok(StunDiagnosticVerdict::Direct);
+    }
+    if !job.permit.r2o_yield_if_contended_with_cancel(cancel) || cancel.load(Ordering::Relaxed) {
+        return Err("STUN-испытание отменено".into());
+    }
+    // Сохраняем подтверждённый прямой датаграммой кортеж conntrack для IP-фрагментов.
+    r2o_quic_http3_set_socket_mark(&socket, job.probe_mark)?;
+    let trial = StunClientTrial::new(socket.local_addr()?, job.server)?;
+    let set = trial.set()?;
+    let delete = trial.delete()?;
+    let ack = ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
+        HttpSearchCommand::R2oInstallQuicProbe {
+            command: set,
+            delete: delete.clone(),
+            trial_id: trial.id,
+            deadline,
+            reply,
+        }
+    })?;
+    if !ack.ok || ack.trial_id != Some(trial.id) {
+        return Err("STUN-кандидат не получил точный ACK установки".into());
+    }
+    let verified = (|| -> Result<bool, Box<dyn Error>> {
+        if cancel.load(Ordering::Relaxed)
+            || probe_stun_on(&socket, Duration::from_secs(3))?.is_none()
+        {
+            return Ok(false);
+        }
+        let events = r2o_collect_controller_applied_events_until(
+            commands,
+            trial.id,
+            CONTROL_ACK_TIMEOUT,
+            |event| trial.matches(event),
+        )?;
+        Ok(events.iter().any(|event| trial.matches(event)))
+    })();
+    ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
+        HttpSearchCommand::R2oDeleteQuicProbe {
+            command: delete,
+            deadline,
+            reply,
+        }
+    })?;
+    Ok(if verified? {
+        StunDiagnosticVerdict::Candidate
+    } else {
+        StunDiagnosticVerdict::Unconfirmed
+    })
+}
+
+#[cfg(unix)]
 fn r2o_quic_snapshot_server_name(snapshot: &[u8], server: std::net::SocketAddr) -> Option<String> {
     let parsed = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(snapshot)?;
     match r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(parsed.datagrams()).ok()? {
@@ -11025,6 +11167,12 @@ struct R2oQuicDiscoveryJob {
 }
 
 #[cfg(unix)]
+enum R2oUdpDiscoveryJob {
+    Quic(R2oQuicDiscoveryJob),
+    Stun(StunDiscoveryJob),
+}
+
+#[cfg(unix)]
 struct R2oQuicActiveSnapshot {
     host: String,
     remeasured: Arc<AtomicBool>,
@@ -11033,11 +11181,14 @@ struct R2oQuicActiveSnapshot {
 
 #[cfg(unix)]
 struct R2oQuicDiscoveryWorker {
-    jobs: Option<SyncSender<R2oQuicDiscoveryJob>>,
+    jobs: Option<SyncSender<R2oUdpDiscoveryJob>>,
     commands: Option<Receiver<HttpSearchCommand>>,
     outcomes: Receiver<R2oQuicDiscoveryOutcome>,
+    stun_outcomes: Receiver<StunDiscoveryOutcome>,
     cancel: Arc<AtomicBool>,
     active: HashMap<std::net::SocketAddr, R2oQuicActiveSnapshot>,
+    stun_active: HashSet<std::net::SocketAddr>,
+    stun_cooldowns: HashMap<std::net::SocketAddr, std::time::Instant>,
     trial_cooldowns: HashMap<R2oQuicCooldownKey, std::time::Instant>,
     pending_snapshots: Arc<std::sync::Mutex<HashMap<std::net::SocketAddr, (Vec<u8>, String)>>>,
     threads: Vec<JoinHandle<()>>,
@@ -11085,11 +11236,13 @@ impl R2oQuicDiscoveryWorker {
 
     fn r2o_new_with_runner(runner: Arc<R2oQuicDiscoveryRunner>) -> Self {
         let (jobs, job_receiver) =
-            mpsc::sync_channel::<R2oQuicDiscoveryJob>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
+            mpsc::sync_channel::<R2oUdpDiscoveryJob>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
         let job_receiver = Arc::new(std::sync::Mutex::new(job_receiver));
         let (command_sender, commands) = mpsc::sync_channel::<HttpSearchCommand>(16);
         let (outcome_sender, outcomes) =
             mpsc::sync_channel::<R2oQuicDiscoveryOutcome>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
+        let (stun_sender, stun_outcomes) =
+            mpsc::sync_channel::<StunDiscoveryOutcome>(R2O_QUIC_DISCOVERY_WORKER_COUNT);
         let cancel = Arc::new(AtomicBool::new(false));
         let pending_snapshots = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let mut threads = Vec::with_capacity(R2O_QUIC_DISCOVERY_WORKER_COUNT);
@@ -11097,6 +11250,7 @@ impl R2oQuicDiscoveryWorker {
             let worker_jobs = Arc::clone(&job_receiver);
             let worker_commands = command_sender.clone();
             let worker_outcomes = outcome_sender.clone();
+            let stun_outcomes = stun_sender.clone();
             let worker_cancel = Arc::clone(&cancel);
             let worker_snapshots = Arc::clone(&pending_snapshots);
             let worker_runner = Arc::clone(&runner);
@@ -11106,12 +11260,34 @@ impl R2oQuicDiscoveryWorker {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .recv();
-                    let Ok(mut job) = job else {
+                    let Ok(job) = job else {
                         break;
                     };
                     if worker_cancel.load(Ordering::Relaxed) {
                         break;
                     }
+                    let mut job = match job {
+                        R2oUdpDiscoveryJob::Quic(job) => job,
+                        R2oUdpDiscoveryJob::Stun(mut job) => {
+                            let result = run_address_stun_discovery(
+                                &mut job,
+                                &worker_commands,
+                                &worker_cancel,
+                            )
+                            .map_err(|error| error.to_string());
+                            if stun_outcomes
+                                .send(StunDiscoveryOutcome {
+                                    client: job.client,
+                                    server: job.server,
+                                    result,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
                     let server = job.task.server;
                     let deny_recheck = job.task.deny_recheck;
                     let mut result = worker_runner(
@@ -11170,8 +11346,11 @@ impl R2oQuicDiscoveryWorker {
             jobs: Some(jobs),
             commands: Some(commands),
             outcomes,
+            stun_outcomes,
             cancel,
             active: HashMap::new(),
+            stun_active: HashSet::new(),
+            stun_cooldowns: HashMap::new(),
             trial_cooldowns: HashMap::new(),
             pending_snapshots,
             threads,
@@ -11205,10 +11384,10 @@ impl R2oQuicDiscoveryWorker {
         };
         let remeasured = Arc::new(AtomicBool::new(false));
         if jobs
-            .try_send(R2oQuicDiscoveryJob {
+            .try_send(R2oUdpDiscoveryJob::Quic(R2oQuicDiscoveryJob {
                 task,
                 remeasured: Arc::clone(&remeasured),
-            })
+            }))
             .is_err()
         {
             return false;
@@ -11293,7 +11472,37 @@ impl R2oQuicDiscoveryWorker {
     }
 
     fn has_capacity(&self) -> bool {
-        self.active.len() < R2O_QUIC_DISCOVERY_WORKER_COUNT
+        self.active.len() + self.stun_active.len() < R2O_QUIC_DISCOVERY_WORKER_COUNT
+    }
+
+    fn queue_stun(&mut self, job: StunDiscoveryJob) -> bool {
+        let now = std::time::Instant::now();
+        self.stun_cooldowns.retain(|_, until| *until > now);
+        let server = job.server;
+        if !self.has_capacity()
+            || self.stun_active.contains(&server)
+            || self.stun_cooldowns.contains_key(&server)
+            || self.stun_cooldowns.len() >= 128
+        {
+            return false;
+        }
+        if !self
+            .jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.try_send(R2oUdpDiscoveryJob::Stun(job)).is_ok())
+        {
+            return false;
+        }
+        self.stun_active.insert(server);
+        self.stun_cooldowns
+            .insert(server, now + std::time::Duration::from_secs(120));
+        true
+    }
+
+    fn try_stun_outcome(&mut self) -> Option<StunDiscoveryOutcome> {
+        let outcome = self.stun_outcomes.try_recv().ok()?;
+        self.stun_active.remove(&outcome.server);
+        Some(outcome)
     }
 
     fn try_command(&self) -> Option<HttpSearchCommand> {
@@ -23663,9 +23872,9 @@ fn control_command_trial_id(command: &[u8], expected: u16) -> Option<[u8; 16]> {
         return control::name_probe_delete_trial_id(body);
     }
     let trial = match expected {
-        control::COMMAND_SET_NAME_BOUND | control::COMMAND_SET_NAME_PROBE => {
-            body.get(body.len().checked_sub(16)?..)?
-        }
+        control::COMMAND_SET_NAME_BOUND
+        | control::COMMAND_SET_NAME_PROBE
+        | control::COMMAND_SET_ENDPOINT_BOUND => body.get(body.len().checked_sub(16)?..)?,
         COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE => {
             body.get(r2k_core::control::KEY_LEN..r2k_core::control::KEY_LEN + 16)?
         }
@@ -24643,6 +24852,86 @@ impl ControlClient {
         Ok(())
     }
 
+    fn install_stun_client_trial(
+        &mut self,
+        client: std::net::SocketAddr,
+        server: std::net::SocketAddr,
+    ) -> Result<StunClientTrial, Box<dyn Error>> {
+        let trial = StunClientTrial::new(client, server)?;
+        let set = trial.set()?;
+        match self.exchange_command(&set, COMMAND_SET_ADDR_PROBE) {
+            Ok(ack) if ack.ok && ack.trial_id == Some(trial.id) => return Ok(trial),
+            _ => {
+                self.write_command(&trial.delete()?)?;
+            }
+        }
+        Err("датапат не подтвердил точную STUN-пробу исходного клиента".into())
+    }
+
+    fn confirm_stun_endpoint(
+        &mut self,
+        server: std::net::SocketAddr,
+        catalog: &mut Catalog,
+        path: &Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
+    ) -> Result<(), Box<dyn Error>> {
+        use r2o_controller::discovery::{
+            add_confirmed_stun_endpoint_binding, has_confirmed_stun_endpoint,
+        };
+
+        let (_lock, previous) =
+            locked_catalog_for_persistence(path, catalog, persistence.as_deref())?;
+        if has_confirmed_stun_endpoint(&previous, server) {
+            *catalog = previous;
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+        let mut updated = previous;
+        let id = add_confirmed_stun_endpoint_binding(&mut updated, server, STUN_ADDRESS_PLAN, now)?;
+        let text = &updated
+            .boxes
+            .iter()
+            .flat_map(|record| &record.plans)
+            .find(|plan| plan.id == id)
+            .ok_or("сохранённый STUN-план отсутствует")?
+            .text;
+        let records = r2o_plan_records_for_wire(&compile_text(text)?)?;
+        let token = random_id()?;
+        let set = control::encode_set_endpoint_bound(server, SHAPE_VOICE, &records, token)?;
+        let receipt = self.exchange_command(&set, control::COMMAND_SET_ENDPOINT_BOUND);
+        if matches!(&receipt, Ok(ack) if !ack.ok) {
+            return Err("датапат отверг постоянную STUN-привязку".into());
+        }
+        let result = receipt.and_then(|ack| {
+            if !ack.ok
+                || ack.trial_id != Some(token)
+                || !ack.binding_context.is_some_and(|binding| {
+                    binding.shape == SHAPE_VOICE
+                        && binding.family == if server.is_ipv4() { 4 } else { 6 }
+                })
+            {
+                return Err("нет точного ACK постоянной STUN-привязки".into());
+            }
+            persist_catalog_update(&updated, path, now, persistence.as_deref_mut())
+        });
+        if let Err(error) = result {
+            if let Err(cleanup) = self.send_command(
+                &control::encode_delete_endpoint(server, SHAPE_VOICE)?,
+                control::COMMAND_DEL_ENDPOINT,
+            ) {
+                eprintln!("STUN {server}: не удалось откатить постоянную привязку: {cleanup}");
+            }
+            return Err(error);
+        }
+        *catalog = updated;
+        println!(
+            "STUN {server}: сохранён адресный план {id} после Binding Response исходного клиента"
+        );
+        Ok(())
+    }
+
     fn watch_events(
         &mut self,
         discovery: Option<(Catalog, PathBuf, Option<u32>)>,
@@ -24769,6 +25058,8 @@ impl ControlClient {
         let mut https_probe = HttpsProbeWorker::new(https_probe_mark);
         let mut pending_http_searches = HashMap::<String, PendingHttpSearchAfterHttps>::new();
         let mut r2o_voice_trials = HashMap::<[u8; 16], R2oVoiceTrialContext>::new();
+        let mut stun_trials = HashMap::<[u8; 16], StunClientTrial>::new();
+        let mut stun_pending = VecDeque::new();
         let mut quic_snapshots =
             HashMap::<[u8; r2k_core::control::KEY_LEN], (Vec<u8>, std::time::Instant)>::new();
         let mut quic_hello_names =
@@ -24871,6 +25162,14 @@ impl ControlClient {
                     break Ok(());
                 }
                 let now = std::time::Instant::now();
+                for (_, trial) in stun_trials.extract_if(|_, trial| now >= trial.expires) {
+                    if let Err(error) = self.write_command(&trial.delete()?) {
+                        eprintln!(
+                            "STUN {}: не удалось снять истёкшую пробу: {error}",
+                            trial.server
+                        );
+                    }
+                }
                 for (_, pending) in pending_candidate_acks.extract_if(|_, ack| now >= ack.deadline)
                 {
                     pending.finish(self, None)?;
@@ -26045,6 +26344,40 @@ impl ControlClient {
                 }
                 if let Some(outcome) = quic_discovery
                     .as_mut()
+                    .and_then(R2oQuicDiscoveryWorker::try_stun_outcome)
+                {
+                    let server = outcome.server;
+                    match outcome.result {
+                        Ok(StunDiagnosticVerdict::Direct) => {
+                            println!("STUN {server}: прямой зонд получил свой Binding Response")
+                        }
+                        Ok(StunDiagnosticVerdict::Unconfirmed) => println!(
+                            "STUN {server}: нет пары Binding Response и точного APPLIED для зонда"
+                        ),
+                        Ok(StunDiagnosticVerdict::Candidate) if stun_trials.len() < 8 => {
+                            match self.install_stun_client_trial(outcome.client, server) {
+                                Ok(trial) => {
+                                    stun_trials.insert(trial.id, trial);
+                                    println!(
+                                        "STUN {server}: зонд подтверждён, жду Binding Response исходного клиента {} под временным планом",
+                                        outcome.client
+                                    );
+                                }
+                                Err(error) => eprintln!(
+                                    "STUN {server}: проба исходного клиента не установлена: {error}"
+                                ),
+                            }
+                        }
+                        Ok(StunDiagnosticVerdict::Candidate) => {
+                            println!("STUN {server}: заняты все временные клиентские пробы")
+                        }
+                        Err(error) => eprintln!("STUN {server}: диагностика не завершена: {error}"),
+                    }
+                    std::io::stdout().flush()?;
+                    continue;
+                }
+                if let Some(outcome) = quic_discovery
+                    .as_mut()
                     .and_then(R2oQuicDiscoveryWorker::try_outcome)
                 {
                     let family = if outcome.server.is_ipv4() { 4 } else { 6 };
@@ -26243,6 +26576,27 @@ impl ControlClient {
                         continue;
                     }
                     let now = std::time::Instant::now();
+                    stun_pending.retain(|&(_, _, seen)| {
+                        now.saturating_duration_since(seen) < std::time::Duration::from_secs(20)
+                    });
+                    if let Some(worker) = quic_discovery
+                        .as_mut()
+                        .filter(|worker| worker.has_capacity())
+                        && let Some(measure_mark) =
+                            discovery.as_ref().and_then(|(_, _, _, mark)| *mark)
+                        && let Some(probe_mark) = confirm_mark
+                        && !stun_pending.is_empty()
+                        && let Some(permit) = measurement_gate.r2o_try_acquire_queued()
+                        && let Some((client, server, _)) = stun_pending.pop_front()
+                    {
+                        worker.queue_stun(StunDiscoveryJob {
+                            client,
+                            server,
+                            measure_mark,
+                            probe_mark,
+                            permit,
+                        });
+                    }
                     if let Some((worker, _, _, _)) = &mut discovery {
                         for target in worker.r2o_expire_shape_waits(now) {
                             println!(
@@ -26663,6 +27017,63 @@ impl ControlClient {
                         ),
                     }
                     std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == control::EVENT_R2O_STUN_SUSPECT {
+                    let event = control::decode_stun_suspect(&frame)?;
+                    let (client, server) = flow_socket_addresses(&event.key, event.client_is_low);
+                    if let Some((_, catalog, _, Some(measure_mark))) = discovery.as_ref()
+                        && let Some(probe_mark) = confirm_mark
+                        && *measure_mark != 0
+                        && probe_mark != 0
+                        && *measure_mark != probe_mark
+                        && control::encode_delete_endpoint(client, SHAPE_VOICE).is_ok()
+                        && control::encode_delete_endpoint(server, SHAPE_VOICE).is_ok()
+                        && !r2o_controller::discovery::has_confirmed_stun_endpoint(catalog, server)
+                        && !stun_trials.values().any(|trial| trial.server == server)
+                        && !stun_pending
+                            .iter()
+                            .any(|&(_, pending, _)| pending == server)
+                        && stun_pending.len() < 8
+                    {
+                        stun_pending.push_back((client, server, std::time::Instant::now()));
+                    }
+                    continue;
+                }
+                if frame.kind == control::EVENT_R2O_STUN_EXCHANGE {
+                    let proof = control::decode_stun_exchange(&frame)?;
+                    if let Some(trial) = stun_trials.get(&proof.trial_id)
+                        && trial.expires > std::time::Instant::now()
+                        && trial.matches(&proof)
+                        && (trial.applied.as_ref() == Some(&proof)
+                            || self.pending_applied_events.contains(&proof))
+                    {
+                        let trial = stun_trials
+                            .remove(&proof.trial_id)
+                            .expect("найдена STUN-проба");
+                        if let Some((_, catalog, path, _)) = discovery.as_mut()
+                            && let Err(error) = self.confirm_stun_endpoint(
+                                trial.server,
+                                catalog,
+                                path,
+                                catalog_persistence.as_mut(),
+                            )
+                        {
+                            eprintln!(
+                                "STUN {}: постоянная привязка не установлена: {error}",
+                                trial.server
+                            );
+                        }
+                        if let Err(error) =
+                            self.send_command(&trial.delete()?, COMMAND_DEL_ADDR_PROBE)
+                        {
+                            eprintln!(
+                                "STUN {}: временная проба не снята до конца аренды: {error}",
+                                trial.server
+                            );
+                        }
+                        std::io::stdout().flush()?;
+                    }
                     continue;
                 }
                 if frame.kind == EVENT_R2O_VOICE_SUSPECT {
@@ -27920,6 +28331,11 @@ impl ControlClient {
                 if frame.kind == EVENT_APPLIED {
                     let applied = decode_applied(&frame)
                         .map_err(|error| format!("событие APPLIED: {error}"))?;
+                    if let Some(trial) = stun_trials.get_mut(&applied.trial_id)
+                        && trial.matches(&applied)
+                    {
+                        trial.applied = Some(applied.clone());
+                    }
                     let now = std::time::Instant::now();
                     let name = tcp_hello_names
                         .target_for_tcp_flow(&applied.key, now)
@@ -28490,6 +28906,16 @@ impl ControlClient {
         }
         for (_, pending) in pending_name_deletes.drain() {
             pending.finish(self, None);
+        }
+        for (_, trial) in stun_trials.drain() {
+            let cleanup =
+                (|| -> Result<(), Box<dyn Error>> { self.write_command(&trial.delete()?) })();
+            if let Err(error) = cleanup {
+                eprintln!(
+                    "STUN {}: временная проба доживёт до конца аренды: {error}",
+                    trial.server
+                );
+            }
         }
         for error in r2o_cleanup_voice_trials_on_shutdown(&mut r2o_voice_trials, |trial| {
             self.retire_r2o_voice_trial(trial)
@@ -32614,6 +33040,8 @@ impl ControlClient {
                 | EVENT_HTTP_RESPONSE
                 | EVENT_R2O_QUIC_STALL
                 | EVENT_R2O_QUIC_SUSPECT
+                | control::EVENT_R2O_STUN_SUSPECT
+                | control::EVENT_R2O_STUN_EXCHANGE
                 | EVENT_R2O_TCP_SILENT
                 | EVENT_R2O_TCP_STALL
                 | EVENT_R2O_TCP_FIN_RETRY

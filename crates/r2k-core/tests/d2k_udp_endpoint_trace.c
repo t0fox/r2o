@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include "d2k_link.h"
@@ -27,6 +28,8 @@ int main(void) {
 
     const int families[] = {4, 6};
     const uint8_t *addresses[] = {v4, v6};
+    uint8_t token[16];
+    memset(token, 0x5a, sizeof token);
     for (size_t i = 0; i < 2; ++i) {
         const uint16_t port = htons(853 + (uint16_t)i);
         if (d2k_link_set_endpoint(fd[0], addresses[i], families[i], port,
@@ -35,6 +38,9 @@ int main(void) {
             d2k_link_del_endpoint(fd[0], addresses[i], families[i], port,
                                   D2K_LINK_SHAPE_VOICE, NULL, 0) ||
             trace(fd[1], 26) ||
+            d2k_link_set_endpoint_bound(fd[0], addresses[i], families[i], port,
+                                        D2K_LINK_SHAPE_VOICE, "aabb", token, NULL, 0) ||
+            trace(fd[1], 44) ||
             d2k_link_set_endpoint(fd[0], addresses[i], families[i], 0,
                                   D2K_LINK_SHAPE_QUIC, "aabb", NULL, 0) == 0)
             return 3;
