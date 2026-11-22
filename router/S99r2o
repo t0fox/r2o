@@ -466,10 +466,14 @@ start_controller_both() {
     r2o_ct_mark=$1
     set -- --serve-both --serve4 "$SOCK4" "$CATALOG" --discover --mark "$r2o_ct_mark" \
         --measure-mark "$MEASURE_MARK" --live4 "$RUNTIME/live4.json"
+    r2o_ct_dns_family=${R2O_CONTROLLER_DNS_FAMILY:-}
     if [ "$IPV6_ENABLED" = 1 ]; then
         set -- "$@" --serve6 "$SOCK6" --live6 "$RUNTIME/live6.json"
+    else
+        r2o_ct_dns_family=4
     fi
-    spawn_component r2o-controller "$CT_PID" "$LOG/r2o-controller.log" "$@"
+    R2O_CONTROLLER_DNS_FAMILY="$r2o_ct_dns_family" \
+        spawn_component r2o-controller "$CT_PID" "$LOG/r2o-controller.log" "$@"
 }
 
 engine_firewall_up() {
