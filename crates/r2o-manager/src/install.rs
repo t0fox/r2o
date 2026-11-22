@@ -1,4 +1,5 @@
 mod abi;
+mod rollback_archive;
 
 use super::{VerifyError, validate_token, verify_release_archive};
 use flate2::read::GzDecoder;
@@ -431,6 +432,9 @@ pub(crate) fn cleanup_releases(root: &Path) -> Result<(), InstallError> {
     let _lock = ManagerLock::acquire(root)?;
     if let Some(slots) = read_install_slots(root)? {
         prune_obsolete_releases(root, &slots);
+        if let Some(previous) = &slots.previous {
+            rollback_archive::compact(root, previous)?;
+        }
     }
     Ok(())
 }
@@ -592,7 +596,7 @@ fn extract_bundle<R: Read>(
     reader: R,
     destination: &Path,
     max_expanded: u64,
-) -> Result<(), InstallError> {
+) -> Result<GzDecoder<R>, InstallError> {
     let decoder = GzDecoder::new(reader);
     let mut archive = Archive::new(decoder);
     archive.set_preserve_permissions(false);
@@ -657,7 +661,7 @@ fn extract_bundle<R: Read>(
             )));
         }
     }
-    Ok(())
+    Ok(archive.into_inner())
 }
 
 fn validate_archive_path(path: &Path) -> Result<PathBuf, InstallError> {
@@ -717,12 +721,22 @@ fn rollback_locked(root: &Path) -> Result<InstallSlots, InstallError> {
     let previous = current.previous.ok_or(InstallError::NoPreviousRelease)?;
     ensure_release_dir(root, &previous)?;
     ensure_release_dir(root, &current.current)?;
+    rollback_archive::restore(root, &previous)?;
     let slots = InstallSlots {
         current: previous,
         previous: Some(current.current),
     };
     write_slots_atomically(root, &slots)?;
     Ok(slots)
+}
+
+pub(crate) fn prepare_previous_builds(root: &Path, release_id: &str) -> Result<(), InstallError> {
+    let _lock = ManagerLock::acquire(root)?;
+    let slots = read_install_slots(root)?.ok_or(InstallError::NoActiveRelease)?;
+    if slots.previous.as_deref() != Some(release_id) {
+        return Err(InstallError::NoPreviousRelease);
+    }
+    rollback_archive::restore(root, release_id)
 }
 
 pub(crate) fn activate_previous_release(
@@ -742,6 +756,7 @@ pub(crate) fn activate_previous_release(
     if read_release_architecture(root, release_id)? != architecture {
         return Err(InstallError::InvalidArchitecture);
     }
+    rollback_archive::restore(root, release_id)?;
     let slots = InstallSlots {
         current: release_id.to_owned(),
         previous: Some(current.current),
@@ -961,6 +976,12 @@ fn validate_bundle(bundle: &Path, architecture: &str) -> Result<(), InstallError
     let metadata = fs::symlink_metadata(bundle).map_err(InstallError::Io)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(InstallError::InvalidBundle);
+    }
+    let reserved = bundle.join(rollback_archive::ARCHIVE);
+    match fs::symlink_metadata(&reserved) {
+        Ok(_) => return Err(InstallError::UnsafeBundleEntry(reserved)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     for component in MANAGER_COMPONENTS {
         let name = format!("{component}-linux-{architecture}");
@@ -1342,6 +1363,61 @@ mod tests {
         let fetch = active_component_path(&root, "r2o-fetch").unwrap();
         assert_eq!(fs::read_to_string(fetch).unwrap(), "legacy:r2o-fetch");
         assert!(active_component_path(&root, "r2o-detect").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compacted_rollback_preserves_bytes_and_never_activates_a_corrupt_archive() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = TestDir::new();
+        let root = temp.0.join("install");
+        let previous = bundle(&temp.0, "previous", "mipsel");
+        let current = bundle(&temp.0, "current", "mipsel");
+        let old_controller = previous.join("builds/r2o-controller-linux-mipsel");
+        let controller_bytes = b"previous-controller".repeat(8192);
+        fs::write(&old_controller, &controller_bytes).unwrap();
+        fs::create_dir(previous.join("router")).unwrap();
+        fs::write(
+            previous.join("router/controller-applets"),
+            "R2O-CONTROLLER-APPLETS-1\n",
+        )
+        .unwrap();
+        let detect = previous.join("builds/r2o-detect-linux-mipsel");
+        fs::write(&detect, "detect").unwrap();
+        fs::set_permissions(&detect, fs::Permissions::from_mode(0o755)).unwrap();
+
+        activate_bundle(&root, &previous, "r2o-previous", "mipsel").unwrap();
+        let slots = activate_bundle(&root, &current, "r2o-current", "mipsel").unwrap();
+        cleanup_releases(&root).unwrap();
+        let old = root.join("releases/r2o-previous");
+        let archive = old.join(rollback_archive::ARCHIVE);
+        assert!(!old.join("builds").exists());
+        assert!(old.join("router/controller-applets").is_file());
+        let packed = fs::read(&archive).unwrap();
+        assert!(packed.len() < controller_bytes.len());
+
+        fs::write(&archive, &packed[..packed.len() - 1]).unwrap();
+        assert!(prepare_previous_builds(&root, "r2o-previous").is_err());
+        assert!(rollback(&root).is_err());
+        assert_eq!(read_install_slots(&root).unwrap(), Some(slots));
+        assert!(!old.join("builds").exists());
+
+        fs::write(&archive, packed).unwrap();
+        prepare_previous_builds(&root, "r2o-previous").unwrap();
+        assert_eq!(rollback(&root).unwrap().current, "r2o-previous");
+        assert!(!archive.exists());
+        let controller = active_component_path(&root, "r2o-controller").unwrap();
+        assert_eq!(fs::read(&controller).unwrap(), controller_bytes);
+        let inode = fs::metadata(&controller).unwrap().ino();
+        for name in ["r2o-fetch", "r2o-detect"] {
+            assert_eq!(
+                fs::metadata(active_component_path(&root, name).unwrap())
+                    .unwrap()
+                    .ino(),
+                inode
+            );
+        }
     }
 
     #[test]

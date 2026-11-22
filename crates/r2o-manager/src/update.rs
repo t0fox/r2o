@@ -372,6 +372,7 @@ fn stage_update_in(
         installed.previous.as_deref() == Some(manifest.release_id.as_str())
     }) {
         check_compatible_slot(root, &manifest.release_id)?;
+        crate::install::prepare_previous_builds(root, &manifest.release_id)?;
         write_staged(
             root,
             &json!({

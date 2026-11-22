@@ -483,6 +483,7 @@ fn stage_previous(
         .as_deref()
         .ok_or(crate::InstallError::NoPreviousRelease)?;
     check_compatible_slot(root, previous)?;
+    crate::install::prepare_previous_builds(root, previous)?;
     write_staged(
         root,
         &json!({"release_id":previous,"architecture":architecture,"kind":"previous"}),
