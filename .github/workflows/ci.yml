@@ -41,34 +41,10 @@ jobs:
           find scripts router -type f -name '*.sh' ! -path 'scripts/test-router-openwrt-init.sh' -print0 | xargs -0 -r shellcheck -S warning -s sh
           shellcheck -S warning -s bash scripts/test-router-openwrt-init.sh
           shellcheck -S warning -s sh router/S99r2o router/S99r2o.shim router/openwrt-init
+      - name: Проверить передачу артефактов из CI в Release
+        run: python3 -B scripts/test-ci-release-artifacts.py
       - name: Проверить форматирование Rust
         run: cargo fmt --all --check
-
-  panel:
-    name: Панель — HTTP, CLI и безопасность
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-      - name: Проверить панель и её HTTP-обработчики
-        run: cargo test --locked --package r2o-panel
-
-  telegram:
-    name: Telegram — тесты клиента
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-      - name: Запустить тесты Telegram-клиента
-        run: cargo test --locked --package r2o-telegram
 
   panel-browser:
     name: Chrome — раскладка и работа панели
@@ -157,9 +133,9 @@ jobs:
               continue
             fi
             echo "::group::$test"
-            test_shell=sh
+            test_shell='sh'
             if [ "$test_name" = test-router-openwrt-init.sh ]; then
-              test_shell=bash
+              test_shell='bash'
             fi
             if [ "$test_name" = test-router-firewall.sh ] || [ "$test_name" = test-router-dns-route-netns.sh ]; then
               sudo sh "$test"
@@ -177,32 +153,6 @@ jobs:
             printf '::error::Ошибки сценариев роутера: %s\n' "${failed[*]}"
             exit 1
           fi
-
-  datapath:
-    name: Датапат — тесты и переносимость
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-      - name: Проверить сетевой исполнитель и сопутствующие пакеты
-        run: cargo test --locked --package r2o-datapath
-
-  core:
-    name: Ядро — тесты управляющего протокола
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-      - name: Проверить ядро и его оракул
-        run: cargo test --locked --package r2k-core
 
   sanitizers:
     name: Датапат, ядро и панель под AddressSanitizer
@@ -319,13 +269,12 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 8
       matrix:
         include:
           - abi: mipsel
             target: mipsel-unknown-linux-gnu
             script: scripts/build-mipsel.sh
-            artifact: r2o-mipsel-linux-gnu
             packages: gcc-mipsel-linux-gnu binutils zstd curl
             apt_cache_key: r2o-apt-ubuntu-24.04-mipsel-cross-v2
             sdk_archive: ''
@@ -334,7 +283,6 @@ jobs:
           - abi: mipsel-openwrt-musl
             target: mipsel-unknown-linux-musl
             script: scripts/r2o-build-openwrt-mipsel-musl.sh
-            artifact: r2o-openwrt-mipsel-musl
             packages: zstd binutils curl
             apt_cache_key: ''
             sdk_archive: openwrt-mipsel-musl-toolchain-25.12.5.tar.zst
@@ -343,7 +291,6 @@ jobs:
           - abi: aarch64-openwrt-musl
             target: aarch64-unknown-linux-musl
             script: scripts/r2o-build-openwrt-aarch64-musl.sh
-            artifact: r2o-openwrt-aarch64-musl
             packages: zstd binutils curl
             apt_cache_key: ''
             sdk_archive: openwrt-aarch64-musl-toolchain-25.12.5.tar.zst
@@ -352,7 +299,6 @@ jobs:
           - abi: armv5-musleabi
             target: armv5te-unknown-linux-musleabi
             script: scripts/r2o-build-armv5-musleabi.sh
-            artifact: r2o-armv5-linux-musleabi
             packages: clang-18 binutils zstd curl
             apt_cache_key: ''
             sdk_archive: ''
@@ -361,7 +307,6 @@ jobs:
           - abi: armv7-openwrt-musl
             target: armv7-unknown-linux-musleabihf
             script: scripts/r2o-build-openwrt-armv7-musl.sh
-            artifact: r2o-openwrt-armv7-musl
             packages: zstd binutils curl
             apt_cache_key: ''
             sdk_archive: openwrt-armv7-musl-toolchain-25.12.5.tar.zst
@@ -373,7 +318,6 @@ jobs:
             packages: binutils zstd curl
             sdk_archive: ''
             sdk_sha256: ''
-            artifact: r2o-armv7-musleabi
             apt_cache_key: ''
             rust_target: ''
           - abi: mips-openwrt-musl
@@ -382,7 +326,6 @@ jobs:
             packages: binutils zstd curl
             sdk_archive: ''
             sdk_sha256: ''
-            artifact: r2o-mips-openwrt-musl
             apt_cache_key: ''
             rust_target: ''
           - abi: mips64el-musl
@@ -391,7 +334,6 @@ jobs:
             packages: binutils zstd curl
             sdk_archive: ''
             sdk_sha256: ''
-            artifact: r2o-mips64el-musl
             apt_cache_key: ''
             rust_target: ''
           - abi: x86_64-musl
@@ -400,7 +342,6 @@ jobs:
             packages: binutils zstd curl
             sdk_archive: ''
             sdk_sha256: ''
-            artifact: r2o-x86_64-musl
             apt_cache_key: ''
             rust_target: ''
           - abi: i686-musl
@@ -409,7 +350,6 @@ jobs:
             packages: binutils zstd curl
             sdk_archive: ''
             sdk_sha256: ''
-            artifact: r2o-i686-musl
             apt_cache_key: ''
             rust_target: ''
           - abi: powerpc64-musl
@@ -418,7 +358,6 @@ jobs:
             packages: binutils zstd curl
             sdk_archive: ''
             sdk_sha256: ''
-            artifact: r2o-powerpc64-musl
             apt_cache_key: ''
             rust_target: ''
           - abi: riscv64-musl
@@ -427,10 +366,10 @@ jobs:
             packages: binutils zstd curl
             sdk_archive: ''
             sdk_sha256: ''
-            artifact: r2o-riscv64-musl
             apt_cache_key: ''
             rust_target: ''
     env:
+      CARGO_BUILD_WARNINGS: deny
       ABI: ${{ matrix.abi }}
       TARGET: ${{ matrix.target }}
       BUILD_SCRIPT: ${{ matrix.script }}
@@ -485,20 +424,27 @@ jobs:
           echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
       - name: Собрать ABI и проверить ELF-артефакты
         run: |
+          identity=$(python3 scripts/ci-release-artifacts.py identity "$GITHUB_SHA" "$GITHUB_RUN_ID")
+          R2O_RELEASE_ID=$(sed -n 's/^release_id=//p' <<< "$identity")
+          R2O_RELEASE_TITLE=$(sed -n 's/^title=//p' <<< "$identity")
+          R2O_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          export R2O_RELEASE_ID R2O_RELEASE_TITLE R2O_BUILT R2O_COMMIT="$GITHUB_SHA"
           sh "$BUILD_SCRIPT"
           sh scripts/check-release-abi.sh "$ABI" "target/$TARGET/release"
-          (cd "target/$TARGET/release" && sha256sum r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch r2o-detect > SHA256SUMS)
+          python3 scripts/ci-release-artifacts.py record "target/$TARGET/release" \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$ABI" "$GITHUB_RUN_ATTEMPT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
         with:
-          name: ${{ matrix.artifact }}
+          name: r2o-bin-${{ github.sha }}-${{ matrix.abi }}-a${{ github.run_attempt }}
           path: |
             target/${{ matrix.target }}/release/r2o-datapath
             target/${{ matrix.target }}/release/r2o-controller
-            target/${{ matrix.target }}/release/r2o-telegram
             target/${{ matrix.target }}/release/r2o-panel
+            target/${{ matrix.target }}/release/r2o-telegram
             target/${{ matrix.target }}/release/r2o-manager
             target/${{ matrix.target }}/release/r2o-fetch
             target/${{ matrix.target }}/release/r2o-detect
+            target/${{ matrix.target }}/release/build-info.json
             target/${{ matrix.target }}/release/SHA256SUMS
           retention-days: 7
           if-no-files-found: error
@@ -508,12 +454,8 @@ jobs:
     if: always()
     needs:
       - lint
-      - panel
-      - telegram
       - panel-browser
       - shell
-      - datapath
-      - core
       - sanitizers
       - rust-workspace
       - cross-check
@@ -523,7 +465,7 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.release-build.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.release-build.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
         run: exit 1
       - name: Все проверки завершились успешно
         run: echo "Все проверки R2O пройдены"

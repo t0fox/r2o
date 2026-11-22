@@ -4,6 +4,8 @@ export LC_ALL=C
 
 abi=${1:?не задан ABI}
 dir=${2:?не задан каталог бинарников}
+mode=${3:-}
+case "$mode" in ''|--elf-only) ;; *) echo "неизвестный режим: $mode" >&2; exit 2 ;; esac
 prefix=
 loader=
 flags=
@@ -15,17 +17,19 @@ case "$abi" in
     mipsel-openwrt-musl)
         cpu=mipsel; class=32; endian=little; machine='MIPS R3000'; flags=mips32r2
         loader=/lib/ld-musl-mipsel-sf.so.1
-        cache=${R2O_OPENWRT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/r2o/openwrt}
-        sdk=${R2O_OPENWRT_MIPSEL_SDK:-"$cache/openwrt-mipsel-musl-sdk"}
-        libc="$sdk/lib/libc.so"
-        libgcc="$sdk/lib/libgcc_s.so.1"
-        test -f "$libc" && test -f "$libgcc"
-        prefix=$(mktemp -d)
-        trap 'rm -rf -- "$prefix"' EXIT HUP INT TERM
-        mkdir "$prefix/lib"
-        ln -s "$libc" "$prefix$loader"
-        ln -s "$libc" "$prefix/lib/libc.so"
-        ln -s "$libgcc" "$prefix/lib/libgcc_s.so.1" ;;
+        if [ "$mode" != --elf-only ]; then
+            cache=${R2O_OPENWRT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/r2o/openwrt}
+            sdk=${R2O_OPENWRT_MIPSEL_SDK:-"$cache/openwrt-mipsel-musl-sdk"}
+            libc="$sdk/lib/libc.so"
+            libgcc="$sdk/lib/libgcc_s.so.1"
+            test -f "$libc" && test -f "$libgcc"
+            prefix=$(mktemp -d)
+            trap 'rm -rf -- "$prefix"' EXIT HUP INT TERM
+            mkdir "$prefix/lib"
+            ln -s "$libc" "$prefix$loader"
+            ln -s "$libc" "$prefix/lib/libc.so"
+            ln -s "$libgcc" "$prefix/lib/libgcc_s.so.1"
+        fi ;;
     aarch64-openwrt-musl) cpu=aarch64; class=64; endian=little; machine=AArch64 ;;
     armv5-musleabi|armv7-musleabi)
         cpu=arm; class=32; endian=little; machine=ARM; flags='Version5 EABI'
@@ -82,6 +86,7 @@ for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager 
             fail 'обнаружена динамическая зависимость'
         fi
     fi
+    [ "$mode" = --elf-only ] && continue
     case "$component" in
         r2o-controller|r2o-panel) timeout 30 "$@" "$bin" --self-check ;;
         r2o-detect)

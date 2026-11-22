@@ -7,6 +7,10 @@ on:
         description: Заметки выпуска, которые увидит пользователь панели
         type: string
         required: false
+      validate_only:
+        description: Проверить артефакты и упаковку без публикации
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,36 +28,38 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       title: ${{ steps.plan.outputs.title }}
       notes: ${{ steps.plan.outputs.notes }}
+      ci_run: ${{ steps.ci.outputs.run }}
+      ci_attempt: ${{ steps.ci.outputs.attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Проверить успешный CI для этого коммита
+      - name: Выбрать успешный CI для этого коммита
+        id: ci
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=100" \
-            --jq '[.workflow_runs[] | select(.head_sha == env.GITHUB_SHA and .status == "completed" and .conclusion == "success" and .head_branch == "main")] | length')
-          if [ "$runs" -eq 0 ]; then
-            echo "::error::Для этого коммита main нет успешного запуска CI"
-            exit 1
-          fi
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=100" \
+            > "$RUNNER_TEMP/ci-runs.json"
+          selected=$(python3 scripts/ci-release-artifacts.py run "$RUNNER_TEMP/ci-runs.json" "$GITHUB_SHA" "$GITHUB_REPOSITORY")
+          read -r run attempt <<< "$selected"
+          printf 'run=%s\nattempt=%s\n' "$run" "$attempt" >> "$GITHUB_OUTPUT"
       - id: plan
         env:
           NOTES: ${{ inputs.notes }}
+          CI_RUN: ${{ steps.ci.outputs.run }}
         run: |
           set -euo pipefail
-          sha=$(git rev-parse "$GITHUB_SHA")
-          short=$(git rev-parse --short=7 "$sha")
-          title="R2O $(TZ=Europe/Simferopol date +%d.%m.%Y) ($short)"
-          id="r2o-$(date -u +%Y%m%d-%H%M)-$short-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          sha=$(git rev-parse HEAD)
+          test "$sha" = "$GITHUB_SHA"
+          identity=$(python3 scripts/ci-release-artifacts.py identity "$sha" "$CI_RUN")
+          id=$(sed -n 's/^release_id=//p' <<< "$identity")
           {
+            echo "$identity"
             echo "sha=$sha"
-            echo "release_id=$id"
             echo "version=$id"
-            echo "title=$title"
           } >> "$GITHUB_OUTPUT"
           delimiter="notes-$(openssl rand -hex 12)"
           {
@@ -62,177 +68,15 @@ jobs:
             echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
 
-  build:
-    name: Сборка ABI — ${{ matrix.abi }}
-    needs: plan
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 5
-      matrix:
-        include:
-          - abi: mipsel
-            target: mipsel-unknown-linux-gnu
-            asset_suffix: mipsel
-            script: scripts/build-mipsel.sh
-            packages: gcc-mipsel-linux-gnu binutils zstd curl
-            sdk_archive: ''
-            sdk_sha256: ''
-          - abi: mipsel-openwrt-musl
-            target: mipsel-unknown-linux-musl
-            asset_suffix: mipsel-openwrt-musl
-            script: scripts/r2o-build-openwrt-mipsel-musl.sh
-            packages: zstd binutils curl
-            sdk_archive: openwrt-mipsel-musl-toolchain-25.12.5.tar.zst
-            sdk_sha256: 5a02d679c1ff052745b419b564624380dd3e5f6218db64c65b8ec9df56e2c263
-          - abi: aarch64-openwrt-musl
-            target: aarch64-unknown-linux-musl
-            asset_suffix: aarch64-openwrt-musl
-            script: scripts/r2o-build-openwrt-aarch64-musl.sh
-            packages: zstd binutils curl
-            sdk_archive: openwrt-aarch64-musl-toolchain-25.12.5.tar.zst
-            sdk_sha256: 37875a8a69b46c9dc2a8c8bfd34a14f5de03fbea775f7cf8569f7e709c93403b
-          - abi: armv5-musleabi
-            target: armv5te-unknown-linux-musleabi
-            asset_suffix: armv5-musleabi
-            script: scripts/r2o-build-armv5-musleabi.sh
-            packages: clang-18 binutils zstd curl
-            sdk_archive: ''
-            sdk_sha256: ''
-          - abi: armv7-openwrt-musl
-            target: armv7-unknown-linux-musleabihf
-            asset_suffix: armv7-openwrt-musl
-            script: scripts/r2o-build-openwrt-armv7-musl.sh
-            packages: zstd binutils curl
-            sdk_archive: openwrt-armv7-musl-toolchain-25.12.5.tar.zst
-            sdk_sha256: 2284afb56cbeef040372b02b721f1657ce1eee8e1c024fb1a0188374b472ae51
-          - abi: armv7-musleabi
-            target: armv7-unknown-linux-musleabi
-            script: scripts/r2o-build-static-musl.sh
-            packages: binutils zstd curl
-            sdk_archive: ''
-            sdk_sha256: ''
-            asset_suffix: armv7-musleabi
-          - abi: mips-openwrt-musl
-            target: mips-unknown-linux-musl
-            script: scripts/r2o-build-static-musl.sh
-            packages: binutils zstd curl
-            sdk_archive: ''
-            sdk_sha256: ''
-            asset_suffix: mips-openwrt-musl
-          - abi: mips64el-musl
-            target: mips64el-unknown-linux-muslabi64
-            script: scripts/r2o-build-static-musl.sh
-            packages: binutils zstd curl
-            sdk_archive: ''
-            sdk_sha256: ''
-            asset_suffix: mips64el-musl
-          - abi: x86_64-musl
-            target: x86_64-unknown-linux-musl
-            script: scripts/r2o-build-static-musl.sh
-            packages: binutils zstd curl
-            sdk_archive: ''
-            sdk_sha256: ''
-            asset_suffix: x86_64-musl
-          - abi: i686-musl
-            target: i686-unknown-linux-musl
-            script: scripts/r2o-build-static-musl.sh
-            packages: binutils zstd curl
-            sdk_archive: ''
-            sdk_sha256: ''
-            asset_suffix: i686-musl
-          - abi: powerpc64-musl
-            target: powerpc64-unknown-linux-musl
-            script: scripts/r2o-build-static-musl.sh
-            packages: binutils zstd curl
-            sdk_archive: ''
-            sdk_sha256: ''
-            asset_suffix: powerpc64-musl
-          - abi: riscv64-musl
-            target: riscv64gc-unknown-linux-musl
-            script: scripts/r2o-build-static-musl.sh
-            packages: binutils zstd curl
-            sdk_archive: ''
-            sdk_sha256: ''
-            asset_suffix: riscv64-musl
-    env:
-      CARGO_BUILD_WARNINGS: deny
-      R2O_RELEASE_ID: ${{ needs.plan.outputs.release_id }}
-      R2O_RELEASE_TITLE: ${{ needs.plan.outputs.title }}
-      R2O_COMMIT: ${{ needs.plan.outputs.sha }}
-      ABI: ${{ matrix.abi }}
-      TARGET: ${{ matrix.target }}
-      ASSET_SUFFIX: ${{ matrix.asset_suffix }}
-      BUILD_SCRIPT: ${{ matrix.script }}
-      PACKAGES: ${{ matrix.packages }}
-      R2O_ARMV5_LINKER: ${{ github.workspace }}/scripts/ci-armv5-clang-cc.sh
-      R2O_ARMV5_AR: ar
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.plan.outputs.sha }}
-          persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ matrix.sdk_sha256 != '' }}
-        with:
-          path: ~/.cache/r2o/openwrt/${{ matrix.sdk_archive }}
-          key: r2o-openwrt-sdk-${{ runner.os }}-${{ matrix.abi }}-${{ matrix.sdk_sha256 }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: ${{ matrix.abi == 'mipsel' }}
-        with:
-          path: ${{ runner.temp }}/r2o-apt-archives
-          key: r2o-apt-ubuntu-24.04-${{ matrix.abi }}-cross-v1
-      - name: Установить инструменты ABI
-        run: |
-          set -euo pipefail
-          read -r -a packages <<< "$PACKAGES"
-          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives" /tmp/r2o-apt-archives-partial
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
-            -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
-            "${packages[@]}"
-          sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
-      - uses: ./.github/actions/setup-zig
-        if: matrix.script == 'scripts/r2o-build-static-musl.sh'
-        with:
-          version: ${{ matrix.abi == 'mips64el-musl' && '0.14.1' || '0.16.0' }}
-          sha256: ${{ matrix.abi == 'mips64el-musl' && '24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c' || '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00' }}
-      - name: Установить QEMU
-        run: |
-          sh scripts/ci-install-release-qemu.sh "$RUNNER_TEMP/qemu"
-          echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
-      - name: Зафиксировать время сборки
-        run: echo "R2O_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-      - name: Собрать ABI и проверить ELF-артефакты
-        run: |
-          sh "$BUILD_SCRIPT"
-          sh scripts/check-release-abi.sh "$ABI" "target/$TARGET/release"
-          (cd "target/$TARGET/release" && sha256sum r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch r2o-detect > SHA256SUMS)
-      - name: Подготовить бинарники ABI для общей упаковки
-        run: |
-          set -euo pipefail
-          stage="$RUNNER_TEMP/builds/$ABI"
-          mkdir -p "$stage"
-          for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch r2o-detect; do
-            install -m 0755 "target/$TARGET/release/$component" "$stage/$component-linux-$ASSET_SUFFIX"
-          done
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: signed-release-build-${{ matrix.abi }}
-          path: ${{ runner.temp }}/builds
-          if-no-files-found: error
-          retention-days: 1
-
   package:
     name: Упаковка общего выпуска
-    needs: [plan, build]
+    needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      inputs_id: ${{ steps.upload.outputs.artifact-id }}
     permissions:
+      actions: read
       contents: read
     env:
       RELEASE_ID: ${{ needs.plan.outputs.release_id }}
@@ -241,6 +85,8 @@ jobs:
       RELEASE_TITLE: ${{ needs.plan.outputs.title }}
       R2O_R2_PUBLIC_URL: ${{ vars.R2O_R2_PUBLIC_URL }}
       NOTES: ${{ needs.plan.outputs.notes }}
+      CI_RUN: ${{ needs.plan.outputs.ci_run }}
+      CI_ATTEMPT: ${{ needs.plan.outputs.ci_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -250,26 +96,51 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: signed-release-build-*
-          path: ${{ runner.temp }}/builds
-          merge-multiple: true
-      - name: Упаковать ABI и общий манифест
+      - name: Проверить происхождение всех артефактов ABI
+        id: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY_ID: ${{ github.repository_id }}
         run: |
           set -euo pipefail
-          export RELEASE_SEQUENCE=$((GITHUB_RUN_NUMBER * 1000 + GITHUB_RUN_ATTEMPT))
-          sh scripts/package-release.sh "$RUNNER_TEMP/builds" "$RUNNER_TEMP/release" \
-            'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl armv7-musleabi mips-openwrt-musl mips64el-musl x86_64-musl i686-musl powerpc64-musl riscv64-musl'
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          api="repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN"
+          gh api --paginate --slurp "$api/jobs?filter=all&per_page=100" > "$RUNNER_TEMP/jobs.json"
+          gh api --paginate --slurp "$api/artifacts?per_page=100" > "$RUNNER_TEMP/artifacts.json"
+          ids=$(python3 scripts/ci-release-artifacts.py select "$RUNNER_TEMP/jobs.json" "$RUNNER_TEMP/artifacts.json" \
+            "$RELEASE_SHA" "$CI_RUN" "$CI_ATTEMPT" "$REPOSITORY_ID" "$RUNNER_TEMP/build-plan.json")
+          echo "ids=$ids" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: signed-release-inputs
+          artifact-ids: ${{ steps.artifacts.outputs.ids }}
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.plan.outputs.ci_run }}
+          path: ${{ runner.temp }}/ci-artifacts
+          digest-mismatch: error
+      - name: Проверить SHA-256, ELF ABI и собрать общий манифест
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # CI мог быть перезапущен между выбором и скачиванием артефактов.
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$RELEASE_SHA&per_page=100" \
+            > "$RUNNER_TEMP/ci-runs.json"
+          selected=$(python3 scripts/ci-release-artifacts.py run "$RUNNER_TEMP/ci-runs.json" "$RELEASE_SHA" "$GITHUB_REPOSITORY")
+          test "$selected" = "$CI_RUN $CI_ATTEMPT"
+          abis=$(python3 scripts/ci-release-artifacts.py prepare "$RUNNER_TEMP/ci-artifacts" "$RUNNER_TEMP/builds" \
+            "$RUNNER_TEMP/build-plan.json" "$RELEASE_SHA" "$CI_RUN")
+          export RELEASE_SEQUENCE=$((GITHUB_RUN_NUMBER * 1000 + GITHUB_RUN_ATTEMPT))
+          sh scripts/package-release.sh "$RUNNER_TEMP/builds" "$RUNNER_TEMP/release" "$abis"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: signed-release-inputs-a${{ github.run_attempt }}
           path: ${{ runner.temp }}/release/*
           if-no-files-found: error
           retention-days: 1
 
   publish:
     needs: [plan, package]
+    if: ${{ !inputs.validate_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: r2o-signing
@@ -294,8 +165,9 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: signed-release-inputs
+          artifact-ids: ${{ needs.package.outputs.inputs_id }}
           path: ${{ runner.temp }}/release
+          digest-mismatch: error
       - name: Подписать и проверить метаданные выпуска
         env:
           PRIVATE_KEY: ${{ secrets.R2O_ED25519_PRIVATE_KEY }}
