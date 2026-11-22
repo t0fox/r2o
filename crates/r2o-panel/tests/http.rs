@@ -1378,6 +1378,43 @@ fn static_assets_use_etag_and_return_not_modified() {
 }
 
 #[test]
+fn embedded_gzip_asset_preserves_identity_bytes_and_has_a_distinct_etag() {
+    use std::io::Read;
+
+    let temp = TempDir::new();
+    let mut config = Config::default();
+    config.asset_dir = temp.file("missing-assets");
+    let get = |encoding| {
+        handle_request(
+            &config,
+            format!("GET /assets/panel.js HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: {encoding}\r\n\r\n").as_bytes(),
+        )
+    };
+    let compressed = get("br, gzip;q=0.5");
+    let identity = get("gzip;q=0");
+    assert_eq!(compressed.status, 200);
+    assert_eq!(identity.status, 200);
+    fn header<'a>(response: &'a r2o_panel::server::Response, name: &str) -> Option<&'a str> {
+        response
+            .headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+    assert_eq!(header(&compressed, "Content-Encoding"), Some("gzip"));
+    assert_eq!(header(&identity, "Content-Encoding"), None);
+    assert_eq!(header(&compressed, "Vary"), Some("Accept-Encoding"));
+    assert_ne!(header(&compressed, "ETag"), header(&identity, "ETag"));
+
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(compressed.body.as_slice())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded, identity.body);
+    assert_eq!(decoded, include_bytes!("../assets/panel.js"));
+}
+
+#[test]
 #[ignore = "run through scripts/test-panel-static-asset-fallback-differential.sh"]
 fn d2o_static_asset_missing_or_symlink_returns_404() {
     let asset_dir = PathBuf::from(

@@ -2246,7 +2246,24 @@ fn static_asset(
     name: &str,
     content_type: &str,
 ) -> Response {
-    let (bytes, metadata) = match read_asset(config, name) {
+    let accepts_gzip = request.header("Accept-Encoding").is_some_and(|header| {
+        header.split(',').any(|entry| {
+            let (encoding, params) = entry.split_once(';').unwrap_or((entry, ""));
+            encoding.trim().eq_ignore_ascii_case("gzip")
+                && (params.is_empty()
+                    || params
+                        .trim()
+                        .split_once('=')
+                        .is_some_and(|(parameter, value)| {
+                            parameter.trim().eq_ignore_ascii_case("q")
+                                && value
+                                    .trim()
+                                    .parse::<f32>()
+                                    .is_ok_and(|q| q > 0.0 && q <= 1.0)
+                        }))
+        })
+    });
+    let (bytes, metadata, gzip) = match read_asset(config, name, accepts_gzip) {
         Ok(data) => data,
         Err(_) => return text_response(404, "not found\n"),
     };
@@ -2265,7 +2282,11 @@ fn static_asset(
     let mut response = Response::new(200, content_type, bytes);
     response = response
         .header("Cache-Control", "no-cache")
-        .header("ETag", etag.clone());
+        .header("ETag", etag.clone())
+        .header("Vary", "Accept-Encoding");
+    if gzip {
+        response = response.header("Content-Encoding", "gzip");
+    }
     if request.header("If-None-Match") == Some(etag.as_str()) {
         response.status = 304;
         response.body.clear();
@@ -2273,7 +2294,11 @@ fn static_asset(
     response
 }
 
-fn read_asset(config: &Config, name: &str) -> std::io::Result<(Vec<u8>, Option<fs::Metadata>)> {
+fn read_asset(
+    config: &Config,
+    name: &str,
+    accepts_gzip: bool,
+) -> std::io::Result<(Vec<u8>, Option<fs::Metadata>, bool)> {
     let asset_dir_state = fs::symlink_metadata(&config.asset_dir);
     match asset_dir_state {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -2287,8 +2312,16 @@ fn read_asset(config: &Config, name: &str) -> std::io::Result<(Vec<u8>, Option<f
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // R2O extension: выпуск без отдельного каталога panel отдаёт
             // встроенные ассеты. C в этом случае всегда 404.
+            if let Some(bytes) = embedded_gzip(name) {
+                if accepts_gzip {
+                    return Ok((bytes.to_vec(), None, true));
+                }
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(bytes).read_to_end(&mut decoded)?;
+                return Ok((decoded, None, false));
+            }
             return embedded_asset(name)
-                .map(|bytes| (bytes.to_vec(), None))
+                .map(|bytes| (bytes.to_vec(), None, false))
                 .ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::NotFound, "asset root unavailable")
                 });
@@ -2319,7 +2352,7 @@ fn read_asset(config: &Config, name: &str) -> std::io::Result<(Vec<u8>, Option<f
         ));
     }
     read_regular_file_with_metadata(&path, STATIC_ASSET_MAX)
-        .map(|(bytes, metadata)| (bytes, Some(metadata)))
+        .map(|(bytes, metadata)| (bytes, Some(metadata), false))
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "asset missing"))
 }
 
@@ -2339,23 +2372,30 @@ fn asset_modified_time(metadata: &fs::Metadata) -> u64 {
     }
 }
 
+fn embedded_gzip(name: &str) -> Option<&'static [u8]> {
+    macro_rules! gzip {
+        ($asset:literal) => {
+            include_bytes!(concat!(env!("OUT_DIR"), "/", $asset, ".gz"))
+        };
+    }
+    Some(match name {
+        "index.html" => gzip!("index.html"),
+        "panel.css" => gzip!("panel.css"),
+        "panel.js" => gzip!("panel.js"),
+        "diagnostics.js" => gzip!("diagnostics.js"),
+        "telegram-flow.js" => gzip!("telegram-flow.js"),
+        "telegram-flow-prototype.js" => gzip!("telegram-flow-prototype.js"),
+        "gsap.js" => gzip!("gsap.js"),
+        "panel-motion.js" => gzip!("panel-motion.js"),
+        _ => return None,
+    })
+}
+
 fn embedded_asset(name: &str) -> Option<&'static [u8]> {
     Some(match name {
-        "index.html" => include_bytes!("../assets/index.html"),
         "favicon.svg" => include_bytes!("../assets/favicon.svg"),
         "meta-marks.png" => include_bytes!("../assets/meta-marks.png"),
         "refresh-mask.svg" => include_bytes!("../assets/refresh-mask.svg"),
-        "panel.css" => include_bytes!("../assets/panel.css"),
-        "panel.js" => include_bytes!("../assets/panel.js"),
-        "diagnostics.js" => include_bytes!("../assets/diagnostics.js"),
-        "telegram-flow.js" => include_bytes!("../assets/telegram-flow.js"),
-        "telegram-flow-prototype.js" => include_bytes!("../assets/telegram-flow-prototype.js"),
-        "gsap.js" => include_bytes!("../assets/gsap.js"),
-        "panel-motion.js" => include_bytes!("../assets/panel-motion.js"),
-        "fonts/onest.woff2" => include_bytes!("../assets/fonts/onest.woff2"),
-        "fonts/jbmono.woff2" => include_bytes!("../assets/fonts/jbmono.woff2"),
-        "fonts/nunito-cyrillic.woff2" => include_bytes!("../assets/fonts/nunito-cyrillic.woff2"),
-        "fonts/nunito-latin.woff2" => include_bytes!("../assets/fonts/nunito-latin.woff2"),
         "fonts/manrope-cyrillic.woff2" => include_bytes!("../assets/fonts/manrope-cyrillic.woff2"),
         "fonts/manrope-latin.woff2" => include_bytes!("../assets/fonts/manrope-latin.woff2"),
         "fonts/unbounded-cyrillic.woff2" => {

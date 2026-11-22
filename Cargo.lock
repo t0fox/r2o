@@ -1701,6 +1701,7 @@ dependencies = [
 name = "r2o-panel"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "libc",
  "r2k-core",
  "serde_json",

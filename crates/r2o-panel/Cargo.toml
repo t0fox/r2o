@@ -5,10 +5,14 @@ edition = "2024"
 description = "HTTP-панель управления r2o"
 
 [dependencies]
+flate2 = "1.1"
 libc = "0.2"
 r2k-core = { package = "r2k-core", path = "../r2k-core" }
 serde_json = "1"
 time = { version = "0.3", features = ["formatting"] }
+
+[build-dependencies]
+flate2 = "1.1"
 
 [lib]
 name = "r2o_panel"
