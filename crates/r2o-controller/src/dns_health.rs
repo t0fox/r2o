@@ -1520,6 +1520,9 @@ pub async fn probe_quic_dns_on(
     service: &DnsService,
     timeout: Duration,
 ) -> DnsHealthResult {
+    if let Some(reason) = service.verification_limitation() {
+        return DnsHealthResult::default().fail(DnsHealthFailure::Configuration, reason);
+    }
     match service.protocol.as_str() {
         "doq" => probe_doq_on_with_roots(socket, address, host, timeout, dns_roots()).await,
         "doh3" => probe_doh3_on(socket, address, host, service, timeout, dns_roots()).await,
@@ -2660,6 +2663,11 @@ mod tests {
         let probe = |service: &DnsService| {
             probe_dns_health_with_roots(service, None, Duration::from_secs(3), Arc::clone(&roots))
         };
+        let unsupported = probe(&service);
+        assert_eq!(unsupported.failure, Some(DnsHealthFailure::Configuration));
+        assert!(!unsupported.dns_reply);
+        // Остальные проверки проверяют транспорт клиента, который сохраняет query.
+        service.source.clear();
         let conflicting = probe(&DnsService {
             path: "/dns-query?%64ns=other".into(),
             ..service.clone()

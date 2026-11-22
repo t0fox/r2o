@@ -115,6 +115,18 @@ impl DnsService {
     }
 
     pub fn verification_limitation(&self) -> Option<&'static str> {
+        // DNSProxy 0.86.0 заменяет query при формировании запроса DoH и DoH3.
+        if matches!(self.source.as_str(), "dnsproxy" | DNSPROXY_HTTP3_SOURCE)
+            && matches!(self.protocol.as_str(), "doh" | "doh3")
+            && self
+                .path
+                .split_once('?')
+                .is_some_and(|(_, query)| !query.is_empty())
+        {
+            return Some(
+                "DNSProxy отбрасывает параметры URL. Проверка настроенного профиля недоступна.",
+            );
+        }
         let policy = self.keenetic.as_deref()?;
         if !policy.doh_format.is_empty() && policy.doh_format != "dnsm" && !self.uses_doh_json() {
             Some("Настроен другой формат DoH, для него нужна отдельная проверка DNS-ответа")
@@ -1196,6 +1208,35 @@ config dnsproxy 'servers'
         assert_eq!(services[2].port, 443);
         assert_eq!(services[2].path, "/query");
         assert_eq!(services[2].source, "dnsproxy-http3");
+    }
+
+    #[test]
+    fn dnsproxy_keeps_query_in_identity_but_cannot_verify_that_profile() {
+        let config = "
+config dnsproxy 'global'
+ option http3 '1'
+config dnsproxy 'servers'
+ list upstream 'https://resolver.example/query?profile=a%2Fb'
+ list fallback 'h3://resolver.example:8443/query?profile=a%2Fb'
+";
+        let services = super::parse_dnsproxy(config);
+        assert_eq!(services.len(), 3);
+        for service in services {
+            assert_eq!(service.path, "/query?profile=a%2Fb");
+            assert!(service.verification_limitation().is_some());
+            let no_profile = super::DnsService {
+                path: "/query".into(),
+                ..service.clone()
+            };
+            assert_eq!(no_profile.verification_limitation(), None);
+            assert_ne!(service.profile_id(), no_profile.profile_id());
+        }
+        let other_proxy = super::dns_uri_parse(
+            "https://resolver.example/query?profile=a%2Fb",
+            Some("https-dns-proxy"),
+        )
+        .unwrap();
+        assert_eq!(other_proxy.verification_limitation(), None);
     }
 
     #[test]
