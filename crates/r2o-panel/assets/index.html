@@ -334,23 +334,30 @@
         <section class="diag-history" aria-labelledby="diagnostic-history-title">
           <header class="diag-collector">
             <div class="diag-history-head">
-              <div class="diag-collector-title">
-                <h3 id="diagnostic-history-title">Сбор диагностики</h3>
-                <span class="diag-collection-state" id="diagnostic-state">Проверяем…</span>
+              <span class="diag-collector-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><use href="#i-diagnostics"/></svg>
+              </span>
+              <div>
+                <div class="diag-collector-title">
+                  <h3 id="diagnostic-history-title">Сбор диагностики</h3>
+                  <span class="diag-collection-state" id="diagnostic-state">Проверяем…</span>
+                </div>
+                <p id="diagnostic-status" class="diag-history-note" role="status">Читаем состояние сбора…</p>
               </div>
-              <p id="diagnostic-status" class="diag-history-note" role="status">Читаем состояние сбора…</p>
             </div>
             <div class="diag-history-actions">
+              <button type="button" class="btn" data-variant="primary" id="diagnostic-toggle" disabled>Включить сбор</button>
               <button type="button" class="btn" id="diagnostic-refresh" hidden>Обновить</button>
               <a class="btn" id="diagnostic-download" href="/api/diagnostics?download" download="r2o-diagnostics.json" hidden>Скачать JSON</a>
-              <button type="button" class="btn" data-variant="primary" id="diagnostic-toggle" disabled>Включить сбор</button>
+            </div>
+            <div class="diag-collector-footer">
+              <details class="diag-history-help" id="diagnostic-history-help">
+                <summary>Что сохраняется</summary>
+                <p>Роутер хранит до 120 подробных минутных снимков, до 24 часов истории памяти и до 64 исходов подбора. Отчёт содержит домены и IP-адреса и никуда не отправляется автоматически. После остановки сбора отчёт остаётся доступным для просмотра и скачивания.</p>
+                <p id="diagnostic-report-size" hidden></p>
+              </details>
               <button type="button" class="btn" data-variant="ghost" id="diagnostic-clear" hidden>Очистить историю…</button>
             </div>
-            <details class="diag-history-help" id="diagnostic-history-help">
-              <summary>Что сохраняется</summary>
-              <p>Роутер хранит до 120 подробных минутных снимков, до 24 часов истории памяти и до 64 исходов подбора. Отчёт содержит домены и IP-адреса и никуда не отправляется автоматически. После остановки сбора отчёт остаётся доступным для просмотра и скачивания.</p>
-              <p id="diagnostic-report-size" hidden></p>
-            </details>
           </header>
           <dialog class="diag-confirm" id="diagnostic-stop-dialog" aria-labelledby="diagnostic-stop-title" aria-describedby="diagnostic-stop-note">
             <form method="dialog">
@@ -411,26 +418,6 @@
               </details>
             </section>
 
-            <section class="diag-card diag-process-panel" aria-labelledby="diagnostic-process-title">
-              <h4 id="diagnostic-process-title">Память процессов</h4>
-              <div class="table-scroll">
-                <table class="diag-memory"><thead><tr><th scope="col">Процесс</th><th scope="col">RSS</th><th scope="col">Изменение</th></tr></thead><tbody id="diagnostic-processes"></tbody></table>
-              </div>
-              <p id="diagnostic-process-note" class="diag-history-note">Изменение считается от первого сохранённого снимка того же PID.</p>
-            </section>
-
-            <section class="diag-card diag-workers-panel" aria-labelledby="diagnostic-workers-title">
-              <h4 id="diagnostic-workers-title">Рабочие задачи</h4>
-              <dl class="diag-history-counts">
-                <div><dt>Активные</dt><dd id="diagnostic-workers-running">—</dd></div>
-                <div><dt>Ожидают результат</dt><dd id="diagnostic-workers-result">—</dd></div>
-                <div><dt>Ожидают завершения</dt><dd id="diagnostic-workers-join">—</dd></div>
-                <div><dt>Самая долгая задача</dt><dd id="diagnostic-workers-oldest">—</dd></div>
-                <div><dt>Ошибки запуска / завершения</dt><dd id="diagnostic-workers-errors">—</dd></div>
-                <div><dt>Задачи / исполнители за 24 часа</dt><dd id="diagnostic-workers-trend">—</dd></div>
-              </dl>
-            </section>
-
             <section class="diag-card diag-search-panel" aria-labelledby="diagnostic-search-title">
               <div class="diag-card-head">
                 <div><h4 id="diagnostic-search-title">Журнал подбора</h4><p id="diagnostic-event-summary"></p></div>
@@ -442,6 +429,32 @@
               <ol id="diagnostic-event-list" class="diag-event-list"></ol>
               <p id="diagnostic-event-empty" class="diag-history-note" hidden></p>
             </section>
+
+            <details class="diag-more">
+              <summary>Процессы и рабочие задачи</summary>
+              <div class="diag-more-grid">
+                <section class="diag-card diag-process-panel" aria-labelledby="diagnostic-process-title">
+                  <h4 id="diagnostic-process-title">Память процессов</h4>
+                  <div class="table-scroll">
+                    <table class="diag-memory"><thead><tr><th scope="col">Процесс</th><th scope="col">RSS</th><th scope="col">Изменение</th></tr></thead><tbody id="diagnostic-processes"></tbody></table>
+                  </div>
+                  <p id="diagnostic-process-note" class="diag-history-note">Изменение считается от первого сохранённого снимка того же PID.</p>
+                </section>
+
+                <section class="diag-card diag-workers-panel" aria-labelledby="diagnostic-workers-title">
+                  <h4 id="diagnostic-workers-title">Рабочие задачи</h4>
+                  <dl class="diag-history-counts">
+                    <div><dt>Активные</dt><dd id="diagnostic-workers-running">—</dd></div>
+                    <div><dt>Ожидают результат</dt><dd id="diagnostic-workers-result">—</dd></div>
+                    <div><dt>Ожидают завершения</dt><dd id="diagnostic-workers-join">—</dd></div>
+                    <div><dt>Самая долгая задача</dt><dd id="diagnostic-workers-oldest">—</dd></div>
+                    <div><dt>Ошибки запуска / завершения</dt><dd id="diagnostic-workers-errors">—</dd></div>
+                    <div><dt>Задачи / исполнители за 24 часа</dt><dd id="diagnostic-workers-trend">—</dd></div>
+                  </dl>
+                </section>
+              </div>
+            </details>
+
             <details class="diag-more" id="diagnostic-technical" hidden>
               <summary>Технические подробности</summary>
               <div class="diag-more-grid">

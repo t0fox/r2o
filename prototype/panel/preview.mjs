@@ -54,7 +54,7 @@ await mkdir(join(dist,'assets'),{recursive:true});
 for(const [name,body] of files)await writeFile(join(dist,name),body);
 console.log('Собрано в '+dist);
 if(!process.argv.includes('--build')){
-  const types={html:'text/html',css:'text/css',js:'text/javascript',svg:'image/svg+xml',woff2:'font/woff2'};
+  const types={html:'text/html',css:'text/css',js:'text/javascript',svg:'image/svg+xml',png:'image/png',woff2:'font/woff2'};
   const port=Number(process.env.R2O_PREVIEW_PORT||(redesign?4187:4186));
   createServer((req,res)=>{
     const name=req.url.split('?')[0].slice(1)||'index.html';

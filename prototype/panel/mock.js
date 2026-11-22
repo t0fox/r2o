@@ -66,8 +66,23 @@
     return {state:'healthy',checked_at:Math.floor(dcStart/1000)+2,data_centers:[1,2,3,4,5].map(dc=>({dc,state:'healthy',
       routes:[{transport:'direct-wss',state:'healthy',dns_ms:3,tcp_ms:12+dc,tls_ms:21+dc,mtproto_ms:42+dc}]}))};
   }
-  const samples=Array.from({length:24},(_,i)=>({at:now()-(23-i)*60,processes:[{name:'r2o-controller',pid:1581,rss_kib:13800+i*14,rss_anon_kib:9600+i*9}]}));
-  const report=()=>({enabled:recording,samples,events:[],sample_interval_ms:60000,anomalies:[]});
+  const diagnosticDemo=params.get('diag-demo');
+  const count=diagnosticDemo==='short'?3:diagnosticDemo==='single'?1:24;
+  const lastSample=now()-(diagnosticDemo==='stale'?320:0);
+  const samples=Array.from({length:count},(_,i)=>({
+    at:lastSample-(count-1-i)*60,workers_running:1,workers_result_pending:0,workers_join_pending:0,
+    processes:[
+      {name:'r2o-controller',pid:1581,rss_kib:7790+i*14+[0,15,6,22][i%4],anon_kib:2230+i*9},
+      {name:'r2o-datapath',pid:1582,rss_kib:6100+i*9}
+    ]
+  }));
+  const events=[
+    {id:4,at:lastSample-34,target:'edge-a.googlevideo.com',outcome:'plan-found',protocol:'tls',elapsed_ms:14400},
+    {id:3,at:lastSample-168,target:'cdn.discord.media',outcome:'inconclusive',protocol:'tcp',elapsed_ms:8700,
+      reason:'Сервер не ответил вовремя.'},
+    {id:2,at:lastSample-293,target:'img.example.net',outcome:'direct-clear',protocol:'tls',elapsed_ms:760}
+  ];
+  const report=()=>({enabled:recording,samples,events,sample_interval_ms:60000,anomalies:[]});
   const reply=(data,status=200,headers={})=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json',...headers}});
   function snapshot(){
     if(episodeStart===undefined)episodeStart=Date.now()+(showcase?(searchConcept?0:2600):5500);
@@ -118,7 +133,7 @@
         if(u.search==='?enable'){recording=true;paused=false;}
         if(redesign && init.method==='POST'){
           if(u.search==='?pause')paused=true;
-          if(u.search==='?clear')samples.length=0;
+          if(u.search==='?clear'){samples.length=0;events.length=0;}
         }
         return reply(report(),200,{'X-R2O-Diagnostics-Paused':String(paused)});
       case '/api/telegram/workers':

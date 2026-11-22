@@ -313,28 +313,33 @@
       return bottom - (bottom - top) * (value - min) / (max - min);
     }
     active.forEach(function (metric) {
-      var commands = [], points = [], segment = false;
+      var commands = [], points = [], priorPoint;
+      var processSeries = ["rss", "rss_anon", "vm_data", "anonymous", "private_dirty"].includes(metric.key);
       rows.forEach(function (row, index) {
         var value = number(row[metric.key]);
-        if (value === null) { segment = false; return; }
+        if (value === null) { priorPoint = null; return; }
+        var previous = rows[index - 1];
+        var sameClock = previous && previous.time_domain === row.time_domain;
+        var missed = previous && number(previous.time) !== null && number(row.time) !== null &&
+          row.time - previous.time > intervalMs / 1000 * 1.5;
+        var restarted = processSeries && previous && number(row.generation) !== null && previous.generation !== row.generation;
         var x = xFor(row, index);
-        if (metric.key === "rss" && points.length > 0 && row.generation !== null && number(row.generation) !== null) {
-          var previous = rows[index - 1];
-          if (previous && previous.generation !== row.generation) segment = false;
-        }
         var y = yFor(value);
-        commands.push((segment ? "L" : "M") + x.toFixed(1) + "," + y.toFixed(1));
-        segment = true;
-        points.push({ x: x, y: y });
+        var connected = !!priorPoint && sameClock && !missed && !restarted;
+        commands.push((connected ? "L" : "M") + x.toFixed(1) + "," + y.toFixed(1));
+        if (connected) priorPoint.connected = true;
+        priorPoint = { x: x, y: y, connected: connected };
+        points.push(priorPoint);
       });
       var seriesClass = "diag-line diag-line-" + metric.color;
-      if (points.length < 4) {
-        points.forEach(function (point) {
-          chart.append(svg(doc, "circle", { cx: point.x, cy: point.y, r: 3, "class": seriesClass + " diag-point" }));
-        });
-      } else {
+      if (commands.some(function (command) { return command.startsWith("L"); })) {
         chart.append(svg(doc, "path", { d: commands.join(" "), "class": seriesClass, "data-series": metric.key }));
       }
+      points.forEach(function (point) {
+        if (points.length < 4 || !point.connected) {
+          chart.append(svg(doc, "circle", { cx: point.x, cy: point.y, r: 3, "class": seriesClass + " diag-point" }));
+        }
+      });
     });
     return { rows: rows, delta: seriesEndpoints(rows, "rss").delta, axisUnit: axisUnit, xFor: xFor, yFor: yFor,
       active: active, top: top, bottom: bottom };
@@ -578,20 +583,27 @@
     var failures = events.filter(unconfirmedEvent);
     var filtered = doc.getElementById("diagnostic-event-filter").value === "unconfirmed";
     var rows = (filtered ? failures : events).slice().sort(function (a, b) { return b.at - a.at; });
-    setText(doc, "diagnostic-event-summary", "Записей " + events.length + " · без подтверждения " + failures.length);
+    setText(doc, "diagnostic-event-summary", events.length ? "Записей: " + events.length +
+      (failures.length ? " · без подтверждения: " + failures.length : "") : "");
     empty.hidden = !!rows.length;
     empty.textContent = filtered ? "В журнале нет неподтверждённых исходов." : "После включения сбора завершённых подборов пока нет.";
     var key = JSON.stringify(rows);
     if (target.dataset.events === key) return;
     target.dataset.events = key;
-    var expanded = new Set(Array.from(target.querySelectorAll("details[open]")).map(function (row) { return row.dataset.event; }));
-    target.replaceChildren(...rows.map(function (event) {
+    var previous = new Map(Array.from(target.children).map(function (item) { return [item.firstElementChild.dataset.event, item]; }));
+    var items = rows.map(function (event) {
+      var eventKey = JSON.stringify([event.id, event.target, event.at, event.outcome]);
+      var content = JSON.stringify(event), old = previous.get(eventKey);
+      previous.delete(eventKey);
+      if (old && old.__reportEvent === content) return old;
       var li = doc.createElement("li"), details = doc.createElement("details"), title = doc.createElement("summary");
       var label = doc.createElement("strong"), outcome = doc.createElement("span"), time = doc.createElement("time");
       var info = doc.createElement("div");
-      details.dataset.event = JSON.stringify([event.id, event.target, event.at, event.outcome]);
-      details.open = expanded.has(details.dataset.event);
+      details.dataset.event = eventKey;
+      details.open = !!old && old.firstElementChild.open;
+      li.__reportEvent = content;
       li.dataset.unconfirmed = String(unconfirmedEvent(event));
+      outcome.className = "diag-outcome";
       label.textContent = event.target || "Цель не указана";
       outcome.textContent = outcomeLabels[event.outcome] || event.outcome || "Без исхода";
       time.textContent = timeLabel(event.at);
@@ -612,7 +624,11 @@
       details.append(title, info);
       li.append(details);
       return li;
-    }));
+    });
+    items.forEach(function (item, index) {
+      if (target.children[index] !== item) target.insertBefore(item, target.children[index] || null);
+    });
+    while (target.children.length > items.length) target.lastElementChild.remove();
   }
 
   function render(report, enabled, range, size) {
@@ -685,7 +701,8 @@
     technical.hidden = !technical.querySelector(".diag-card:not([hidden])");
     var chart = drawMemory(doc, allMemoryRows, range, intervalMs, size);
     setText(doc, "diagnostic-memory-interval", intervalText(intervalMs, chart.axisUnit));
-    setText(doc, "diagnostic-history-coverage", coverageText(chart.rows, range));
+    setText(doc, "diagnostic-history-coverage", chart.rows.length === 1 ?
+      "Пока один снимок. Линия появится после следующего." : coverageText(chart.rows, range));
     var change = doc.getElementById("diagnostic-rss-change");
     change.hidden = chart.delta === null;
     if (!change.hidden) change.textContent = formatDeltaBytes(chart.delta) + " за период";
@@ -735,6 +752,7 @@
     if (!toggle || !status || !download) return;
     var stopDialog = doc.getElementById("diagnostic-stop-dialog"), eventFilter = doc.getElementById("diagnostic-event-filter");
     var clearHistory = doc.getElementById("diagnostic-clear");
+    var collector = state.closest(".diag-collector");
     var rangeButtons = doc.querySelectorAll("[data-memory-range]");
     var params = new URL(root.location.href).searchParams;
     var range = params.get("diag-period") === "24" ? 24 : 2;
@@ -742,6 +760,7 @@
     var enabled, paused = false, failed = false, busy = false, currentReport = {}, chart, selectedAt;
     var reportBytes = null, poll, request, pendingSince = 0, resizeFrame;
     var plotSize = { width: 320, height: 240 };
+    var drawnAt;
 
     function saveOption(key, value) {
       var url = new URL(root.location.href);
@@ -778,6 +797,14 @@
 
     function redraw() {
       chart = render(currentReport, enabled, range, plotSize);
+      var latest = chart && chart.rows.at(-1);
+      if (latest && latest.at !== drawnAt && latest.at !== null) {
+        if (drawnAt !== undefined && visible() && !graph.hidden && !root.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          graph.getAnimations().forEach(function (animation) { animation.cancel(); });
+          graph.animate([{ opacity: .76 }, { opacity: 1 }], { duration: 210, easing: "ease-out" });
+        }
+        drawnAt = latest.at;
+      }
       cursor.hidden = !chart || !chart.xFor || chart.rows.length < 2;
       var reportSize = doc.getElementById("diagnostic-report-size");
       reportSize.hidden = !chart || number(reportBytes) === null;
@@ -815,6 +842,7 @@
       setText(doc, "diagnostic-status", labels[phase][1]);
       state.dataset.enabled = String(enabled === true);
       state.dataset.phase = phase;
+      collector.dataset.sync = String(busy || !!request);
       toggle.disabled = busy || enabled === undefined;
       toggle.textContent = paused ? "Возобновить сбор" : enabled ? "Остановить сбор" : "Включить сбор";
       toggle.setAttribute("data-variant", enabled && !paused ? "ghost" : "primary");

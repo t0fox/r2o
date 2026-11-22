@@ -658,7 +658,18 @@ esac
   fs.writeFileSync(path.join(diagDir, "report.json"), JSON.stringify(diag));
   await evaluate("document.querySelector('#diagnostic-refresh').click()");
   await waitFor(() => evaluate("document.querySelector('#diagnostic-memory-chart').dataset.points === '2'"), "короткий ряд доступен");
-  assert.equal(await evaluate("document.querySelectorAll('#diagnostic-memory-chart path[data-series]').length"), 0, "два снимка показаны точками");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-memory-chart path[data-series=rss]').getAttribute('d').includes('L')"), true,
+    "два соседних снимка образуют линию");
+  const recent = fullSamples.slice(-3);
+  diag.samples = [{ ...recent[0], at: recent[0].at - 120 }, recent[1],
+    { ...recent[2], processes: [{ ...recent[2].processes[0], pid: 8 }] }];
+  fs.writeFileSync(path.join(diagDir, "report.json"), JSON.stringify(diag));
+  await evaluate("document.querySelector('#diagnostic-refresh').click()");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-memory-chart').dataset.points === '3'"), "ряд с разрывами доступен");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-memory-chart path[data-series=rss]')"), null,
+    "через пропущенный снимок и смену PID линия не рисуется");
+  assert.equal(await evaluate("document.querySelectorAll('#diagnostic-memory-chart circle.diag-line-rss.diag-point:not(.diag-cursor-mark *)').length"),
+    3, "изолированные замеры остаются видимыми");
   diag.samples = fullSamples;
   diag.memory_tracking.sites.push({ name: "Измеренный участок", peak_bytes: 2048, created: 1, destroyed: 1 });
   diag.madvise.failures = 1;
