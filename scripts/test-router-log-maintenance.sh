@@ -25,6 +25,8 @@ head -c 4096 /dev/zero | tr '\000' x > "$install_root/log/panel.log"
 printf 'retained-tail\n' >> "$install_root/log/panel.log"
 head -c 4096 /dev/zero | tr '\000' m > "$install_root/log/instagram-dns.log"
 head -c 4096 /dev/zero | tr '\000' n > "$install_root/log/instagram-dns-scheduler.log"
+head -c 4096 /dev/zero | tr '\000' l > "$install_root/log/lists-update.log"
+head -c 4096 /dev/zero | tr '\000' r > "$install_root/log/rt-proxy.log"
 head -c 4096 /dev/zero | tr '\000' d > "$install_root/log/r2o-datapath.log"
 head -c 4096 /dev/zero | tr '\000' c > "$install_root/log/r2o-controller.log"
 head -c 4096 /dev/zero | tr '\000' y > "$install_root/log/unowned.log"
@@ -40,6 +42,8 @@ env R2O_DIR="$install_root" R2O_CONFIG="$install_root/config" \
 tail -c 14 "$install_root/log/panel.log" | grep -qx 'retained-tail'
 [ "$(wc -c < "$install_root/log/instagram-dns.log")" -eq 1024 ]
 [ "$(wc -c < "$install_root/log/instagram-dns-scheduler.log")" -eq 1024 ]
+[ "$(wc -c < "$install_root/log/lists-update.log")" -eq 1024 ]
+[ "$(wc -c < "$install_root/log/rt-proxy.log")" -eq 1024 ]
 [ "$(wc -c < "$install_root/log/r2o-datapath.log")" -eq 1024 ]
 [ "$(wc -c < "$install_root/log/r2o-controller.log")" -eq 1024 ]
 [ "$(stat -c %i "$install_root/log/panel.log")" = "$before_inode" ]
@@ -118,9 +122,9 @@ cmp "$TEMP/fallback-tail" "$install_root/log/panel.log"
 cat > "$install_root/config-default" <<'EOF'
 MODE=observe
 EOF
-head -c 2097152 /dev/zero | tr '\000' a > "$install_root/log/panel.log"
-head -c 1048576 /dev/zero | tr '\000' z >> "$install_root/log/panel.log"
-head -c 1048576 /dev/zero | tr '\000' z > "$TEMP/default-tail"
+head -c 262144 /dev/zero | tr '\000' a > "$install_root/log/panel.log"
+head -c 131072 /dev/zero | tr '\000' z >> "$install_root/log/panel.log"
+head -c 131072 /dev/zero | tr '\000' z > "$TEMP/default-tail"
 env R2O_DIR="$install_root" R2O_CONFIG="$install_root/config-default" \
     R2O_RUNTIME_DIR="$TEMP/runtime" sh "$ROOT/router/r2o-log-maintenance.sh" tick
 cmp "$TEMP/default-tail" "$install_root/log/panel.log"

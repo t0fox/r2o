@@ -1,6 +1,5 @@
 #!/bin/sh
-# Keep only the newest tail of R2O-owned logs while preserving their inode for
-# processes that already have an append descriptor open.
+# Сохраняем хвост журнала в том же inode для процессов с открытым дескриптором.
 set -u
 
 ROOT=${R2O_DIR:-/opt/r2o}
@@ -15,15 +14,15 @@ valid_bytes() {
     [ "${#1}" -le 8 ] && [ "$1" -ge 1024 ] && [ "$1" -le 67108864 ]
 }
 
-if ! valid_bytes "${LOGMAX:-2097152}" ||
-   ! valid_bytes "${LOGKEEP:-1048576}" ||
-   [ "${LOGKEEP:-1048576}" -ge "${LOGMAX:-2097152}" ]; then
-    echo 'r2o: invalid LOGMAX/LOGKEEP; using 2 MiB / 1 MiB' >&2
-    LOGMAX=2097152
-    LOGKEEP=1048576
+if ! valid_bytes "${LOGMAX:-262144}" ||
+   ! valid_bytes "${LOGKEEP:-131072}" ||
+   [ "${LOGKEEP:-131072}" -ge "${LOGMAX:-262144}" ]; then
+    echo 'r2o: invalid LOGMAX/LOGKEEP; using 256 KiB / 128 KiB' >&2
+    LOGMAX=262144
+    LOGKEEP=131072
 else
-    LOGMAX=${LOGMAX:-2097152}
-    LOGKEEP=${LOGKEEP:-1048576}
+    LOGMAX=${LOGMAX:-262144}
+    LOGKEEP=${LOGKEEP:-131072}
 fi
 while [ "${LOGMAX#0}" != "$LOGMAX" ]; do LOGMAX=${LOGMAX#0}; done
 while [ "${LOGKEEP#0}" != "$LOGKEEP" ]; do LOGKEEP=${LOGKEEP#0}; done
@@ -65,7 +64,7 @@ tick() {
     for name in r2o-datapath.log r2o-controller.log \
                 r2o-datapath4.log r2o-datapath6.log \
                 r2o-controller4.log r2o-controller6.log \
-                panel.log telegram.log update-scheduler.log \
+                panel.log telegram.log rt-proxy.log lists-update.log update-scheduler.log \
                 instagram-dns.log instagram-dns-scheduler.log; do
         rotate_one "$LOG/$name"
     done
