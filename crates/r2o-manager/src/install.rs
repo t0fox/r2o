@@ -479,8 +479,8 @@ fn cleanup_stale_install_artifacts(root: &Path) {
             continue;
         };
         let stale_directory = name.starts_with(".install-");
-        let stale_slot = name.starts_with(".release-slots.");
-        if !stale_directory && !stale_slot {
+        let stale_file = name.starts_with(".release-slots.") || name.starts_with(".r2o-manager-");
+        if !stale_directory && !stale_file {
             continue;
         }
         let path = entry.path();
@@ -492,7 +492,7 @@ fn cleanup_stale_install_artifacts(root: &Path) {
         }
         if stale_directory && metadata.is_dir() {
             let _ = fs::remove_dir_all(&path);
-        } else if stale_slot && metadata.is_file() {
+        } else if stale_file && metadata.is_file() {
             let _ = fs::remove_file(&path);
         }
     }
@@ -870,9 +870,28 @@ fn install_manager_launcher(
             "r2o-manager-linux-{architecture}"
         )));
     }
+    let launcher = root.join("r2o-manager");
     for _ in 0..16 {
         let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
         let temporary = root.join(format!(".r2o-manager-{}-{sequence}", std::process::id()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Ссылка экономит копию ELF. Если ФС или режим файла мешают, сохраняем копирование.
+            if source_metadata.permissions().mode() & 0o7777 == 0o755 {
+                match fs::hard_link(&source, &temporary) {
+                    Ok(()) => {
+                        let result = fs::rename(&temporary, &launcher);
+                        let _ = fs::remove_file(&temporary);
+                        return result
+                            .and_then(|()| sync_directory(root))
+                            .map_err(InstallError::Io);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(_) => {}
+                }
+            }
+        }
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -895,7 +914,7 @@ fn install_manager_launcher(
                 fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))?;
             }
             destination.sync_all()?;
-            fs::rename(&temporary, root.join("r2o-manager"))?;
+            fs::rename(&temporary, &launcher)?;
             sync_directory(root)
         })();
         if result.is_err() {
@@ -1346,6 +1365,17 @@ mod tests {
         }
 
         let first = activate_bundle(&root, &bundle_one, "r2o-1", "mipsel").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let launcher = fs::metadata(root.join("r2o-manager")).unwrap();
+            let component =
+                fs::metadata(root.join("releases/r2o-1/builds/r2o-manager-linux-mipsel")).unwrap();
+            assert_eq!(
+                (launcher.dev(), launcher.ino()),
+                (component.dev(), component.ino())
+            );
+        }
         assert_eq!(
             read_install_architecture(&root).unwrap().as_deref(),
             Some("mipsel")
