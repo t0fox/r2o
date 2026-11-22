@@ -987,7 +987,7 @@ pub fn write_snapshot(path: &Path, value: &Value) -> Result<(), CatalogError> {
     temporary_name.push(format!(".new.{}.{}", std::process::id(), nonce));
     let temporary_path: PathBuf = path.with_file_name(temporary_name);
     let result = (|| {
-        let bytes = serde_json::to_vec_pretty(value)
+        let bytes = serde_json::to_vec(value)
             .map_err(|error| CatalogError::new(format!("serialize live snapshot: {error}")))?;
         let mut file = OpenOptions::new()
             .write(true)

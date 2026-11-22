@@ -466,7 +466,7 @@ impl Catalog {
                 })?;
             }
         }
-        let content = catalog.to_json_at(updated)?;
+        let content = catalog.serialize_json_at(updated, false)?;
         if content.len() as u64 > MAX_CATALOG_BYTES {
             return Err(CatalogError::new(
                 "импортированный каталог превышает предел 64 МиБ",
@@ -496,6 +496,10 @@ impl Catalog {
     }
 
     pub fn to_json_at(&self, updated: i64) -> Result<String, CatalogError> {
+        self.serialize_json_at(updated, true)
+    }
+
+    fn serialize_json_at(&self, updated: i64, pretty: bool) -> Result<String, CatalogError> {
         self.validate()?;
         format_timestamp(updated)?;
         let mut rebuilt_domain_state = self.domain_state.clone();
@@ -530,8 +534,12 @@ impl Catalog {
             domain_groups_disabled_at,
             network_whitelist,
         };
-        let mut text = serde_json::to_string_pretty(&output)
-            .map_err(|error| CatalogError::new(format!("serialize catalog: {error}")))?;
+        let mut text = if pretty {
+            serde_json::to_string_pretty(&output)
+        } else {
+            serde_json::to_string(&output)
+        }
+        .map_err(|error| CatalogError::new(format!("serialize catalog: {error}")))?;
         text.push('\n');
         Ok(text)
     }
@@ -559,7 +567,10 @@ impl Catalog {
             .unwrap_or(Path::new("."));
 
         let result = (|| {
-            let content = self.to_json_at(updated)?;
+            let content = self.serialize_json_at(updated, false)?;
+            if content.len() as u64 > MAX_CATALOG_BYTES {
+                return Err(CatalogError::new("catalog file exceeds 64 MiB"));
+            }
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)

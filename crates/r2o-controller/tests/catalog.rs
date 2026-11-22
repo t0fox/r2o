@@ -511,6 +511,12 @@ fn atomic_save_replaces_the_file_and_leaves_no_temporary_file() {
     fs::write(&path, b"old").unwrap();
     catalog.save_atomic(&path, 1_788_765_236).unwrap();
     let written = fs::read_to_string(&path).unwrap();
+    let pretty = catalog.to_json_at(1_788_765_236).unwrap();
+    assert!(written.len() < pretty.len());
+    assert_eq!(
+        serde_json::from_str::<Value>(&written).unwrap(),
+        serde_json::from_str::<Value>(&pretty).unwrap()
+    );
     let round_trip = Catalog::parse(written.as_bytes()).unwrap();
     assert!(round_trip.boxes.is_empty());
     assert!(!dir.join("catalog.json.new").exists());
