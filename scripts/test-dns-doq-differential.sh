@@ -44,6 +44,12 @@ c = json.load(open(sys.argv[1], encoding="utf-8"))
 r = json.load(open(sys.argv[2], encoding="utf-8"))
 for item in c:
     item.pop("end", None)
+    for service in item["dns_services"]:
+        # В доноре текст общий для DoH/DoQ. R2O указывает фактический протокол.
+        if service["status_reason"] == "Проверяется кандидат штатным конвейером D2O.":
+            service["status_reason"] = "Проверяется кандидат."
+        elif service["protocol"] == "doq" and service["status_reason"].startswith("Плановый DoH-зонд "):
+            service["status_reason"] = service["status_reason"].replace("Плановый DoH-зонд ", "Плановый DoQ-зонд ", 1)
 if c != r:
     for left, right in zip(c, r):
         if left != right:
