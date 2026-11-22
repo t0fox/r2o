@@ -16,19 +16,35 @@ GUEST_INIT = """#!/bin/sh
 set -eu
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
+if [ ! -c /dev/null ]; then
+    mount -t devtmpfs devtmpfs /dev || mknod /dev/null c 1 3
+fi
+[ -c /dev/null ]
 export PATH=/sbin:/usr/sbin:/bin:/usr/bin
 root=/audit/r2o
 manager=/audit/r2o-manager
 slot() { sed -n '2p' "$root/release-slots"; }
+for option in $(cat /proc/cmdline); do
+    case "$option" in r2o_audit_phase=*) export R2O_AUDIT_PHASE=${option#*=} ;; esac
+done
 if [ -f /audit/reboot-test ]; then
-    [ "$(slot)" = r2o-base ]
+    case "$R2O_AUDIT_PHASE" in
+        update-stop) [ "$(slot)" = r2o-next ] ;;
+        *) [ "$(slot)" = r2o-base ] ;;
+    esac
     [ -s "$root/state/update-pending.json" ]
     "$manager" update-recover --root "$root"
     [ "$(slot)" = r2o-next ]
+    [ "$(sed -n '3p' "$root/release-slots")" = r2o-base ]
     [ ! -e "$root/state/update-pending.json" ]
-    grep -qx 'MODE=observe' "$root/config"
-    grep -qx '{"schema":1,"boxes":[]}' "$root/state/catalog.json"
-    grep -q '"bad_release":"r2o-base"' "$root/state/update.json"
+    grep -Fqx 'MODE=observe' "$root/config"
+    grep -Fqx '{"schema":1,"boxes":[]}' "$root/state/catalog.json"
+    case "$R2O_AUDIT_PHASE" in
+        update-stop)
+            if grep -q '"bad_release":"r2o-base"' "$root/state/update.json"; then exit 1; fi
+            ;;
+        *) grep -q '"bad_release":"r2o-base"' "$root/state/update.json" ;;
+    esac
     printf 'R2O_RECOVERY_OK\\n'
     sync
     poweroff -f
@@ -52,14 +68,10 @@ exec "$manager" update-rollback --root "$root" --service /audit/adapter.sh
 
 ADAPTER = """#!/bin/sh
 set -eu
-case "$1" in
-    update-stop) ;;
-    update-start)
-        printf 'R2O_POWER_CUT_NOW\\n'
-        exec sleep 120
-        ;;
-    *) exit 1 ;;
-esac
+if [ "$1" = "$R2O_AUDIT_PHASE" ]; then
+    printf 'R2O_POWER_CUT_NOW\\n'
+    exec sleep 120
+fi
 """
 
 
@@ -111,16 +123,20 @@ def main():
             f"write {work / name} /audit/{name}\n" for name in [*files, "r2o-manager"]
         ), encoding="utf8")
         subprocess.run(["debugfs", "-w", "-f", commands, disk], check=True, capture_output=True)
-        vm = [
-            "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57", "-smp", "2", "-m", "256",
-            "-kernel", args.kernel, "-append", "root=/dev/vda rw console=ttyAMA0 init=/audit/guest-init.sh",
-            "-drive", f"file={disk},format=raw,if=none,id=disk,cache=none",
-            "-device", "virtio-blk-device,drive=disk", "-display", "none", "-monitor", "none",
-            "-serial", "stdio", "-nic", "none", "-no-reboot",
-        ]
-        boot(vm, b"R2O_POWER_CUT_NOW", args.logs / "before-powercut.log")
-        boot(vm, b"R2O_RECOVERY_OK", args.logs / "after-powercut.log")
-    print("OpenWrt QEMU восстановил рабочий слот и каталог после отключения во время активации")
+        for phase in ("update-stop", "update-start", "update-health"):
+            case_disk = work / f"{phase}.ext4"
+            shutil.copyfile(disk, case_disk)
+            vm = [
+                "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a57", "-smp", "2", "-m", "256",
+                "-kernel", args.kernel, "-append",
+                f"root=/dev/vda rw console=ttyAMA0 init=/audit/guest-init.sh r2o_audit_phase={phase}",
+                "-drive", f"file={case_disk},format=raw,if=none,id=disk,cache=none",
+                "-device", "virtio-blk-device,drive=disk", "-display", "none", "-monitor", "none",
+                "-serial", "stdio", "-nic", "none", "-no-reboot",
+            ]
+            boot(vm, b"R2O_POWER_CUT_NOW", args.logs / f"{phase}-before-powercut.log")
+            boot(vm, b"R2O_RECOVERY_OK", args.logs / f"{phase}-after-powercut.log")
+            print(f"OpenWrt QEMU восстановил рабочий слот и каталог после отключения в {phase}")
 
 
 if __name__ == "__main__":

@@ -286,7 +286,7 @@ async function main() {
     }],
   });
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\nif [ "$1" = update-install ] && [ -f '${updateTimeout}' ]; then exit 124; fi
+  fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'
 if [ "$1" = meta-protection-product ]; then
   case "$3" in
     off) touch '${work}/meta-protection.'"$2"'.disabled' ;;

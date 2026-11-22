@@ -108,11 +108,9 @@ component_running() {
     esac
 }
 RUNTIME=$TEMP/r2o/runtime
-IPV6_ENABLED_RUNTIME=0
-QUEUE4=2000
+# shellcheck disable=SC2034 # Эти параметры читает подключённая функция update_health.
+IPV6_ENABLED_RUNTIME=0 QUEUE4=2000 TG_ENABLED=0 META_DISABLED=$TEMP/r2o/meta-disabled
 DP4_PID=$TEMP/r2o/dp.pid
-TG_ENABLED=0
-META_DISABLED=$TEMP/r2o/meta-disabled
 SOCK4=$TEMP/r2o/dp.sock
 MANAGER=$TEMP/manager
 FIREWALL=$TEMP/firewall
