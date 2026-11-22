@@ -1662,6 +1662,11 @@ fn r2o_служебная_команда_панели_остаётся_асин�
 fn config_parser_accepts_all_shipped_and_donor_known_keys() {
     let temp = TempDir::new();
     let path = temp.file("config");
+    fs::write(&path, include_str!("../../../router/config.default")).unwrap();
+    let mut config = Config::default();
+    parse_config(&path, &mut config, &[]).unwrap();
+    assert!(config.unknown_keys.is_empty(), "{:?}", config.unknown_keys);
+
     fs::write(
         &path,
         "SCHEMA=1\nMODE=apply\nPANEL_LISTEN=127.0.0.1:8090\nSTATE_DIR=/opt/r2o/state\nQUEUE_NUM=2000\nQUEUE_NUM6=2001\nR2O_FLOW_CAPACITY=2048\nR2O_MEASUREMENT_LIMIT=64\nIPV6_ENABLED=1\nMARK=45\nPROBE_MARK=46\nMEASURE_MARK=0x30\nONLY_MARK=\nAUTOUPDATE=1\nLOGMAX=2097152\nLOGKEEP=1048576\nLOG_EVERY=60\nFW_BACKEND=auto\nPORTS=0:65535\nCONNBYTES=0:8\nVOICE_PORTS=50000:50099\nVOICE_CONNBYTES=0:4\nHTTP_KEEPALIVE_PORTS=80\nDNS_PORTS=53,853\nD2K_GATE=\nTG_ENABLED=1\nTG_MODE=local\nTG_PORT=1443\nTG_RELAY_URL=\nTG_RELAY_SECRET=\nTG_ENROLL_PORT=9443\nD2K_PPE_DEOFFLOAD=1\nR2O_PPE_DEOFFLOAD=1\n",
@@ -1682,7 +1687,11 @@ fn config_parser_honors_overrides_and_keeps_unknown_keys_visible() {
     let path = temp.file("config");
     fs::write(
         &path,
-        "MODE=apply\nQUEUE_NUM=1234\nR2O_PPE_DEOFFLOAD=1\nFUTURE_KEY='not parsed'\n",
+        concat!(
+            "MODE=apply\nQUEUE_NUM=1234\nR2O_PPE_DEOFFLOAD=1\n",
+            "DNS_DISCOVERY_ENDPOINTS='192.0.2.53:53 tcp://[2001:db8::53]:53'\n",
+            "FUTURE_KEY='not parsed'\n",
+        ),
     )
     .unwrap();
     let mut config = Config::default();
@@ -1690,6 +1699,16 @@ fn config_parser_honors_overrides_and_keeps_unknown_keys_visible() {
     assert_eq!(config.mode, "observe");
     assert_eq!(config.queue_num, 1234);
     assert_eq!(config.unknown_keys, ["FUTURE_KEY"]);
+    let (code, _, body) = request(
+        &config,
+        "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(code, 200);
+    let status: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        status["snapshot"]["unknown_keys"],
+        serde_json::json!(["FUTURE_KEY"])
+    );
     fs::write(&path, "MODE=broken\n").unwrap();
     assert!(parse_config(&path, &mut config, &["mode"]).is_err());
     fs::write(&path, "SCHEMA=+1\n").unwrap();
