@@ -1,7 +1,7 @@
 //! Наблюдения Discovery для очереди проверки Meta. В файлах нет данных клиентов.
 
 use r2k_core::control::{HelloEvent, SHAPE_HTTP, SHAPE_MODERN};
-use r2k_core::meta::{disabled_products, product, product_marker};
+use r2k_core::meta::{disabled_products, product, product_marker, protection_enabled};
 use r2o_controller::discovery::DiscoveryTarget;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -39,7 +39,7 @@ impl MetaTraffic {
             _ => "dual",
         };
         Some(Self {
-            enabled: !state.join("meta-protection.disabled").exists(),
+            enabled: protection_enabled(&state),
             disabled_products: disabled_products(&state),
             state,
             observations: runtime.join(format!("meta-observed-{suffix}.json")),
@@ -104,7 +104,7 @@ impl MetaTraffic {
     }
 
     fn enabled(&self) -> bool {
-        !self.state.join("meta-protection.disabled").exists()
+        protection_enabled(&self.state)
     }
 
     pub fn enabled_for(&self, host: &str) -> bool {
@@ -204,6 +204,9 @@ mod tests {
             request_stamp: 0,
             pending: HashMap::new(),
         };
+        assert!(!meta.enabled());
+        std::fs::write(path.join("meta-protection.enabled"), b"1\n").unwrap();
+        assert!(meta.enabled());
         meta.observe_dns("media-new.whatsapp.net", 1000);
         let requests = serde_json::json!([
             1000,

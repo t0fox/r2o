@@ -439,6 +439,26 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
             "panel-motion.js",
             "application/javascript; charset=utf-8",
         ),
+        (
+            "/assets/supporter-gallery.css",
+            "supporter-gallery.css",
+            "text/css; charset=utf-8",
+        ),
+        (
+            "/assets/supporter-gallery.js",
+            "supporter-gallery.js",
+            "application/javascript; charset=utf-8",
+        ),
+        (
+            "/assets/supporter-art.js",
+            "supporter-art.js",
+            "application/javascript; charset=utf-8",
+        ),
+        (
+            "/assets/supporters.js",
+            "supporters.js",
+            "application/javascript; charset=utf-8",
+        ),
         ("/assets/onest.woff2", "fonts/onest.woff2", "font/woff2"),
         ("/assets/jbmono.woff2", "fonts/jbmono.woff2", "font/woff2"),
         (
@@ -1353,7 +1373,7 @@ fn snapshot(
     if !linked {
         absent.push(stage("traffic", "Наблюдаемый трафик", false, "Нечем: контроллер не подключён к датапату. Это не «ноль соединений», а отсутствие измерения."));
     }
-    let meta_enabled = !config.state_dir.join("meta-protection.disabled").exists();
+    let meta_enabled = r2k_core::meta::protection_enabled(&config.state_dir);
     let meta_running = meta_enabled
         && pid_path_running(&config.manager_root.join("run/meta-dns-scheduler.pid")).is_some();
     let mut meta = read_json_object(&config.state_dir.join("meta-status.json"), 64 * 1024)
@@ -2387,6 +2407,10 @@ fn embedded_gzip(name: &str) -> Option<&'static [u8]> {
         "telegram-flow-prototype.js" => gzip!("telegram-flow-prototype.js"),
         "gsap.js" => gzip!("gsap.js"),
         "panel-motion.js" => gzip!("panel-motion.js"),
+        "supporter-gallery.css" => gzip!("supporter-gallery.css"),
+        "supporter-gallery.js" => gzip!("supporter-gallery.js"),
+        "supporter-art.js" => gzip!("supporter-art.js"),
+        "supporters.js" => gzip!("supporters.js"),
         _ => return None,
     })
 }

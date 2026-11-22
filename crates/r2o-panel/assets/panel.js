@@ -819,6 +819,7 @@
       } else { self.poll(); self.pollUpdates(); }
     });
     doc.addEventListener("keydown", function (e) {
+      if (doc.getElementById("supporter-gallery")?.open) return;
       if (e.key === "Escape" && self.armed) { self.armed = null; self.renderActions(); }
       if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
@@ -1640,6 +1641,9 @@
     var state = this.$("meta-protection-state"), lamp = this.$("meta-protection-lamp");
     if (state.textContent !== summary) state.textContent = summary;
     lamp.dataset.tone = saving ? "live" : !enabled ? "" : this.failed || !status.running || status.error ? "warn" : status.checked_at ? "ok" : "live";
+    this.$("meta-protection-families").hidden = !enabled;
+    this.$("meta-protection-infrastructure").hidden = !enabled;
+    if (!enabled) return;
     var rows = list(status.families), searches = list(status.searches);
     var checked = function (epoch) { return epoch ? new Date(epoch * 1000).toLocaleString() : "Ещё не проверено"; };
     var metric = function (stats, label, value) { stats.append(el(doc, "dt", "", label), el(doc, "dd", "", value)); };
@@ -3805,6 +3809,21 @@
     var boot = function () {
       var doc = global.document;
       doc.querySelectorAll(".panel-select").forEach(function (select) { styleSelect(select, doc); });
+      doc.querySelectorAll("button.brand, button.mast-brand").forEach(function (button) {
+        button.addEventListener("click", async function () {
+          if (button.hasAttribute("aria-busy")) return;
+          button.setAttribute("aria-busy", "true");
+          try {
+            var gallery = await import("/assets/supporter-gallery.js");
+            await gallery.openGallery(button);
+          } catch (error) {
+            console.error(error);
+            global.alert("Не удалось открыть страницу R2O. Попробуйте ещё раз.");
+          } finally {
+            button.removeAttribute("aria-busy");
+          }
+        });
+      });
       new App(doc, global).start();
     };
     if (global.document.readyState === "loading") global.document.addEventListener("DOMContentLoaded", boot);

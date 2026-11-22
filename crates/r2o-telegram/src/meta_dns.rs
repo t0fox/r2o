@@ -4,7 +4,7 @@ use crate::cf_proxy_doh::{doh_tls, protected_address_lookup};
 use crate::meta_edge::{META_HOSTS, MetaTls};
 use crate::meta_knowledge::{Address, Knowledge};
 use futures_util::{StreamExt, stream};
-use r2k_core::meta::product as meta_family;
+use r2k_core::meta::{product as meta_family, protection_enabled};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::future::Future;
@@ -743,7 +743,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             return Err("нет проверенных адресов узлов Meta".into());
         }
 
-        if !enabled(&state_dirs(&self.paths).0) {
+        if !protection_enabled(&state_dirs(&self.paths).0) {
             return Err("Meta Protection выключена".into());
         }
         let mut view = NdmView::new(&mut self.ndm);
@@ -1148,10 +1148,6 @@ fn state_dirs(paths: &MetaDnsPaths) -> (PathBuf, PathBuf) {
     (state, runtime)
 }
 
-fn enabled(state: &Path) -> bool {
-    !state.join("meta-protection.disabled").exists()
-}
-
 fn state_lock(state: &Path) -> Result<std::fs::File, String> {
     std::fs::create_dir_all(state).map_err(|error| error.to_string())?;
     let lock = std::fs::OpenOptions::new()
@@ -1174,7 +1170,7 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
     let paths = MetaDnsPaths::from_env();
     let (state, runtime) = state_dirs(&paths);
     let _lock = state_lock(&state)?;
-    if !enabled(&state) {
+    if !protection_enabled(&state) {
         return Err("Meta Protection выключена".into());
     }
     let now = SystemTime::now()
@@ -1343,7 +1339,7 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
     }
     knowledge.checked_at = now;
     knowledge.error = result.as_ref().err().cloned();
-    if enabled(&state) && !recovery.is_empty() {
+    if protection_enabled(&state) && !recovery.is_empty() {
         std::fs::create_dir_all(&runtime).map_err(|error| error.to_string())?;
         let bytes = serde_json::to_vec(&(now, recovery)).map_err(|error| error.to_string())?;
         atomic_write(&runtime.join("meta-discovery-requests.json"), &bytes)?;
@@ -1427,7 +1423,7 @@ pub async fn run_scheduler() -> Result<(), String> {
     let meta_disabled = std::env::var("R2O_META_DNS_DISABLED").as_deref() == Ok("1");
     let mut sync = Box::pin(async {
         loop {
-            if enabled(&state) && !meta_disabled {
+            if protection_enabled(&state) && !meta_disabled {
                 let _ = lists.update_meta().await;
             }
             sleep(Duration::from_secs(3600)).await;
@@ -1435,7 +1431,7 @@ pub async fn run_scheduler() -> Result<(), String> {
     });
     loop {
         let cycle = async {
-            if enabled(&state) && !meta_disabled {
+            if protection_enabled(&state) && !meta_disabled {
                 if let Err(error) = scheduler.tick().await {
                     append_log(&scheduler.log, &error);
                 }
@@ -2044,6 +2040,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("r2o-meta-dns-{}-{label}-{id}", std::process::id()));
         std::fs::create_dir_all(root.join("state")).unwrap();
+        std::fs::write(root.join("state/meta-protection.enabled"), b"1\n").unwrap();
         std::fs::create_dir_all(root.join("files")).unwrap();
         let ranges = root.join("files/meta-ranges.txt");
         std::fs::write(&ranges, "157.240.0.0/16\n57.144.0.0/14\n").unwrap();
@@ -2654,13 +2651,17 @@ esac
         let state = paths.r2o_dir.join("state");
         let lock = state_lock(&state).unwrap();
         assert!(state_lock(&state).is_err());
-        assert!(enabled(&state));
+        let opt_in = state.join("meta-protection.enabled");
+        std::fs::remove_file(&opt_in).unwrap();
+        assert!(!protection_enabled(&state));
+        atomic_write(&opt_in, b"1\n").unwrap();
+        assert!(protection_enabled(&state));
         atomic_write(&state.join("meta-protection.disabled"), b"0\n").unwrap();
         drop(lock);
         assert!(state_lock(&state).is_ok());
-        assert!(!enabled(&state));
+        assert!(!protection_enabled(&state));
         std::fs::remove_file(state.join("meta-protection.disabled")).unwrap();
-        assert!(enabled(&state));
+        assert!(protection_enabled(&state));
         std::fs::remove_dir_all(paths.r2o_dir).unwrap();
     }
 

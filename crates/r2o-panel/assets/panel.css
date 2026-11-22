@@ -241,6 +241,16 @@ button { color: inherit; }
   scrollbar-width: none;
 }
 .rail::-webkit-scrollbar { display: none; }
+button.brand, button.mast-brand {
+  border: 0; background: transparent; cursor: pointer;
+}
+button.mast-brand { padding: 0; min-width: 44px; min-height: 44px; }
+@media (prefers-reduced-motion: no-preference) {
+  button.brand .brand-mark, button.mast-brand .mast-mark { transition: filter .25s var(--ease); }
+  button.brand:hover .brand-mark, button.mast-brand:hover .mast-mark {
+    filter: drop-shadow(0 0 6px var(--acc-line));
+  }
+}
 .brand {
   display: flex; flex-direction: column; align-items: center; gap: 0;
   align-self: center; padding: 0 12px 5px;
@@ -260,6 +270,7 @@ button { color: inherit; }
 }
 .brand-pixels { pointer-events: none; }
 .brand-pixels rect { fill: color-mix(in srgb, var(--acc), var(--amber) var(--pixel-tone)); }
+.brand-pixels rect[data-flow-lit] { fill: var(--focus); filter: drop-shadow(0 0 1px var(--acc)); }
 [data-mark-repel] > use { visibility: hidden; }
 @media (prefers-reduced-motion: no-preference) {
   .brand-flow { opacity: .88; animation: loop-flow 7.5s linear infinite; }
@@ -586,7 +597,7 @@ main { min-width: 0; }
   scroll-margin-top: calc(var(--mast-offset) + 68px);
 }
 .meta-protection-head, .meta-identity { display: flex; align-items: center; gap: 12px; }
-.meta-protection-head { justify-content: space-between; margin-bottom: 16px; }
+.meta-protection-head { justify-content: space-between; }
 .meta-identity { min-width: 0; }
 .meta-identity > div { min-width: 0; }
 .meta-identity h2 {
@@ -630,7 +641,7 @@ main { min-width: 0; }
 .meta-switch[data-held] .meta-switch-thumb { scale: 1.15 .87; transition: none; }
 .meta-switch:is(:disabled, [aria-disabled="true"]) { cursor: default; opacity: .6; }
 .meta-families, .meta-infrastructure { display: grid; gap: 8px; align-items: start; }
-.meta-families { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.meta-families { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 16px; }
 .meta-infrastructure {
   grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 12px;
   padding-top: 12px; border-top: 1px solid var(--line-soft);
