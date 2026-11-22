@@ -10922,7 +10922,7 @@ mod app {
 }
 
 #[cfg(target_os = "linux")]
-fn main() {
+pub fn main() {
     if let Err(error) = app::run() {
         eprintln!("r2o-datapath: {error}");
         std::process::exit(1);
@@ -10930,7 +10930,7 @@ fn main() {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn main() {
+pub fn main() {
     eprintln!("r2o-datapath запускается только на Linux с NFQUEUE");
     std::process::exit(1);
 }

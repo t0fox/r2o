@@ -88,6 +88,14 @@ for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager 
     fi
     [ "$mode" = --elf-only ] && continue
     case "$component" in
+        r2o-datapath)
+            output=$(timeout 30 "$@" "$bin" --version)
+            case "$abi" in
+                mipsel|mipsel-openwrt-musl)
+                    alias_output=$(timeout 30 "$@" -0 "r2o-datapath-linux-$abi" "$dir/r2o-controller" --version)
+                    [ "$alias_output" = "$output" ] || fail 'режим datapath в контроллере' ;;
+            esac
+            printf '%s\n' "$output" ;;
         r2o-controller|r2o-panel) timeout 30 "$@" "$bin" --self-check ;;
         r2o-detect)
             output=$(timeout 30 "$@" "$bin" classify 127.0.0.1:443 --sni example.com --dump-trigger)

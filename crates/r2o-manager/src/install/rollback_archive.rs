@@ -9,7 +9,7 @@ use std::io::{self, BufReader, BufWriter, Read};
 use std::path::Path;
 
 pub(super) const ARCHIVE: &str = ".rollback-builds.tar.xz";
-pub(super) const FORMAT: &[u8] = b"R2O-ROLLBACK-XZ-2\n";
+pub(super) const FORMAT: &[u8] = b"R2O-ROLLBACK-XZ-3\n";
 const DICTIONARY_BYTES: u32 = 2 * 1024 * 1024;
 const DECODE_LIMIT_KIB: u32 = DICTIONARY_BYTES / 1024 + 128;
 
@@ -184,9 +184,15 @@ pub(super) fn restore(root: &Path, id: &str) -> Result<(), InstallError> {
 }
 
 fn is_applet(name: &std::ffi::OsStr, architecture: &str) -> bool {
-    ["r2o-fetch", "r2o-detect", "r2o-telegram", "r2o-panel"]
-        .iter()
-        .any(|applet| name == std::ffi::OsStr::new(&format!("{applet}-linux-{architecture}")))
+    [
+        "r2o-fetch",
+        "r2o-detect",
+        "r2o-telegram",
+        "r2o-panel",
+        "r2o-datapath",
+    ]
+    .iter()
+    .any(|applet| name == std::ffi::OsStr::new(&format!("{applet}-linux-{architecture}")))
 }
 
 #[cfg(unix)]
