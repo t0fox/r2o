@@ -43,6 +43,7 @@ const MAX_BOOTSTRAP_ATTEMPTS: usize = 3;
 const MAX_DISCOVERY_WORKER_ATTEMPTS: usize = 3;
 const MIN_REFRESH_SECS: u64 = 60 * 60;
 const MAX_REFRESH_SECS: u64 = 7 * 24 * 60 * 60;
+const ON_DEMAND_REFRESH_COOLDOWN: Duration = Duration::from_secs(60);
 const PLATFORM_SYNC_RETRY_SECS: u64 = 5 * 60;
 const PLATFORM_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 static PLATFORM_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -842,62 +843,74 @@ pub async fn refresh_loop(
             }
         }
     }
+    let mut earliest_attempt = tokio::time::Instant::now();
+    let mut periodic_retry = earliest_attempt;
     loop {
-        if store.refresh_due(unix_time(), interval) {
-            match fetch_config(&runtime).await {
-                Ok(snapshot) => match store.install(snapshot, unix_time()) {
-                    Ok(installed) => {
-                        runtime
-                            .stats()
-                            .set_dc_map(installed.config_date as u64, installed.fetched_at);
-                        info!(
-                            "Официальная карта Telegram DC обновлена: {} адресов, конфигурация от {}, кэш проверен и сохранён атомарно",
-                            installed.endpoints.len(),
-                            installed.config_date
-                        );
-                        if !transparent_ports.is_empty() {
-                            let sync_path =
-                                std::env::var_os("R2O_TG_DC_MAP_SYNC").map(PathBuf::from);
-                            match write_manifest_and_sync(
-                                &endpoint_pairs_path,
-                                &installed,
-                                &transparent_ports,
-                                sync_path.clone(),
-                            )
-                            .await
-                            {
-                                Ok(count) if sync_path.is_some() => {
-                                    info!(
-                                        "Платформенным адаптером синхронизированы проверенные пары Telegram IP+порт: {count}"
-                                    );
-                                }
-                                Ok(count) => {
-                                    info!(
-                                        "Манифест проверенных пар Telegram IP+порт сохранён: {count}; адаптер событий не задан"
-                                    );
-                                }
-                                Err(error) => warn!(
-                                    "Обновлена карта DC, но платформенная синхронизация не подтверждена; listener продолжает работу: {error}"
-                                ),
+        let periodic = tokio::time::Instant::now() + store.next_refresh_in(unix_time(), interval);
+        tokio::select! {
+            _ = tokio::time::sleep_until(periodic.max(periodic_retry)) => {},
+            _ = store.wait_for_refresh_request() => {},
+        }
+        tokio::time::sleep_until(earliest_attempt).await;
+
+        let refreshed = match fetch_config(&runtime).await {
+            Ok(snapshot) => match store.install(snapshot, unix_time()) {
+                Ok(installed) => {
+                    runtime
+                        .stats()
+                        .set_dc_map(installed.config_date as u64, installed.fetched_at);
+                    info!(
+                        "Официальная карта Telegram DC обновлена: {} адресов, конфигурация от {}, кэш проверен и сохранён атомарно",
+                        installed.endpoints.len(),
+                        installed.config_date
+                    );
+                    if !transparent_ports.is_empty() {
+                        let sync_path = std::env::var_os("R2O_TG_DC_MAP_SYNC").map(PathBuf::from);
+                        match write_manifest_and_sync(
+                            &endpoint_pairs_path,
+                            &installed,
+                            &transparent_ports,
+                            sync_path.clone(),
+                        )
+                        .await
+                        {
+                            Ok(count) if sync_path.is_some() => {
+                                info!(
+                                    "Платформенным адаптером синхронизированы проверенные пары Telegram IP+порт: {count}"
+                                );
                             }
+                            Ok(count) => {
+                                info!(
+                                    "Манифест проверенных пар Telegram IP+порт сохранён: {count}; адаптер событий не задан"
+                                );
+                            }
+                            Err(error) => warn!(
+                                "Обновлена карта DC, но платформенная синхронизация не подтверждена; listener продолжает работу: {error}"
+                            ),
                         }
                     }
-                    Err(error) => {
-                        warn!("Не удалось сохранить официальную карту Telegram DC: {error}");
-                        tokio::time::sleep(Duration::from_secs(MIN_REFRESH_SECS)).await;
-                        continue;
-                    }
-                },
-                Err(error) => {
-                    warn!(
-                        "Не удалось обновить карту Telegram DC; используются кэш и встроенная резервная карта: {error}"
-                    );
-                    tokio::time::sleep(Duration::from_secs(MIN_REFRESH_SECS)).await;
-                    continue;
+                    true
                 }
+                Err(error) => {
+                    warn!("Не удалось сохранить официальную карту Telegram DC: {error}");
+                    false
+                }
+            },
+            Err(error) => {
+                warn!(
+                    "Не удалось обновить карту Telegram DC; используются кэш и встроенная резервная карта: {error}"
+                );
+                false
             }
-        }
-        tokio::time::sleep(Duration::from_secs(interval)).await;
+        };
+        let now = tokio::time::Instant::now();
+        // Повторные сигналы из проблемных соединений не учащают опрос карты.
+        earliest_attempt = now + ON_DEMAND_REFRESH_COOLDOWN;
+        periodic_retry = if refreshed && !store.next_refresh_in(unix_time(), interval).is_zero() {
+            now
+        } else {
+            now + Duration::from_secs(MIN_REFRESH_SECS)
+        };
     }
 }
 

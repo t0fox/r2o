@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
 const CACHE_MAX_BYTES: u64 = 1024 * 1024;
@@ -125,6 +127,7 @@ impl std::error::Error for RouteLookupError {}
 pub struct DcMapStore {
     path: PathBuf,
     snapshot: RwLock<Option<Arc<DcSnapshot>>>,
+    refresh_requested: Notify,
 }
 
 /// Получить точные пары адрес/порт из проверенной карты для набора nft.
@@ -195,6 +198,7 @@ impl DcMapStore {
         Self {
             path,
             snapshot: RwLock::new(snapshot),
+            refresh_requested: Notify::new(),
         }
     }
 
@@ -202,6 +206,7 @@ impl DcMapStore {
         Self {
             path: path.into(),
             snapshot: RwLock::new(None),
+            refresh_requested: Notify::new(),
         }
     }
 
@@ -265,13 +270,23 @@ impl DcMapStore {
     }
 
     pub fn refresh_due(&self, now: i64, refresh_secs: u64) -> bool {
-        let Ok(snapshot) = self.snapshot.read() else {
-            return true;
-        };
-        snapshot.as_ref().is_none_or(|cached| {
-            now.saturating_sub(cached.fetched_at) >= refresh_secs.min(i64::MAX as u64) as i64
-                || now >= cached.config_expires
+        self.next_refresh_in(now, refresh_secs).is_zero()
+    }
+
+    pub(crate) fn next_refresh_in(&self, now: i64, refresh_secs: u64) -> Duration {
+        self.current().map_or(Duration::ZERO, |cached| {
+            let age = now.saturating_sub(cached.fetched_at).max(0) as u64;
+            let until_expiry = cached.config_expires.saturating_sub(now).max(0) as u64;
+            Duration::from_secs(refresh_secs.saturating_sub(age).min(until_expiry))
         })
+    }
+
+    pub(crate) fn request_refresh(&self) {
+        self.refresh_requested.notify_one();
+    }
+
+    pub(crate) async fn wait_for_refresh_request(&self) {
+        self.refresh_requested.notified().await;
     }
 
     /// Точный поиск сначала использует последнюю проверенную конфигурацию,
@@ -869,6 +884,37 @@ mod tests {
             this_dc: 2,
             endpoints,
         }
+    }
+
+    #[test]
+    fn обновление_карты_ждёт_только_до_истечения_конфигурации() {
+        let store = DcMapStore::without_cache("/tmp/r2o-test-dc-refresh-unused.json");
+        let mut snapshot = complete(primary_endpoints());
+        let now = snapshot.fetched_at;
+        snapshot.config_expires = now + 120;
+        *store.snapshot.write().unwrap() = Some(std::sync::Arc::new(snapshot));
+        assert_eq!(store.next_refresh_in(now, 21_600).as_secs(), 120);
+        assert_eq!(store.next_refresh_in(now + 90, 21_600).as_secs(), 30);
+        assert!(store.refresh_due(now + 120, 21_600));
+        assert_eq!(store.next_refresh_in(now, 110).as_secs(), 110);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn запросы_обновления_карты_копятся_не_больше_одного() {
+        let store = DcMapStore::without_cache("/tmp/r2o-test-dc-notify-unused.json");
+        store.request_refresh();
+        store.request_refresh();
+        let limit = std::time::Duration::from_secs(1);
+        assert!(
+            tokio::time::timeout(limit, store.wait_for_refresh_request())
+                .await
+                .is_ok()
+        );
+        assert!(
+            tokio::time::timeout(limit, store.wait_for_refresh_request())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::future::poll_fn;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -24,18 +24,24 @@ use crate::ws_client::{CooldownMap, race_ws_candidates, verifying_rustls_config}
 
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const CHUNK: usize = 16 * 1024;
-const WINDOW: usize = 64 * 1024;
 const MAX_REQUESTS: usize = 3;
+const MEDIA_STREAM_WINDOW: usize = 128 * 1024;
+const WINDOW: usize = 512 * 1024;
+const SMALL_WINDOW: usize = 64 * 1024;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(3);
-const FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+const FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(4);
+const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MEDIA_RETRY_DELAY: Duration = Duration::from_secs(60);
-const WS_FALLBACK_DELAY: Duration = Duration::from_secs(10);
+const WS_FALLBACK_DELAY: Duration = Duration::from_secs(60);
+const MAX_WS_FALLBACK_DELAY: Duration = Duration::from_secs(300);
+const TRIAL_LEASE: Duration = Duration::from_secs(15);
+const CANCELLED_TRIAL_DELAY: Duration = Duration::from_secs(5);
 const MAX_REPOST_BYTES: usize = 64 * 1024;
 
 static CONNECTIONS: Semaphore = Semaphore::const_new(4);
 static FAILED: CooldownMap<(u32, String)> = CooldownMap::new();
-static WS_FALLBACK: CooldownMap<u32> = CooldownMap::new();
+static MEDIA_RETRIES: [Mutex<MediaRetry>; 5] = [const { Mutex::new(MediaRetry::new()) }; 5];
 static TLS_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| {
     let mut config = (*verifying_rustls_config()).clone();
     config.alpn_protocols = vec![b"h2".to_vec()];
@@ -52,6 +58,93 @@ pub(crate) struct MediaClient {
     _permit: SemaphorePermit<'static>,
     buffers: Option<Arc<MemoryBudget>>,
     _window: Option<BudgetReservation>,
+}
+
+struct MediaRetry {
+    generation: u64,
+    ready: bool,
+    next_trial: Option<tokio::time::Instant>,
+    fallback_delay: Duration,
+}
+
+impl MediaRetry {
+    const fn new() -> Self {
+        Self {
+            generation: 0,
+            ready: false,
+            next_trial: None,
+            fallback_delay: WS_FALLBACK_DELAY,
+        }
+    }
+}
+
+pub(crate) struct LiveRoute {
+    dc: u32,
+    state: &'static Mutex<MediaRetry>,
+    generation: u64,
+    trial: bool,
+}
+
+impl LiveRoute {
+    pub(crate) fn admit(dc: u32) -> Option<Self> {
+        let state = MEDIA_RETRIES.get(dc.checked_sub(1)? as usize)?;
+        let mut retry = state.lock().unwrap_or_else(|error| error.into_inner());
+        let trial = !retry.ready;
+        if trial {
+            let now = tokio::time::Instant::now();
+            if retry.next_trial.is_some_and(|deadline| deadline > now) {
+                return None;
+            }
+            retry.generation = retry.generation.wrapping_add(1);
+            retry.next_trial = Some(now + TRIAL_LEASE);
+        }
+        Some(Self {
+            dc,
+            state,
+            generation: retry.generation,
+            trial,
+        })
+    }
+
+    fn confirmed(&mut self) {
+        if !self.trial {
+            return;
+        }
+        let mut retry = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if retry.generation == self.generation {
+            retry.ready = true;
+            retry.next_trial = None;
+            retry.fallback_delay = WS_FALLBACK_DELAY;
+        }
+        self.trial = false;
+    }
+
+    pub(crate) fn failed(&self, zone: &str) {
+        let mut retry = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        // Сбой старого соединения не меняет состояние новой попытки восстановления.
+        if retry.generation != self.generation {
+            return;
+        }
+        FAILED.set((self.dc, zone.to_owned()), MEDIA_RETRY_DELAY);
+        retry.generation = retry.generation.wrapping_add(1);
+        retry.ready = false;
+        retry.next_trial = Some(tokio::time::Instant::now() + retry.fallback_delay);
+        retry.fallback_delay = retry
+            .fallback_delay
+            .saturating_mul(2)
+            .min(MAX_WS_FALLBACK_DELAY);
+    }
+}
+
+impl Drop for LiveRoute {
+    fn drop(&mut self) {
+        if self.trial {
+            let mut retry = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if retry.generation == self.generation {
+                retry.next_trial = Some(tokio::time::Instant::now() + CANCELLED_TRIAL_DELAY);
+            }
+        }
+    }
 }
 
 struct ResetOnDrop(h2::SendStream<Bytes>);
@@ -91,22 +184,8 @@ pub(crate) fn cooling(dc: u32, zone: &str) -> bool {
     FAILED.active(&(dc, zone.to_owned()))
 }
 
-pub(crate) fn cooldown(dc: u32, zone: &str) {
-    FAILED.set((dc, zone.to_owned()), MEDIA_RETRY_DELAY);
-}
-
-pub(crate) fn use_ws_fallback(dc: u32, zone: &str) {
-    cooldown(dc, zone);
-    WS_FALLBACK.set(dc, WS_FALLBACK_DELAY);
-}
-
-pub(crate) fn falling_back(dc: u32) -> bool {
-    WS_FALLBACK.active(&dc)
-}
-
 pub(crate) fn clear_cooldown(dc: u32, zone: &str) {
     FAILED.clear(&(dc, zone.to_owned()));
-    WS_FALLBACK.clear(&dc);
 }
 
 pub(crate) async fn connect(
@@ -178,7 +257,7 @@ async fn connect_edge(
     let permit = CONNECTIONS
         .try_acquire()
         .map_err(|e| MediaError::new("capacity", e))?;
-    let window = reserve(&buffers, WINDOW * 2).map_err(|e| MediaError::new("capacity", e))?;
+    let window = reserve_media_window(&buffers).map_err(|e| MediaError::new("capacity", e))?;
     let timeout = SETUP_TIMEOUT;
     let tcp = tokio::time::timeout_at(deadline, runtime.outbound().connect(ip, 443, timeout))
         .await
@@ -205,7 +284,7 @@ async fn open(
     deadline: tokio::time::Instant,
     buffers: Option<Arc<MemoryBudget>>,
     permit: SemaphorePermit<'static>,
-    window: Option<BudgetReservation>,
+    window: (usize, Option<BudgetReservation>),
     tls_config: Arc<rustls::ClientConfig>,
 ) -> Result<(MediaClient, Duration), MediaError> {
     let peer = tcp.peer_addr().map_err(|e| MediaError::new("tcp", e))?;
@@ -220,9 +299,15 @@ async fn open(
     if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
         return Err(MediaError::new("http", "сервер не согласовал ALPN h2"));
     }
+    let (connection_window, reservation) = window;
+    let stream_window = if connection_window == WINDOW {
+        MEDIA_STREAM_WINDOW
+    } else {
+        CHUNK
+    };
     let handshake = h2::client::Builder::new()
-        .initial_window_size(CHUNK as u32)
-        .initial_connection_window_size(WINDOW as u32)
+        .initial_window_size(stream_window as u32)
+        .initial_connection_window_size(connection_window as u32)
         .max_header_list_size(8 * 1024)
         .max_send_buffer_size(CHUNK)
         .handshake(tls);
@@ -240,7 +325,7 @@ async fn open(
         driver,
         _permit: permit,
         buffers,
-        _window: window,
+        _window: reservation,
     };
     let (nonce, request) = plain_probe_request().map_err(|e| MediaError::new("mtproto", e))?;
     let started = Instant::now();
@@ -253,6 +338,17 @@ async fn open(
     validate_res_pq_probe_response(&reply.bytes, nonce)
         .map_err(|e| MediaError::new("mtproto", e))?;
     Ok((client, started.elapsed()))
+}
+
+fn reserve_media_window(
+    buffers: &Option<Arc<MemoryBudget>>,
+) -> io::Result<(usize, Option<BudgetReservation>)> {
+    // При дефиците памяти сохраняем прежние окна HTTP/2.
+    reserve(buffers, WINDOW * 2)
+        .map(|reservation| (WINDOW, reservation))
+        .or_else(|_| {
+            reserve(buffers, SMALL_WINDOW * 2).map(|reservation| (SMALL_WINDOW, reservation))
+        })
 }
 
 struct Reply {
@@ -303,7 +399,10 @@ impl MediaClient {
                 .send_data(chunk, data.is_empty())
                 .map_err(http_error)?;
         }
-        let response = response.await.map_err(http_error)?;
+        let response = tokio::time::timeout(RESPONSE_IDLE_TIMEOUT, response)
+            .await
+            .map_err(|_| MediaError::new("http", "тайм-аут заголовков POST /api"))?
+            .map_err(http_error)?;
         if response.status() != http::StatusCode::OK {
             let status = response.status().as_u16();
             let mut error = MediaError::new("http", format!("POST /api: HTTP {status}"));
@@ -334,8 +433,15 @@ impl MediaClient {
         let mut memory = reserve(&self.buffers, 0).map_err(|e| MediaError::new("memory", e))?;
         let mut bytes = Vec::new();
         let mut body = response.into_body();
-        while let Some(chunk) = body.data().await {
+        let mut deadline = tokio::time::Instant::now() + RESPONSE_IDLE_TIMEOUT;
+        while let Some(chunk) = tokio::time::timeout_at(deadline, body.data())
+            .await
+            .map_err(|_| MediaError::new("http", "тайм-аут передачи тела POST /api"))?
+        {
             let chunk = chunk.map_err(http_error)?;
+            if !chunk.is_empty() {
+                deadline = tokio::time::Instant::now() + RESPONSE_IDLE_TIMEOUT;
+            }
             if chunk.len() > capacity - bytes.len() {
                 return Err(MediaError::new(
                     "http",
@@ -388,7 +494,7 @@ impl MediaClient {
         stream: TcpStream,
         init: [u8; HANDSHAKE_LEN],
         proto: ProtoTag,
-        dc: u32,
+        route: &mut LiveRoute,
         telemetry: &ConnectionTelemetry,
     ) -> Result<(), MediaError> {
         let (mut reader, mut writer) = stream.into_split();
@@ -458,7 +564,7 @@ impl MediaClient {
                                 let latency = first.expect("ответ следует за запросом").elapsed();
                                 telemetry.mark_mtproto_response(latency);
                                 crate::stats::global().record_mtproto_response_with_client_latency(
-                                    dc, "cf-h2", latency, telemetry.client_elapsed_us(),
+                                    route.dc, "cf-h2", latency, telemetry.client_elapsed_us(),
                                 );
                             }
                         }
@@ -466,6 +572,9 @@ impl MediaClient {
                         activity.touch();
                         writer.write_all(&header).await.map_err(|e| MediaError::new("client", e))?;
                         writer.write_all(&reply.bytes).await.map_err(|e| MediaError::new("client", e))?;
+                        if confirmed {
+                            route.confirmed();
+                        }
                     }
                     _ = async {
                         if let Some(started) = first {

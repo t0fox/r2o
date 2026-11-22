@@ -1401,7 +1401,7 @@ fn percentile_stats(samples: &VecDeque<u64>) -> Option<LatencyPercentiles> {
 fn bounded_failure_key(stage: &str) -> String {
     match stage {
         "dns" | "tcp" | "tls" | "websocket" | "http_429" | "http_503" | "mtproto" | "timeout"
-        | "fd_exhaustion" | "http" => stage.to_string(),
+        | "fd_exhaustion" | "http" | "tcp_timeout" | "tcp_stall" => stage.to_string(),
         _ => "other".to_string(),
     }
 }
@@ -1745,8 +1745,10 @@ mod tests {
     fn причины_отказа_ограничены_известным_набором() {
         let stats = RuntimeStats::new();
         stats.record_failure("dns");
+        stats.record_failure("tcp_timeout");
         stats.record_failure("произвольный текст с адресами");
         assert_eq!(stats.snapshot().failures.get("dns"), Some(&1));
+        assert_eq!(stats.snapshot().failures.get("tcp_timeout"), Some(&1));
         assert_eq!(stats.snapshot().failures.get("other"), Some(&1));
     }
 

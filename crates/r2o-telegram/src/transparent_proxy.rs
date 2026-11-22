@@ -1,7 +1,7 @@
 //! Прозрачный MTProto перехват, выбор WSS fallback и передача потока.
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,15 +12,20 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
+use crate::bridge::{MEDIA_RESPONSE_TIMEOUT, ResponseProgress};
 use crate::config::Config;
 use crate::dc_map::RouteLookupError;
 use crate::routing::{self, Upstream};
 use crate::runtime::Runtime;
 use crate::stats::ConnectionTelemetry;
 use crate::transparent;
-use crate::ws_client::media_tag;
+use crate::ws_client::{CooldownMap, media_tag};
 
 const INITIAL_PREFIX_LEN: usize = 8;
+const UNLISTED_DC_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const DIRECT_RETRY_DELAY: Duration = Duration::from_secs(30);
+type DirectRecoveryKey = (SocketAddr, u32, bool);
+static DIRECT_RECOVERY_WAIT: CooldownMap<DirectRecoveryKey> = CooldownMap::new();
 
 #[derive(Clone, Copy)]
 enum TrafficDirection {
@@ -32,6 +37,7 @@ struct TelemetryStream<'a, S> {
     stream: &'a mut S,
     telemetry: Option<ConnectionTelemetry>,
     direction: TrafficDirection,
+    progress: Option<&'a ResponseProgress>,
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for TelemetryStream<'_, S> {
@@ -62,7 +68,17 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TelemetryStream<'_, S> {
         context: &mut Context<'_>,
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut *self.get_mut().stream).poll_write(context, buffer)
+        let this = self.get_mut();
+        let result = Pin::new(&mut *this.stream).poll_write(context, buffer);
+        if matches!(&result, Poll::Ready(Ok(count)) if *count > 0)
+            && let Some(progress) = this.progress
+        {
+            match this.direction {
+                TrafficDirection::FromClients => progress.received(),
+                TrafficDirection::FromUpstreams => progress.sent(),
+            }
+        }
+        result
     }
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -78,6 +94,7 @@ async fn copy_bidirectional_with_telemetry<C, U>(
     client: &mut C,
     upstream: &mut U,
     telemetry: Option<ConnectionTelemetry>,
+    progress: Option<&ResponseProgress>,
 ) -> io::Result<(u64, u64)>
 where
     C: AsyncRead + AsyncWrite + Unpin,
@@ -87,11 +104,13 @@ where
         stream: client,
         telemetry: telemetry.clone(),
         direction: TrafficDirection::FromClients,
+        progress,
     };
     let mut upstream = TelemetryStream {
         stream: upstream,
         telemetry,
         direction: TrafficDirection::FromUpstreams,
+        progress,
     };
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await
 }
@@ -105,6 +124,7 @@ async fn read_client_exact(
         stream,
         telemetry: Some(telemetry.clone()),
         direction: TrafficDirection::FromClients,
+        progress: None,
     };
     stream.read_exact(buffer).await?;
     Ok(())
@@ -123,8 +143,26 @@ fn effective_media_route(client_is_media: bool, endpoint_media_only: bool) -> bo
     client_is_media || endpoint_media_only
 }
 
-fn should_forward_unmapped_direct(error: &RouteLookupError, dc_hint: Option<u32>) -> bool {
-    *error == RouteLookupError::AddressNotListed && dc_hint.is_none()
+fn should_forward_unmapped_direct(error: &RouteLookupError) -> bool {
+    *error == RouteLookupError::AddressNotListed
+}
+
+fn dc_candidate_for_unmapped(
+    destination: SocketAddr,
+    init: &transparent::ClientInit,
+) -> Option<u32> {
+    if destination.port() != 443
+        || init.used_official_secret
+        || !transparent::is_official_telegram_destination(destination.ip())
+    {
+        return None;
+    }
+    // Точный адрес подтвердил DC5 в аутентифицированном help.getConfig.
+    if destination.ip().to_canonical() == Ipv4Addr::new(91, 108, 56, 137) {
+        return init.dc.is_none_or(|hint| hint == 5).then_some(5);
+    }
+    // Подсказка клиента выбирает кандидата, но не дополняет официальную DC-карту.
+    init.dc.filter(|dc| (1..=5).contains(dc))
 }
 
 async fn wait_for_client_reset(client: &TcpStream) {
@@ -157,22 +195,23 @@ struct DirectPayload {
     destination: SocketAddr,
     peer: SocketAddr,
     is_media: bool,
+    refresh_map_on_timeout: bool,
     transport: &'static str,
     telemetry: Option<ConnectionTelemetry>,
+    recovery: Option<DirectRecoveryKey>,
 }
 
 async fn bridge_direct_payload(
     mut client: TcpStream,
     payload: DirectPayload,
-    config: Arc<Config>,
+    timeout: Duration,
     runtime: Arc<Runtime>,
-) {
+) -> Option<TcpStream> {
     let attempt = payload
         .telemetry
         .as_ref()
         .map(|telemetry| telemetry.begin_attempt("direct", "tcp_passthrough"));
     let host = payload.destination.ip().to_string();
-    let timeout = Duration::from_secs(config.tcp_fallback_timeout);
     let connect = runtime
         .outbound()
         .connect(&host, payload.destination.port(), timeout);
@@ -182,7 +221,7 @@ async fn bridge_direct_payload(
             "[{}] клиент сбросил соединение во время выбора прямого TCP-маршрута",
             payload.peer
         );
-        return;
+        return None;
     };
     match result {
         Ok(mut remote) => {
@@ -194,7 +233,7 @@ async fn bridge_direct_payload(
                     "[{}] не удалось передать начальные данные по маршруту {} к {}: {}",
                     payload.peer, payload.transport, payload.destination, error
                 );
-                return;
+                return None;
             }
             if let Some(attempt) = attempt {
                 attempt.finish("connected");
@@ -203,13 +242,38 @@ async fn bridge_direct_payload(
                 telemetry.select_transport("direct", "tcp_passthrough");
                 telemetry.set_upstream(None, payload.destination.ip(), "tcp");
             }
-            match copy_bidirectional_with_telemetry(
+            let progress = payload
+                .recovery
+                .as_ref()
+                .map(|_| ResponseProgress::default());
+            let relay = copy_bidirectional_with_telemetry(
                 &mut client,
                 &mut remote,
                 payload.telemetry.clone(),
-            )
-            .await
+                progress.as_ref(),
+            );
+            let result = if let (Some(progress), Some(key)) = (progress.as_ref(), payload.recovery)
             {
+                tokio::select! {
+                    result = relay => result,
+                    _ = progress.stalled(MEDIA_RESPONSE_TIMEOUT) => {
+                        DIRECT_RECOVERY_WAIT.set(key, DIRECT_RETRY_DELAY);
+                        runtime.stats().record_failure("tcp_stall");
+                        if let Some(telemetry) = payload.telemetry.as_ref() {
+                            telemetry.set_stage("media_stall");
+                        }
+                        warn!(
+                            "[{}] TCP к {} не передаёт ответ; следующий поток попробует резервный маршрут",
+                            payload.peer, payload.destination
+                        );
+                        // Новый поток создаёт клиент: пересылать уже отправленный MTProto нельзя.
+                        return None;
+                    }
+                }
+            } else {
+                relay.await
+            };
+            match result {
                 Ok((bytes_up, bytes_down)) => info!(
                     "[{}] маршрут {} к исходному назначению {}{} завершён: вверх {} байт, вниз {} байт",
                     payload.peer,
@@ -230,6 +294,14 @@ async fn bridge_direct_payload(
             }
         }
         Err(error) => {
+            runtime.stats().record_failure(if error.timed_out {
+                "tcp_timeout"
+            } else {
+                "tcp"
+            });
+            if error.timed_out && payload.refresh_map_on_timeout {
+                runtime.dc_map().request_refresh();
+            }
             if let Some(attempt) = attempt {
                 attempt.finish("failed");
             }
@@ -237,8 +309,16 @@ async fn bridge_direct_payload(
                 "[{}] не удалось открыть маршрут {} к исходному назначению {}: {}",
                 payload.peer, payload.transport, payload.destination, error
             );
+            // При тайм-ауте подключения ни один байт клиента ещё не отправлен.
+            if error.timed_out {
+                if let Some(key) = payload.recovery {
+                    DIRECT_RECOVERY_WAIT.set(key, DIRECT_RETRY_DELAY);
+                }
+                return Some(client);
+            }
         }
     }
+    None
 }
 
 /// Путь для прозрачного перехвата правилами REDIRECT на роутере. Начальный
@@ -336,35 +416,120 @@ pub async fn handle_transparent_client_with_runtime(
         );
         return;
     };
-    let (destination_route, map_source) = match runtime
-        .dc_map()
-        .resolve_for_transparent_with_source(
-            destination.ip(),
-            destination.port(),
-            init_info.is_media,
-            init_info.dc,
-        ) {
-        Ok(route) => route,
-        Err(error) if should_forward_unmapped_direct(&error, init_info.dc) => {
-            warn!(
-                "[{}] адрес {} отсутствует в проверенной DC-карте; WSS relay не выбирается, поток направляется только к тому же исходному IP:port",
-                peer, destination
+    let direct_timeout = Duration::from_secs(config.tcp_fallback_timeout);
+    let route = runtime.dc_map().resolve_for_transparent_with_source(
+        destination.ip(),
+        destination.port(),
+        init_info.is_media,
+        init_info.dc,
+    );
+    let (dc, is_media, tcp_timed_out) = match route {
+        Ok((endpoint, map_source)) => {
+            let is_media = effective_media_route(init_info.is_media, endpoint.media_only);
+            telemetry.set_dc(endpoint.id, is_media);
+            telemetry.set_stage("routing");
+            info!(
+                "[{}] dcOption для {}: DC{}{}, карта={}, CDN={}, TCP-only={}, this-port-only={}, порт опции={}, порт клиента={}",
+                peer,
+                destination,
+                endpoint.id,
+                media_tag(is_media),
+                map_source.as_str(),
+                endpoint.cdn,
+                endpoint.tcpo_only,
+                endpoint.this_port_only,
+                endpoint.port,
+                destination.port()
             );
-            bridge_direct_payload(
-                stream,
-                DirectPayload {
-                    initial: init,
-                    destination,
-                    peer,
-                    is_media: init_info.is_media,
-                    transport: "прямой TCP",
-                    telemetry: Some(telemetry),
-                },
-                Arc::clone(&config),
-                Arc::clone(&runtime),
-            )
-            .await;
-            return;
+            match transparent::select_transparent_route(&init_info, Some(&endpoint)) {
+                transparent::TransparentSelection::DirectTcp { is_media, .. } => {
+                    info!(
+                        "[{}] DC{} направляется только прямым TCP к исходному назначению {} (official secret={}, CDN={}, TCP-only={})",
+                        peer,
+                        endpoint.id,
+                        destination,
+                        init_info.used_official_secret,
+                        endpoint.cdn,
+                        endpoint.tcpo_only
+                    );
+                    let _ = bridge_direct_payload(
+                        stream,
+                        DirectPayload {
+                            initial: init,
+                            destination,
+                            peer,
+                            is_media,
+                            refresh_map_on_timeout: false,
+                            transport: "прямой TCP",
+                            telemetry: Some(telemetry),
+                            recovery: None,
+                        },
+                        direct_timeout,
+                        Arc::clone(&runtime),
+                    )
+                    .await;
+                    return;
+                }
+                transparent::TransparentSelection::Reject => {
+                    warn!(
+                        "[{}] прозрачный маршрут отклонён: DC-hint не подтверждён dcOption",
+                        peer
+                    );
+                    return;
+                }
+                transparent::TransparentSelection::Wss { dc, is_media } => (dc, is_media, false),
+            }
+        }
+        Err(error) if should_forward_unmapped_direct(&error) => {
+            let recovery = dc_candidate_for_unmapped(destination, &init_info)
+                .filter(|_| routing::has_cf_fallback(&config, &runtime))
+                .map(|dc| (destination, dc, init_info.is_media));
+            if recovery.is_some_and(|key| DIRECT_RECOVERY_WAIT.active(&key)) {
+                telemetry.mark_cooldown("direct", "tcp_passthrough");
+            } else {
+                let timeout = if recovery.is_some() {
+                    direct_timeout.min(UNLISTED_DC_PROBE_TIMEOUT)
+                } else {
+                    direct_timeout
+                };
+                warn!(
+                    "[{}] адрес {} отсутствует в проверенной DC-карте; проверяю прямой TCP к исходному назначению",
+                    peer, destination
+                );
+                let Some(client) = bridge_direct_payload(
+                    stream,
+                    DirectPayload {
+                        initial: init,
+                        destination,
+                        peer,
+                        is_media: init_info.is_media,
+                        refresh_map_on_timeout: true,
+                        transport: "прямой TCP",
+                        telemetry: Some(telemetry.clone()),
+                        recovery,
+                    },
+                    timeout,
+                    Arc::clone(&runtime),
+                )
+                .await
+                else {
+                    return;
+                };
+                stream = client;
+            }
+            let Some((_, dc, _)) = recovery else {
+                return;
+            };
+            info!(
+                "[{}] прямой TCP к {} не отвечает; проверяю резервный маршрут к DC{}{}",
+                peer,
+                destination,
+                dc,
+                media_tag(init_info.is_media)
+            );
+            telemetry.set_dc(dc, init_info.is_media);
+            telemetry.set_stage("routing");
+            (dc, init_info.is_media, true)
         }
         Err(error) => {
             warn!(
@@ -373,62 +538,6 @@ pub async fn handle_transparent_client_with_runtime(
             );
             return;
         }
-    };
-    let dc = destination_route.id;
-    let is_media = effective_media_route(init_info.is_media, destination_route.media_only);
-    telemetry.set_dc(dc, is_media);
-    telemetry.set_stage("routing");
-    info!(
-        "[{}] dcOption для {}: DC{}{}, карта={}, CDN={}, TCP-only={}, this-port-only={}, порт опции={}, порт клиента={}",
-        peer,
-        destination,
-        dc,
-        media_tag(is_media),
-        map_source.as_str(),
-        destination_route.cdn,
-        destination_route.tcpo_only,
-        destination_route.this_port_only,
-        destination_route.port,
-        destination.port()
-    );
-    let (dc, is_media) = match transparent::select_transparent_route(
-        &init_info,
-        Some(&destination_route),
-    ) {
-        transparent::TransparentSelection::DirectTcp { is_media, .. } => {
-            info!(
-                "[{}] DC{} направляется только прямым TCP к исходному назначению {} (official secret={}, CDN={}, TCP-only={})",
-                peer,
-                destination_route.id,
-                destination,
-                init_info.used_official_secret,
-                destination_route.cdn,
-                destination_route.tcpo_only
-            );
-            bridge_direct_payload(
-                stream,
-                DirectPayload {
-                    initial: init,
-                    destination,
-                    peer,
-                    is_media,
-                    transport: "прямой TCP",
-                    telemetry: Some(telemetry),
-                },
-                Arc::clone(&config),
-                Arc::clone(&runtime),
-            )
-            .await;
-            return;
-        }
-        transparent::TransparentSelection::Reject => {
-            warn!(
-                "[{}] прозрачный маршрут отклонён: DC-hint не подтверждён dcOption",
-                peer
-            );
-            return;
-        }
-        transparent::TransparentSelection::Wss { dc, is_media } => (dc, is_media),
     };
     let label = peer;
     let target_ip = destination.ip().to_string();
@@ -442,10 +551,18 @@ pub async fn handle_transparent_client_with_runtime(
     );
     let tcp_fallback_timeout = route.tcp_fallback_timeout();
     let tcp_failure_cooldown = route.tcp_fallback_failure_cooldown();
-    let Some(upstream) =
-        complete_unless_client_resets(&stream, routing::select_upstream(&route, &target_ip))
-            .await
-            .flatten()
+    let upstream = async {
+        if tcp_timed_out {
+            route
+                .cf_tiers(&target_ip, "нет ответа по прямому TCP")
+                .await
+        } else {
+            routing::select_upstream(&route, &target_ip).await
+        }
+    };
+    let Some(upstream) = complete_unless_client_resets(&stream, upstream)
+        .await
+        .flatten()
     else {
         return;
     };
@@ -491,18 +608,23 @@ pub async fn handle_transparent_client_with_runtime(
                 feedback,
                 telemetry.clone(),
                 runtime.stats().memory_budget(),
+                (is_media && routing::has_cf_fallback(&config, &runtime)) || tcp_timed_out,
             )
             .await;
         }
-        Upstream::H2 { client, zone } => {
+        Upstream::H2 {
+            client,
+            zone,
+            mut route,
+        } => {
             telemetry.select_transport("fallback", "cloudflare_h2");
             telemetry.set_upstream(Some(&client.host), client.peer.ip(), "h2/443");
             if let Err(error) = client
-                .relay(stream, init, init_info.proto, dc, &telemetry)
+                .relay(stream, init, init_info.proto, &mut route, &telemetry)
                 .await
             {
                 if error.stage != "client" {
-                    crate::cf_h2::use_ws_fallback(dc, &zone);
+                    route.failed(&zone);
                     if error.stage != "memory" {
                         runtime.stats().record_mtproto_failure(error.stage);
                     }
@@ -556,6 +678,7 @@ pub async fn handle_transparent_client_with_runtime(
                         &mut client,
                         &mut remote,
                         Some(telemetry.clone()),
+                        None,
                     )
                     .await
                     {
@@ -601,11 +724,10 @@ pub async fn handle_transparent_client_with_runtime(
 #[cfg(test)]
 mod tests {
     use super::{
-        DirectPayload, TelemetryStream, TrafficDirection, bridge_direct_payload,
-        complete_unless_client_resets, copy_bidirectional_with_telemetry, effective_media_route,
-        should_forward_unmapped_direct,
+        DIRECT_RECOVERY_WAIT, DirectPayload, TelemetryStream, TrafficDirection,
+        bridge_direct_payload, complete_unless_client_resets, copy_bidirectional_with_telemetry,
+        dc_candidate_for_unmapped, effective_media_route, should_forward_unmapped_direct,
     };
-    use crate::config::Config;
     use crate::dc_map::{DcEndpoint, DcMapStore, DcSnapshot, RouteLookupError, lookup_endpoint};
     use crate::outbound::OutboundConnector;
     use crate::runtime::Runtime;
@@ -628,6 +750,7 @@ mod tests {
             stream: &mut proxy,
             telemetry: Some(telemetry),
             direction: TrafficDirection::FromClients,
+            progress: None,
         };
 
         peer.write_all(b"received").await.unwrap();
@@ -652,6 +775,7 @@ mod tests {
             &mut client_proxy,
             &mut upstream_proxy,
             Some(telemetry),
+            None,
         );
         let peers = async {
             client_peer.write_all(b"request-upstream").await.unwrap();
@@ -691,36 +815,27 @@ mod tests {
     #[test]
     fn unmapped_tcp_passthrough_does_not_guess_a_dc_or_bypass_other_validation_errors() {
         assert!(should_forward_unmapped_direct(
-            &RouteLookupError::AddressNotListed,
-            None
+            &RouteLookupError::AddressNotListed
         ));
         assert!(!should_forward_unmapped_direct(
-            &RouteLookupError::AddressNotListed,
-            Some(2)
+            &RouteLookupError::MediaFlagMismatch
         ));
         assert!(!should_forward_unmapped_direct(
-            &RouteLookupError::MediaFlagMismatch,
-            None
-        ));
-        assert!(!should_forward_unmapped_direct(
-            &RouteLookupError::DcMismatch,
-            None
+            &RouteLookupError::DcMismatch
         ));
     }
 
     #[test]
-    fn observed_unmapped_addresses_use_exact_direct_fallback_only_without_dc_hint() {
+    fn observed_unmapped_addresses_use_exact_direct_fallback_with_or_without_hint() {
         let store = DcMapStore::without_cache("/tmp/tg-transparent-unmapped-test.json");
-        for address in ["149.154.167.43", "91.108.56.137"] {
-            let error = store
-                .resolve_with_source(address.parse().unwrap(), 443, true, None)
-                .unwrap_err();
-            assert_eq!(error, RouteLookupError::AddressNotListed, "{address}");
-            assert!(should_forward_unmapped_direct(&error, None), "{address}");
-            assert!(
-                !should_forward_unmapped_direct(&error, Some(2)),
-                "DC hint must not let an unknown IP select a WSS route: {address}"
-            );
+        for (address, dc) in [("149.154.167.43", 2), ("91.108.56.137", 5)] {
+            for hint in [None, Some(dc)] {
+                let error = store
+                    .resolve_for_transparent_with_source(address.parse().unwrap(), 443, true, hint)
+                    .unwrap_err();
+                assert_eq!(error, RouteLookupError::AddressNotListed, "{address}");
+                assert!(should_forward_unmapped_direct(&error), "{address}");
+            }
         }
     }
 
@@ -782,7 +897,6 @@ mod tests {
             .await
             .unwrap();
         let (proxy_side, peer) = client_listener.accept().await.unwrap();
-        let config = Arc::new(Config::try_from_cli_line("--tcp-fallback-timeout=1").unwrap());
         let runtime = Arc::new(Runtime::new(OutboundConnector::direct()));
         let init = [0x5a; 64];
         let forward = tokio::spawn(bridge_direct_payload(
@@ -792,10 +906,12 @@ mod tests {
                 destination,
                 peer,
                 is_media: true,
+                refresh_map_on_timeout: false,
                 transport: "прямой TCP",
                 telemetry: None,
+                recovery: None,
             },
-            config,
+            Duration::from_secs(1),
             runtime,
         ));
 
@@ -814,7 +930,109 @@ mod tests {
         let mut response = [0; 5];
         client.read_exact(&mut response).await.unwrap();
         assert_eq!(&response, b"resPQ");
-        forward.await.unwrap();
+        assert!(forward.await.unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn direct_tcp_stall_releases_client_and_only_cools_that_endpoint() {
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let destination = target.local_addr().unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (proxy_side, peer) = listener.accept().await.unwrap();
+        let runtime = Arc::new(Runtime::new(OutboundConnector::direct()));
+        let mut init = [0; crate::crypto::HANDSHAKE_LEN];
+        init[0] = 13;
+        let recovery = (destination, 2, true);
+        let forward = tokio::spawn(bridge_direct_payload(
+            proxy_side,
+            DirectPayload {
+                initial: init,
+                destination,
+                peer,
+                is_media: true,
+                refresh_map_on_timeout: false,
+                transport: "прямой TCP",
+                telemetry: None,
+                recovery: Some(recovery),
+            },
+            Duration::from_secs(1),
+            Arc::clone(&runtime),
+        ));
+        let (mut upstream, _) = target.accept().await.unwrap();
+        let mut received = [0; crate::crypto::HANDSHAKE_LEN];
+        upstream.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, init);
+        assert!(!DIRECT_RECOVERY_WAIT.active(&recovery));
+
+        client.write_all(b"packet").await.unwrap();
+        let mut packet = [0; 6];
+        upstream.read_exact(&mut packet).await.unwrap();
+        assert_eq!(&packet, b"packet");
+        tokio::time::advance(super::MEDIA_RESPONSE_TIMEOUT).await;
+        assert!(forward.await.unwrap().is_none());
+        assert_eq!(client.read(&mut packet).await.unwrap(), 0);
+        assert!(DIRECT_RECOVERY_WAIT.active(&recovery));
+        assert!(!DIRECT_RECOVERY_WAIT.active(&(destination, 2, false)));
+        assert!(!DIRECT_RECOVERY_WAIT.active(&(destination, 4, true)));
+        assert_eq!(
+            runtime.stats().snapshot().failures.get("tcp_stall"),
+            Some(&1)
+        );
+        DIRECT_RECOVERY_WAIT.clear(&recovery);
+    }
+
+    #[test]
+    fn tcp_timeout_fallback_is_scoped_to_the_verified_dc_endpoint() {
+        use crate::{crypto::ProtoTag, transparent::ClientInit};
+
+        let mut init = ClientInit {
+            dc: Some(5),
+            is_media: true,
+            proto: ProtoTag::Intermediate,
+            used_official_secret: false,
+        };
+        let exact = "91.108.56.137:443".parse().unwrap();
+        assert_eq!(dc_candidate_for_unmapped(exact, &init), Some(5));
+        assert_eq!(
+            dc_candidate_for_unmapped("[::ffff:91.108.56.137]:443".parse().unwrap(), &init),
+            Some(5)
+        );
+        for address in ["91.108.56.137:5222", "8.8.8.8:443"] {
+            assert_eq!(
+                dc_candidate_for_unmapped(address.parse().unwrap(), &init),
+                None
+            );
+        }
+        init.dc = Some(2);
+        assert_eq!(dc_candidate_for_unmapped(exact, &init), None);
+        init.dc = None;
+        assert_eq!(dc_candidate_for_unmapped(exact, &init), Some(5));
+        init.used_official_secret = true;
+        assert_eq!(dc_candidate_for_unmapped(exact, &init), None);
+    }
+
+    #[test]
+    fn unmapped_telegram_ipv4_and_ipv6_can_try_the_clients_dc() {
+        use crate::{crypto::ProtoTag, transparent::ClientInit};
+
+        let mut init = ClientInit {
+            dc: Some(2),
+            is_media: true,
+            proto: ProtoTag::Intermediate,
+            used_official_secret: false,
+        };
+        for address in ["149.154.167.199:443", "[2001:b28:f23c:f001::be]:443"] {
+            let address = address.parse().unwrap();
+            assert_eq!(dc_candidate_for_unmapped(address, &init), Some(2));
+            init.dc = None;
+            assert_eq!(dc_candidate_for_unmapped(address, &init), None);
+            init.dc = Some(203);
+            assert_eq!(dc_candidate_for_unmapped(address, &init), None);
+            init.dc = Some(2);
+        }
     }
 
     #[tokio::test]

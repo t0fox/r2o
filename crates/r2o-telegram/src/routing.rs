@@ -613,6 +613,7 @@ pub(crate) enum Upstream {
     H2 {
         client: Box<crate::cf_h2::MediaClient>,
         zone: String,
+        route: crate::cf_h2::LiveRoute,
     },
     Tcp(String),
 }
@@ -897,7 +898,7 @@ impl Route<'_> {
     /// одну цепочку. Раньше конфигурация только с Worker игнорировала
     /// `--cf-priority` и на каждом соединении ждала полный тайм-аут прямого WS,
     /// прежде чем перейти к единственному рабочему маршруту.
-    async fn cf_tiers(&self, dst: &str, reason: &str) -> Option<Upstream> {
+    pub(crate) async fn cf_tiers(&self, dst: &str, reason: &str) -> Option<Upstream> {
         if let Some(upstream) = self.cf_media().await {
             return Some(upstream);
         }
@@ -941,7 +942,6 @@ impl Route<'_> {
         if !self.is_media
             || !(1..=5).contains(&self.dc)
             || self.config.cf_transport == CfTransportMode::Plain
-            || crate::cf_h2::falling_back(self.dc)
         {
             return None;
         }
@@ -950,6 +950,7 @@ impl Route<'_> {
             !self.runtime.cf_domain_pool().is_rate_limited(zone)
                 && !crate::cf_h2::cooling(self.dc, zone)
         })?;
+        let route = crate::cf_h2::LiveRoute::admit(self.dc)?;
         let attempt = self.attempt("fallback", "cloudflare_h2");
         match crate::cf_h2::connect(self.runtime, self.dc, zone).await {
             Ok(Some((client, _))) => {
@@ -959,6 +960,7 @@ impl Route<'_> {
                 Some(Upstream::H2 {
                     client: Box::new(client),
                     zone: zone.clone(),
+                    route,
                 })
             }
             Ok(None) => None,
@@ -966,7 +968,7 @@ impl Route<'_> {
                 if let Some(attempt) = attempt {
                     attempt.finish("failed");
                 }
-                crate::cf_h2::use_ws_fallback(self.dc, zone);
+                route.failed(zone);
                 debug!(
                     "[{}] DC{}m: HTTP/2 /api через {}: {}: {}; пробую WebSocket",
                     self.label, self.dc, zone, error.stage, error.reason
@@ -978,7 +980,7 @@ impl Route<'_> {
 
     /// Настроен ли какой-либо маршрут помимо прямого WebSocket.
     fn has_fallback(&self) -> bool {
-        !self.config.cf_worker_domains().is_empty() || !self.runtime.cf_domains().domains.is_empty()
+        has_cf_fallback(self.config, self.runtime)
     }
 
     /// Перебрать настроенные Cloudflare Worker по порядку балансировки.
@@ -1421,6 +1423,10 @@ impl Route<'_> {
 
         Upstream::Tcp(dst.to_string())
     }
+}
+
+pub(crate) fn has_cf_fallback(config: &Config, runtime: &Runtime) -> bool {
+    !config.cf_worker_domains().is_empty() || !runtime.cf_domains().domains.is_empty()
 }
 
 #[cfg(test)]

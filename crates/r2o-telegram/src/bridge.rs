@@ -2,8 +2,8 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cipher::StreamCipher;
@@ -26,11 +26,57 @@ use crate::ws_client::{TgWsStream, media_tag};
 const RELAY_BUF_SIZE: usize = 16 * 1024;
 const RELAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const MEDIA_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+#[derive(Default)]
+pub(crate) struct ResponseProgress {
+    pending_since: Mutex<Option<tokio::time::Instant>>,
+    changed: Notify,
+}
+
+impl ResponseProgress {
+    pub(crate) fn sent(&self) {
+        let mut pending = self.pending_since.lock().unwrap();
+        if pending.is_none() {
+            *pending = Some(tokio::time::Instant::now());
+            self.changed.notify_one();
+        }
+    }
+
+    pub(crate) fn received(&self) {
+        if self.pending_since.lock().unwrap().take().is_some() {
+            self.changed.notify_one();
+        }
+    }
+
+    pub(crate) async fn stalled(&self, timeout: Duration) {
+        loop {
+            let changed = self.changed.notified();
+            let pending = *self.pending_since.lock().unwrap();
+            let Some(sent) = pending else {
+                changed.await;
+                continue;
+            };
+            tokio::select! {
+                biased;
+                _ = changed => {}
+                _ = tokio::time::sleep_until(sent + timeout) => {
+                    if *self.pending_since.lock().unwrap() == Some(sent) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
 
 enum MtprotoResponseState {
     NotSent,
-    Awaiting(tokio::time::Instant),
+    Awaiting {
+        started: tokio::time::Instant,
+        last_delivery: tokio::time::Instant,
+    },
     Confirmed,
     Failed,
 }
@@ -49,7 +95,11 @@ where
     let mut state = response_state.lock().await;
     let first_application_frame = matches!(&*state, MtprotoResponseState::NotSent);
     if first_application_frame {
-        *state = MtprotoResponseState::Awaiting(tokio::time::Instant::now());
+        let now = tokio::time::Instant::now();
+        *state = MtprotoResponseState::Awaiting {
+            started: now,
+            last_delivery: now,
+        };
         first_request.notify_one();
     }
 
@@ -67,12 +117,41 @@ async fn record_first_mtproto_response(
     response_state: &Arc<AsyncMutex<MtprotoResponseState>>,
 ) -> Option<Duration> {
     let mut state = response_state.lock().await;
-    if let MtprotoResponseState::Awaiting(started) = &*state {
+    if let MtprotoResponseState::Awaiting { started, .. } = &*state {
         let latency = started.elapsed();
         *state = MtprotoResponseState::Confirmed;
         Some(latency)
     } else {
         None
+    }
+}
+
+async fn record_first_response_progress(response_state: &AsyncMutex<MtprotoResponseState>) {
+    if let MtprotoResponseState::Awaiting { last_delivery, .. } = &mut *response_state.lock().await
+    {
+        *last_delivery = tokio::time::Instant::now();
+    }
+}
+
+async fn wait_for_first_response_stall(
+    response_state: &AsyncMutex<MtprotoResponseState>,
+    first_request: &Notify,
+) {
+    first_request.notified().await;
+    loop {
+        let deadline = match *response_state.lock().await {
+            MtprotoResponseState::Awaiting { last_delivery, .. } => {
+                Some(last_delivery + FIRST_RESPONSE_TIMEOUT)
+            }
+            _ => None,
+        };
+        let Some(deadline) = deadline else {
+            return std::future::pending().await;
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep_until(deadline).await;
     }
 }
 
@@ -93,7 +172,7 @@ async fn record_mtproto_failure_if_pending(
     feedback: &RouteFeedback,
 ) {
     let mut state = response_state.lock().await;
-    if matches!(&*state, MtprotoResponseState::Awaiting(_)) {
+    if matches!(&*state, MtprotoResponseState::Awaiting { .. }) {
         *state = MtprotoResponseState::Failed;
         crate::routing::record_mtproto_failure(feedback);
     }
@@ -210,6 +289,7 @@ pub(crate) async fn bridge_transparent_ws(
     feedback: RouteFeedback,
     telemetry: ConnectionTelemetry,
     memory_budget: Option<Arc<MemoryBudget>>,
+    watch_media_progress: bool,
 ) {
     info!(
         "[{}] прозрачный маршрут: {} → DC{}{} через {} (кадрирование: {})",
@@ -241,6 +321,8 @@ pub(crate) async fn bridge_transparent_ws(
     let bytes_up = Arc::new(AtomicUsize::new(0));
     let bytes_down = Arc::new(AtomicUsize::new(0));
     let activity = PayloadActivity::new();
+    let progress = watch_media_progress.then(ResponseProgress::default);
+    let progress = progress.as_ref();
     let response_state = Arc::new(AsyncMutex::new(MtprotoResponseState::NotSent));
     let response_observer = MtprotoResponseObserver::new(&init, proto);
     let first_request = Notify::new();
@@ -304,6 +386,9 @@ pub(crate) async fn bridge_transparent_ws(
                             },
                             None => None,
                         };
+                        if let Some(progress) = progress {
+                            progress.sent();
+                        }
                         if let Err(error) = send_application_frame(
                             &ws_write,
                             &response_state,
@@ -328,6 +413,9 @@ pub(crate) async fn bridge_transparent_ws(
                         },
                         None => None,
                     };
+                    if let Some(progress) = progress {
+                        progress.sent();
+                    }
                     if let Err(error) = send_application_frame(
                         &ws_write,
                         &response_state,
@@ -363,6 +451,9 @@ pub(crate) async fn bridge_transparent_ws(
                         },
                         None => None,
                     };
+                    if let Some(progress) = progress {
+                        progress.sent();
+                    }
                     if let Err(error) = send_application_frame(
                         &ws_write,
                         &response_state,
@@ -394,6 +485,7 @@ pub(crate) async fn bridge_transparent_ws(
         let mut response_observer = response_observer;
         async move {
             let mut response_observer_enabled = true;
+            let mut first_response_seen = false;
             while let Some(message) = ws_read.next().await {
                 match message {
                     Ok(Message::Binary(data)) => {
@@ -420,6 +512,8 @@ pub(crate) async fn bridge_transparent_ws(
                             .await
                             {
                                 Ok(Some(latency)) => {
+                                    response_observer_enabled = false;
+                                    first_response_seen = true;
                                     telemetry.mark_mtproto_response(latency);
                                     info!(
                                         "[{}] первый MTProto ответ DC{}{} через {} получен за {} мс",
@@ -441,6 +535,15 @@ pub(crate) async fn bridge_transparent_ws(
                         }
                         if let Err(error) = client_write.write_all(&data).await {
                             return format!("ошибка записи в TCP клиента: {error}");
+                        }
+                        if !data.is_empty()
+                            && let Some(progress) = progress
+                        {
+                            progress.received();
+                        }
+                        if !first_response_seen && !data.is_empty() {
+                            // Прогресс продлевает ожидание, но сам по себе не подтверждает MTProto.
+                            record_first_response_progress(&response_state).await;
                         }
                         bytes_down.fetch_add(length, Ordering::Relaxed);
                         activity.touch();
@@ -506,30 +609,37 @@ pub(crate) async fn bridge_transparent_ws(
         SESSION_IDLE_TIMEOUT,
         RELAY_DRAIN_TIMEOUT,
     );
-    let first_response_timeout = async {
-        first_request.notified().await;
-        tokio::time::sleep(FIRST_RESPONSE_TIMEOUT).await;
-        if matches!(
-            *response_state.lock().await,
-            MtprotoResponseState::Confirmed
-        ) {
+    let first_response_timeout = wait_for_first_response_stall(&response_state, &first_request);
+    let media_timeout = async {
+        if let Some(progress) = progress {
+            progress.stalled(MEDIA_RESPONSE_TIMEOUT).await;
+        } else {
             std::future::pending::<()>().await;
         }
     };
     let completion = tokio::select! {
-        result = relay => Some(result),
-        _ = first_response_timeout => None,
+        result = relay => Ok(result),
+        _ = first_response_timeout => Err(false),
+        _ = media_timeout => Err(true),
     };
     let (closed_by, reason) = match completion {
-        None => {
+        Err(false) => {
             record_mtproto_failure_if_pending(&response_state, &feedback).await;
             telemetry.set_stage("mtproto_timeout");
             (
                 "таймер MTProto",
-                "не получен первый полный ответ MTProto".to_owned(),
+                "нет входящих данных перед подтверждением MTProto".to_owned(),
             )
         }
-        Some(RelayCompletion::Ended {
+        Err(true) => {
+            crate::routing::record_mtproto_failure(&feedback);
+            telemetry.set_stage("media_stall");
+            (
+                "таймер медиа",
+                "после запроса нет данных от сервера".to_owned(),
+            )
+        }
+        Ok(RelayCompletion::Ended {
             direction: RelayDirection::Upload(reason),
             drained,
         }) => {
@@ -541,7 +651,7 @@ pub(crate) async fn bridge_transparent_ws(
             }
             ("клиент", reason)
         }
-        Some(RelayCompletion::Ended {
+        Ok(RelayCompletion::Ended {
             direction: RelayDirection::Download(reason),
             drained,
         }) => {
@@ -553,7 +663,7 @@ pub(crate) async fn bridge_transparent_ws(
             }
             ("upstream", reason)
         }
-        Some(RelayCompletion::Idle) => (
+        Ok(RelayCompletion::Idle) => (
             "таймер простоя",
             format!("нет MTProto-данных {:?}", SESSION_IDLE_TIMEOUT),
         ),
@@ -581,9 +691,10 @@ pub(crate) async fn bridge_transparent_ws(
 #[cfg(test)]
 mod tests {
     use super::{
-        MtprotoResponseState, PayloadActivity, RelayCompletion, RelayDirection,
-        observe_and_record_first_mtproto_response, race_directions, record_first_mtproto_response,
-        send_application_frame, supervise_directions,
+        FIRST_RESPONSE_TIMEOUT, MtprotoResponseState, PayloadActivity, RelayCompletion,
+        RelayDirection, ResponseProgress, observe_and_record_first_mtproto_response,
+        race_directions, record_first_mtproto_response, record_first_response_progress,
+        send_application_frame, supervise_directions, wait_for_first_response_stall,
     };
     use cipher::StreamCipher;
     use std::future;
@@ -599,6 +710,41 @@ mod tests {
     use crate::crypto::{HANDSHAKE_LEN, ProtoTag, direct_server_stream_cipher};
     use crate::response_observer::MtprotoResponseObserver;
     use crate::routing::RouteFeedback;
+
+    #[tokio::test(start_paused = true)]
+    async fn media_stall_requires_upload_without_download_progress() {
+        let progress = ResponseProgress::default();
+        let timeout = Duration::from_secs(20);
+        let stalled = progress.stalled(timeout);
+        tokio::pin!(stalled);
+        assert!(
+            tokio::time::timeout(timeout * 2, &mut stalled)
+                .await
+                .is_err()
+        );
+
+        progress.sent();
+        assert!(
+            tokio::time::timeout(timeout / 2, &mut stalled)
+                .await
+                .is_err()
+        );
+        progress.received();
+        assert!(
+            tokio::time::timeout(timeout * 2, &mut stalled)
+                .await
+                .is_err()
+        );
+
+        progress.sent();
+        assert!(
+            tokio::time::timeout(timeout / 2, &mut stalled)
+                .await
+                .is_err()
+        );
+        progress.sent();
+        stalled.await;
+    }
 
     struct TestSink {
         fail_send: bool,
@@ -727,8 +873,34 @@ mod tests {
         );
         assert!(matches!(
             &*response_state.lock().await,
-            MtprotoResponseState::Awaiting(_)
+            MtprotoResponseState::Awaiting { .. }
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn данные_сдвигают_таймер_wss_без_подтверждения_маршрута() {
+        let state = Arc::new(tokio::sync::Mutex::new(MtprotoResponseState::NotSent));
+        let sink = Arc::new(tokio::sync::Mutex::new(TestSink { fail_send: false }));
+        let first_request = tokio::sync::Notify::new();
+        let feedback = RouteFeedback::direct(997, false, "149.154.167.50", Duration::from_secs(1));
+        send_application_frame(&sink, &state, &feedback, &first_request, vec![1, 2, 3])
+            .await
+            .unwrap();
+        let stalled = wait_for_first_response_stall(&state, &first_request);
+        tokio::pin!(stalled);
+
+        let gap = FIRST_RESPONSE_TIMEOUT - Duration::from_secs(1);
+        for _ in 0..2 {
+            assert!(tokio::time::timeout(gap, &mut stalled).await.is_err());
+            record_first_response_progress(&state).await;
+        }
+        assert!(matches!(
+            *state.lock().await,
+            MtprotoResponseState::Awaiting { .. }
+        ));
+        let last_delivery = tokio::time::Instant::now();
+        stalled.await;
+        assert_eq!(last_delivery.elapsed(), FIRST_RESPONSE_TIMEOUT);
     }
 
     #[tokio::test]
