@@ -9,8 +9,21 @@ use std::io::{self, BufReader, BufWriter, Read};
 use std::path::Path;
 
 pub(super) const ARCHIVE: &str = ".rollback-builds.tar.xz";
+pub(super) const FORMAT: &[u8] = b"R2O-ROLLBACK-XZ-2\n";
 const DICTIONARY_BYTES: u32 = 2 * 1024 * 1024;
 const DECODE_LIMIT_KIB: u32 = DICTIONARY_BYTES / 1024 + 128;
+
+pub(super) fn supported_by(root: &Path, release: &str) -> bool {
+    let path = root
+        .join("releases")
+        .join(release)
+        .join("router/rollback-xz");
+    let mut marker = Vec::with_capacity(FORMAT.len());
+    File::open(path)
+        .and_then(|file| file.take(FORMAT.len() as u64 + 1).read_to_end(&mut marker))
+        .is_ok()
+        && marker == FORMAT
+}
 
 pub(super) fn compact(root: &Path, id: &str) -> Result<(), InstallError> {
     let releases = root.join("releases");
@@ -171,7 +184,7 @@ pub(super) fn restore(root: &Path, id: &str) -> Result<(), InstallError> {
 }
 
 fn is_applet(name: &std::ffi::OsStr, architecture: &str) -> bool {
-    ["r2o-fetch", "r2o-detect", "r2o-telegram"]
+    ["r2o-fetch", "r2o-detect", "r2o-telegram", "r2o-panel"]
         .iter()
         .any(|applet| name == std::ffi::OsStr::new(&format!("{applet}-linux-{architecture}")))
 }

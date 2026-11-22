@@ -1665,6 +1665,7 @@ dependencies = [
  "quinn",
  "r2k-core",
  "r2o-datapath",
+ "r2o-panel",
  "r2o-telegram",
  "rcgen",
  "rustls",
