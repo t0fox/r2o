@@ -38,6 +38,7 @@ TMP=
 DISK_TMP=
 BUNDLE=
 ARCHIVE=
+BOOTSTRAP_APK=
 
 say() { echo "r2o: $*"; }
 die() { echo "r2o: $*" >&2; exit 1; }
@@ -45,6 +46,10 @@ die() { echo "r2o: $*" >&2; exit 1; }
 cleanup() {
     [ -z "$TMP" ] || rm -rf "$TMP" 2>/dev/null || true
     [ -z "$DISK_TMP" ] || rm -rf "$DISK_TMP" 2>/dev/null || true
+    if [ -n "$BOOTSTRAP_APK" ]; then
+        apk del "$BOOTSTRAP_APK" >/dev/null ||
+            say "не удалось удалить временные зависимости $BOOTSTRAP_APK"
+    fi
 }
 
 release_from_slots() {
@@ -174,10 +179,11 @@ memory_available_kb() {
 
 install_dependencies() {
     missing=
-    command -v openssl >/dev/null 2>&1 || missing="$missing openssl-util"
+    bootstrap=
+    command -v openssl >/dev/null 2>&1 || bootstrap="$bootstrap openssl-util"
     # curl нужен не только для удобства: BusyBox wget на OpenWrt часто не
     # умеет HTTPS-редирект GitHub latest и падает на latest.json.
-    command -v curl >/dev/null 2>&1 || missing="$missing curl"
+    command -v curl >/dev/null 2>&1 || bootstrap="$bootstrap curl"
     have_ca=0
     for ca_file in /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates.crt /opt/etc/ssl/certs/ca-certificates.crt; do
         [ ! -s "$ca_file" ] || have_ca=1
@@ -205,17 +211,26 @@ install_dependencies() {
             conntrack_module=nf_conntrack_netlink
         fi
     fi
-    [ -n "$missing" ] || return 0
+    [ -n "$missing$bootstrap" ] || return 0
     [ "$(free_kb "$STORAGE_PATH")" -ge "$((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB))" ] ||
         die "для зависимостей и выпуска нужно не менее $((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB)) КиБ свободной flash"
     [ "$(memory_available_kb)" -ge 8192 ] || die 'нужно не менее 8 МиБ свободной RAM для установки зависимостей'
-    say "проверяю недостающие зависимости:$missing"
+    say "проверяю недостающие зависимости:$missing$bootstrap"
     if [ "$PLATFORM" = openwrt ] && command -v apk >/dev/null 2>&1; then
-        apk update && apk add $missing || die "не удалось установить зависимости через apk:$missing"
+        apk update || die 'не удалось обновить индекс apk'
+        if [ -n "$missing" ]; then
+            apk add $missing || die "не удалось установить зависимости через apk:$missing"
+        fi
+        if [ -n "$bootstrap" ]; then
+            # Менеджер выпуска использует собственный TLS и проверку подписи.
+            BOOTSTRAP_APK=".r2o-bootstrap-$$"
+            apk add --virtual "$BOOTSTRAP_APK" $bootstrap ||
+                die "не удалось установить временные зависимости через apk:$bootstrap"
+        fi
     elif [ "$PLATFORM" = openwrt ] && command -v opkg >/dev/null 2>&1; then
-        opkg update && opkg install $missing || die "не удалось установить зависимости через opkg:$missing"
+        opkg update && opkg install $missing $bootstrap || die "не удалось установить зависимости через opkg:$missing$bootstrap"
     elif [ -x /opt/bin/opkg ]; then
-        /opt/bin/opkg update && /opt/bin/opkg install $missing || die "не удалось установить зависимости через Entware opkg:$missing"
+        /opt/bin/opkg update && /opt/bin/opkg install $missing $bootstrap || die "не удалось установить зависимости через Entware opkg:$missing$bootstrap"
     else
         die "нет штатного менеджера пакетов для установки:$missing"
     fi

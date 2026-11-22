@@ -81,6 +81,7 @@ set -eu
 case "${1:-}" in
     update) printf 'update\n' >> "$R2O_TEST_PACKAGE_LOG" ;;
     add) shift; printf '%s\n' "$*" >> "$R2O_TEST_PACKAGE_LOG" ;;
+    del) printf 'del %s\n' "$2" >> "$R2O_TEST_PACKAGE_LOG" ;;
     *) exit 2 ;;
 esac
 EOF
@@ -293,6 +294,25 @@ grep -q 'kmod-nfnetlink-queue' "$CASE/packages.log" || fail 'NFQUEUE core packag
 grep -qx nfnetlink_queue "$CASE/modules.log" || fail 'nfnetlink_queue module was not loaded'
 grep -qx nft_queue "$CASE/modules.log" || fail 'nft_queue module was not loaded'
 [ -f "$CASE/proc/net/netfilter/nfnetlink_queue" ] || fail 'NFQUEUE status did not appear after module load'
+
+cp "$TEMP/install.sh" "$TEMP/install.saved"
+sed '/bootstrap="\$bootstrap /s/command -v \(openssl\|curl\)/false \1/' \
+    "$TEMP/install.saved" > "$TEMP/install.sh"
+for outcome in success failure; do
+    new_case "temporary-apk-$outcome"
+    if [ "$outcome" = success ]; then
+        run_install > "$CASE/out" 2>&1 ||
+            { cat "$CASE/out" >&2; fail 'bootstrap with temporary APK dependencies failed'; }
+    else
+        dd if=/dev/zero of="$CASE/fixtures/latest.json.sig" bs=64 count=1 2>/dev/null
+        if run_install > "$CASE/out" 2>&1; then fail 'damaged signature was accepted'; fi
+    fi
+    helper=$(awk '$1 == "--virtual" && $3 == "openssl-util" && $4 == "curl" { print $2 }' "$CASE/packages.log")
+    case "$helper" in .r2o-bootstrap-*) ;; *) fail 'bootstrap dependencies are not temporary' ;; esac
+    grep -Fqx "del $helper" "$CASE/packages.log" || fail 'temporary APK group was left installed'
+    grep -q '^kmod-nfnetlink-queue ' "$CASE/packages.log" || fail 'runtime modules are not separate'
+done
+mv "$TEMP/install.saved" "$TEMP/install.sh"
 
 new_case unsupported-keenetic-softfloat
 cat > "$MOCK/opkg" <<'EOF'
