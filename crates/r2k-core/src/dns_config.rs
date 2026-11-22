@@ -12,6 +12,7 @@ pub const DNS_HOST_MAX: usize = 256;
 pub const DNS_PATH_MAX: usize = 1024;
 pub const DNS_BOOTSTRAP_MAX: usize = 256;
 pub const DNS_SOURCE_MAX: usize = 32;
+const DNSPROXY_HTTP3_SOURCE: &str = "dnsproxy-http3";
 
 /// C `d2k_dns_service` (`runtime/d2k_dns_config.h`).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -796,12 +797,17 @@ fn add_bootstrap_ip(out: &mut String, value: &str) {
 pub fn parse_dnsproxy(text: &str) -> Vec<DnsService> {
     let mut items = Vec::new();
     let mut enabled = true;
+    let mut http3 = false;
     let mut global = false;
     for line in text.lines() {
         if let Some((kind, name)) = config_line(line) {
             global = kind == "dnsproxy" && name == "global";
-        } else if global && let Some(value) = uci_value(line, "option", "enabled") {
-            enabled = value != "0";
+        } else if global {
+            if let Some(value) = uci_value(line, "option", "enabled") {
+                enabled = value != "0";
+            } else if let Some(value) = uci_value(line, "option", "http3") {
+                http3 = matches!(value.as_str(), "1" | "on" | "true" | "yes" | "enabled");
+            }
         }
     }
     if !enabled {
@@ -818,13 +824,30 @@ pub fn parse_dnsproxy(text: &str) -> Vec<DnsService> {
             add_bootstrap_ip(&mut bootstrap, &value);
         }
     }
-    for line in text.lines() {
-        if let Some((kind, name)) = config_line(line) {
-            servers = kind == "dnsproxy" && name == "servers";
-            continue;
+    for key in ["upstream", "fallback"] {
+        servers = false;
+        for line in text.lines() {
+            if let Some((kind, name)) = config_line(line) {
+                servers = kind == "dnsproxy" && name == "servers";
+                continue;
+            }
+            if servers && let Some(value) = uci_value(line, "list", key) {
+                add_service(&mut items, &value, "dnsproxy", Some(&bootstrap));
+            }
         }
-        if servers && let Some(value) = uci_value(line, "list", "upstream") {
-            add_service(&mut items, &value, "dnsproxy", Some(&bootstrap));
+    }
+    if http3 {
+        // Явные серверы имеют приоритет над дополнительным транспортом HTTPS.
+        for index in 0..items.len() {
+            if items.len() == DNS_SERVICE_MAX {
+                break;
+            }
+            if items[index].protocol == "doh" {
+                let mut service = items[index].clone();
+                service.protocol = "doh3".into();
+                service.source = DNSPROXY_HTTP3_SOURCE.into();
+                merge_service(&mut items, service);
+            }
         }
     }
     items
@@ -1054,10 +1077,9 @@ pub fn read_dns_services(
             merge_service(&mut items, service);
         }
     }
-    if let Some(text) = dnsproxy {
-        for service in parse_dnsproxy(text) {
-            merge_service(&mut items, service);
-        }
+    let mut dnsproxy = dnsproxy.map(parse_dnsproxy).unwrap_or_default();
+    for service in dnsproxy.extract_if(.., |service| service.source != DNSPROXY_HTTP3_SOURCE) {
+        merge_service(&mut items, service);
     }
     if let Some(text) = doqd {
         let source = if doqd_source == "keenetic-doq-web" {
@@ -1073,6 +1095,9 @@ pub fn read_dns_services(
         for service in parse_keenetic(text) {
             merge_service(&mut items, service);
         }
+    }
+    for service in dnsproxy {
+        merge_service(&mut items, service);
     }
     items
 }
@@ -1157,7 +1182,7 @@ config dnsproxy 'servers'
   list bootstrap '192.0.2.8'
 ";
         let services = super::parse_dnsproxy(configuration);
-        assert_eq!(services.len(), 2);
+        assert_eq!(services.len(), 3);
         let h3 = &services[0];
         assert_eq!(h3.protocol, "doh3");
         assert_eq!(h3.transport(), 17);
@@ -1167,6 +1192,64 @@ config dnsproxy 'servers'
         assert_eq!(h3.bootstrap_dns, "192.0.2.8");
         assert_eq!(services[1].protocol, "doh");
         assert_eq!(services[1].transport(), 6);
+        assert_eq!(services[2].protocol, "doh3");
+        assert_eq!(services[2].port, 443);
+        assert_eq!(services[2].path, "/query");
+        assert_eq!(services[2].source, "dnsproxy-http3");
+    }
+
+    #[test]
+    fn dnsproxy_fallback_keeps_explicit_http3_separate_from_the_optional_transport() {
+        let configuration = "
+config dnsproxy 'global'
+  option enabled '1'
+  option http3 'on'
+config dnsproxy 'servers'
+  list fallback 'h3://[2001:db8::8]:8443/query?profile=a%2Fb'
+  list fallback 'tls://198.51.100.2'
+  list upstream 'https://[2001:db8::8]:8443/query?profile=a%2Fb'
+  list bootstrap '192.0.2.8'
+config other 'other'
+  list fallback 'h3://ignored.example/query'
+";
+        let enabled = super::parse_dnsproxy(configuration);
+        assert_eq!(enabled.len(), 3);
+        assert_eq!(enabled[0].protocol, "doh");
+        assert_eq!(enabled[1].protocol, "doh3");
+        assert_eq!(enabled[1].source, "dnsproxy");
+        assert_eq!(enabled[1].host, "2001:db8::8");
+        assert_eq!(enabled[1].port, 8443);
+        assert_eq!(enabled[1].path, "/query?profile=a%2Fb");
+        assert_eq!(enabled[1].bootstrap_dns, "192.0.2.8");
+        assert_eq!(enabled[2].protocol, "dot");
+        let disabled = configuration.replace("http3 'on'", "http3 'off'");
+        assert_eq!(super::parse_dnsproxy(&disabled), enabled);
+    }
+
+    #[test]
+    fn optional_dnsproxy_http3_leaves_room_for_an_explicit_doqd_server() {
+        use std::fmt::Write;
+        let mut configuration = String::from(
+            "config dnsproxy 'global'\n option enabled '1'\n option http3 '1'\n\
+             config dnsproxy 'servers'\n",
+        );
+        for index in 0..super::DNS_SERVICE_MAX - 1 {
+            writeln!(
+                configuration,
+                " list upstream 'https://dns-{index}.example/query'"
+            )
+            .unwrap();
+        }
+        let services = super::read_dns_services(
+            None,
+            Some(&configuration),
+            Some("upstream quic://192.0.2.8"),
+            "doqd",
+            None,
+        );
+        assert_eq!(services.len(), super::DNS_SERVICE_MAX);
+        assert_eq!(services.last().unwrap().protocol, "doq");
+        assert!(services.iter().all(|service| service.protocol != "doh3"));
     }
 
     #[test]

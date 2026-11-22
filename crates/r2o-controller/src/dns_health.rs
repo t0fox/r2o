@@ -759,7 +759,9 @@ fn resolve_service(service: &DnsService) -> Result<SocketAddr, String> {
         return Err("DNS: пустой endpoint".into());
     }
     let port = if service.port == 0 {
-        if service.protocol.eq_ignore_ascii_case("doh") {
+        if service.protocol.eq_ignore_ascii_case("doh")
+            || service.protocol.eq_ignore_ascii_case("doh3")
+        {
             443
         } else {
             853
@@ -1675,6 +1677,7 @@ async fn probe_doh3_on(
     timeout: Duration,
     roots: Arc<RootCertStore>,
 ) -> DnsHealthResult {
+    use base64::Engine;
     use bytes::{Buf, Bytes};
 
     let mut result = DnsHealthResult::default();
@@ -1687,15 +1690,38 @@ async fn probe_doh3_on(
     } else {
         &service.path
     };
+    let Ok(parsed) = path.parse::<http::uri::PathAndQuery>() else {
+        return result.fail(DnsHealthFailure::Configuration, "DoH3: недопустимый URL");
+    };
+    if path.contains('#')
+        || parsed.query().is_some_and(|query| {
+            query.split('&').any(|pair| {
+                let key = pair.split('=').next().unwrap_or_default();
+                doh_parameter_matches(key, "dns")
+            })
+        })
+    {
+        return result.fail(
+            DnsHealthFailure::Configuration,
+            "DoH3: параметры URL конфликтуют с запросом DNS",
+        );
+    }
+    let separator = if parsed.query().is_none() {
+        "?"
+    } else if path.ends_with(['?', '&']) {
+        ""
+    } else {
+        "&"
+    };
+    let question = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(dns_query_message(0));
     let uri = http::Uri::builder()
         .scheme("https")
         .authority(authority)
-        .path_and_query(path)
+        .path_and_query(format!("{path}{separator}dns={question}"))
         .build();
     let request = match uri.and_then(|uri| {
-        http::Request::post(uri)
+        http::Request::get(uri)
             .header(http::header::ACCEPT, "application/dns-message")
-            .header(http::header::CONTENT_TYPE, "application/dns-message")
             .body(())
     }) {
         Ok(request) => request,
@@ -1711,20 +1737,17 @@ async fn probe_doh3_on(
         let connection = connect_quic_dns(&endpoint, address, host).await?;
         result.tcp_reachable = true;
         result.tls_handshake = true;
-        let (mut driver, mut sender) = h3::client::builder()
-            .max_field_section_size(DOH_HEADER_MAX as u64)
-            .build(h3_quinn::Connection::new(connection))
-            .await
-            .map_err(|error| (DnsHealthFailure::Server, error.to_string()))?;
+        let (mut driver, mut sender): (_, h3::client::SendRequest<_, Bytes>) =
+            h3::client::builder()
+                .max_field_section_size(DOH_HEADER_MAX as u64)
+                .build(h3_quinn::Connection::new(connection))
+                .await
+                .map_err(|error| (DnsHealthFailure::Server, error.to_string()))?;
         drive = Some(tokio::spawn(async move {
             std::future::poll_fn(|cx| driver.poll_close(cx)).await
         }));
         let sent = Instant::now();
         let mut stream = sender.send_request(request).await.map_err(server)?;
-        stream
-            .send_data(Bytes::from(dns_query_message(DNS_QUERY_ID_DOH)))
-            .await
-            .map_err(server)?;
         stream.finish().await.map_err(server)?;
         let response = stream.recv_response().await.map_err(server)?;
         result.http_status = i32::from(response.status().as_u16());
@@ -1735,13 +1758,15 @@ async fn probe_doh3_on(
             ));
         }
         let invalid = |reason: &str| (DnsHealthFailure::DnsResponse, reason.to_owned());
-        let media_type = response
-            .headers()
-            .get(http::header::CONTENT_TYPE)
+        let types = response.headers().get_all(http::header::CONTENT_TYPE);
+        let mut types = types.iter();
+        let media_type = types
+            .next()
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next());
-        if !media_type
-            .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/dns-message"))
+        if types.next().is_some()
+            || !media_type
+                .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/dns-message"))
         {
             return Err(invalid("неверный Content-Type"));
         }
@@ -1765,7 +1790,7 @@ async fn probe_doh3_on(
         {
             return Err(invalid("Content-Length не совпадает с DNS-ответом"));
         }
-        if !dns_probe_reply(&body, DNS_QUERY_ID_DOH) {
+        if !dns_probe_reply(&body, 0) {
             return Err(invalid("некорректный DNS-ответ"));
         }
         Ok(sent.elapsed().as_millis() as u64)
@@ -2535,7 +2560,8 @@ mod tests {
 
     #[test]
     fn loopback_doh3_requires_matching_dns_reply_on_http3() {
-        use bytes::{Buf, Bytes};
+        use base64::Engine;
+        use bytes::Bytes;
         use std::net::UdpSocket;
 
         let (mut tls, cert) = test_server_config();
@@ -2557,7 +2583,13 @@ mod tests {
                     Arc::new(quinn::TokioRuntime),
                 )
                 .unwrap();
-                for id in [DNS_QUERY_ID_DOH, DNS_QUERY_ID_DOH + 1] {
+                assert!(endpoint.accept().await.unwrap().await.is_err());
+                for (status, id, duplicate_type) in [
+                    (200, 0, false),
+                    (200, 1, false),
+                    (403, 0, false),
+                    (200, 0, true),
+                ] {
                     let connection = endpoint.accept().await.unwrap().await.unwrap();
                     let mut h3 = h3::server::builder()
                         .build(h3_quinn::Connection::new(connection.clone()))
@@ -2571,27 +2603,32 @@ mod tests {
                         .resolve_request()
                         .await
                         .unwrap();
-                    assert_eq!(request.method(), http::Method::POST);
+                    assert_eq!(request.method(), http::Method::GET);
+                    assert_eq!(request.uri().path(), "/dns-query");
+                    let encoded = request
+                        .uri()
+                        .query()
+                        .unwrap()
+                        .strip_prefix("profile=a%2Fb&dns=")
+                        .unwrap();
                     assert_eq!(
-                        request.uri().path_and_query().unwrap().as_str(),
-                        "/dns-query?profile=1"
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .decode(encoded)
+                            .unwrap(),
+                        dns_query_message(0)
                     );
-                    assert_eq!(request.headers()["content-type"], "application/dns-message");
-                    let mut body = Vec::new();
-                    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
-                        let count = chunk.remaining();
-                        body.extend_from_slice(&chunk.copy_to_bytes(count));
-                    }
-                    assert_eq!(body, dns_query_message(DNS_QUERY_ID_DOH));
+                    assert_eq!(request.headers()["accept"], "application/dns-message");
+                    assert!(stream.recv_data().await.unwrap().is_none());
                     let reply = reply_for(id);
+                    let mut response = http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/dns-message")
+                        .header("content-length", reply.len());
+                    if duplicate_type {
+                        response = response.header("content-type", "text/html");
+                    }
                     stream
-                        .send_response(
-                            http::Response::builder()
-                                .header("content-type", "application/dns-message")
-                                .header("content-length", reply.len())
-                                .body(())
-                                .unwrap(),
-                        )
+                        .send_response(response.body(()).unwrap())
                         .await
                         .unwrap();
                     stream.send_data(Bytes::from(reply)).await.unwrap();
@@ -2600,22 +2637,42 @@ mod tests {
                 }
             });
         });
-        let service = DnsService {
-            protocol: "doh3".into(),
-            host: "::1".into(),
-            sni: "localhost".into(),
-            path: "/dns-query?profile=1".into(),
-            port,
-            ..Default::default()
-        };
+        let configuration = format!(
+            "config dnsproxy 'global'\n option enabled '1'\n option http3 '1'\n\
+             config dnsproxy 'servers'\n list fallback 'https://localhost:{port}/dns-query?profile=a%2Fb'\n"
+        );
+        let mut service = r2k_core::dns_config::parse_dnsproxy(&configuration)
+            .into_iter()
+            .find(|service| service.protocol == "doh3")
+            .unwrap();
+        // Контроллер подставляет IP, полученный через bootstrap, оставляя имя сертификата.
+        service.host = "::1".into();
         let mut roots = RootCertStore::empty();
         roots.add(cert).unwrap();
         let roots = Arc::new(roots);
-        let probe = || {
-            probe_dns_health_with_roots(&service, None, Duration::from_secs(3), Arc::clone(&roots))
+        let probe = |service: &DnsService| {
+            probe_dns_health_with_roots(service, None, Duration::from_secs(3), Arc::clone(&roots))
         };
-        let valid = probe();
-        let wrong = probe();
+        let conflicting = probe(&DnsService {
+            path: "/dns-query?%64ns=other".into(),
+            ..service.clone()
+        });
+        assert_eq!(conflicting.failure, Some(DnsHealthFailure::Configuration));
+        let wrong_name = probe(&DnsService {
+            sni: "wrong-name.example".into(),
+            ..service.clone()
+        });
+        assert_eq!(
+            wrong_name.failure,
+            Some(DnsHealthFailure::Certificate),
+            "{}",
+            wrong_name.reason
+        );
+        assert!(!wrong_name.dns_reply);
+        let valid = probe(&service);
+        let wrong = probe(&service);
+        let denied = probe(&service);
+        let ambiguous = probe(&service);
         server.join().unwrap();
         assert!(valid.tls_handshake && valid.dns_reply, "{}", valid.reason);
         assert_eq!(valid.http_status, 200);
@@ -2624,6 +2681,12 @@ mod tests {
         assert_eq!(wrong.http_status, 200);
         assert_eq!(wrong.failure, Some(DnsHealthFailure::DnsResponse));
         assert_eq!(wrong.answer_rtt_ms, None);
+        assert_eq!(denied.http_status, 403);
+        assert_eq!(denied.failure, Some(DnsHealthFailure::Server));
+        assert!(!denied.dns_reply);
+        assert_eq!(ambiguous.http_status, 200);
+        assert_eq!(ambiguous.failure, Some(DnsHealthFailure::DnsResponse));
+        assert!(!ambiguous.dns_reply);
     }
 
     #[test]

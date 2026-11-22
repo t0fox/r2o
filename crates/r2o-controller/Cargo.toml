@@ -7,6 +7,7 @@ description = "Адаптивный контроллер и каталог ре�
 [dependencies]
 r2k-core = { package = "r2k-core", path = "../r2k-core" }
 r2o-datapath = { package = "r2o-datapath", path = "../r2o-datapath" }
+base64 = "0.22"
 libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "x25519", "aes"] }
@@ -27,7 +28,6 @@ tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [dev-dependencies]
-base64 = "0.22"
 rcgen = "0.12"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "r2o-test-invalid-finished"] }
 proptest = "1.12.0"
