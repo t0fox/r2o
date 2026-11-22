@@ -1840,8 +1840,14 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         .set_nodelay(true)
         .map_err(|error| format!("не удалось настроить TCP-сокет: {error}"))?;
 
-    let dot_query = r2o_fetch_dot_query();
-    let doh_query = r2o_fetch_doh_query();
+    let dot = r2o_fetch_dot_query();
+    let doh = r2o_fetch_doh_query();
+    let dot_query = dot.as_ref().map(|query| query.body.as_slice());
+    let doh_query = doh.as_ref().map(|query| query.body.as_slice());
+    let pin = dot
+        .as_ref()
+        .or(doh.as_ref())
+        .and_then(|query| query.spki_pin);
     let dns_probe = dot_query.is_some() || doh_query.is_some();
     let (mut connection, socket) = if let Some(query) =
         doh_query.as_deref().filter(|_| ech.is_none())
@@ -1853,6 +1859,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             options.wire_len,
             deadline,
             std::sync::Arc::new(roots),
+            pin,
         )
         .map_err(|(_, reason)| reason)?;
         match session {
@@ -1930,6 +1937,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 ech.clone(),
                 options.wire_len,
                 dns_probe.then_some(roots),
+                pin,
             )?
         } else if dot_query.is_some() {
             crate::dns_health::trusted_dns_tls_connection(
@@ -1938,6 +1946,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 options.wire_len,
                 &[b"dot".to_vec()],
                 std::sync::Arc::new(roots),
+                pin,
             )?
         } else {
             crate::r2o_tls::r2o_tls_client_connection(
@@ -3711,34 +3720,40 @@ fn r2o_gateway_websocket_exchange(
     }
 }
 
+#[derive(Clone)]
+struct DnsTcpQuery {
+    body: Vec<u8>,
+    spki_pin: Option<[u8; 32]>,
+}
+
 thread_local! {
     /// DoH-запрос текущего потока зонда. Ставится перед проверкой DNS-endpoint
     /// и снимается сразу после: тот же `fetch`, но POST `application/dns-message`.
-    static DOH_QUERY: std::cell::RefCell<Option<Vec<u8>>> = const {
+    static DOH_QUERY: std::cell::RefCell<Option<DnsTcpQuery>> = const {
         std::cell::RefCell::new(None)
     };
     /// DoT-кадр (2-байтная длина + DNS message) текущего потока зонда.
-    static DOT_QUERY: std::cell::RefCell<Option<Vec<u8>>> = const {
+    static DOT_QUERY: std::cell::RefCell<Option<DnsTcpQuery>> = const {
         std::cell::RefCell::new(None)
     };
 }
 
 /// C `d2k_verify_doh_on`: включить DoH-запрос для следующего `fetch` в этом
 /// потоке. `None` — обычный GET.
-pub fn r2o_fetch_doh_query_set(query: Option<Vec<u8>>) {
-    DOH_QUERY.with(|slot| *slot.borrow_mut() = query);
+pub fn r2o_fetch_doh_query_set(query: Option<Vec<u8>>, spki_pin: Option<[u8; 32]>) {
+    DOH_QUERY.with(|slot| *slot.borrow_mut() = query.map(|body| DnsTcpQuery { body, spki_pin }));
 }
 
-fn r2o_fetch_doh_query() -> Option<Vec<u8>> {
+fn r2o_fetch_doh_query() -> Option<DnsTcpQuery> {
     DOH_QUERY.with(|slot| slot.borrow().clone())
 }
 
 /// C `d2k_verify_dns_on` для DoT: length-prefixed DNS-обмен на том же TLS.
-pub fn r2o_fetch_dot_query_set(query: Option<Vec<u8>>) {
-    DOT_QUERY.with(|slot| *slot.borrow_mut() = query);
+pub fn r2o_fetch_dot_query_set(query: Option<Vec<u8>>, spki_pin: Option<[u8; 32]>) {
+    DOT_QUERY.with(|slot| *slot.borrow_mut() = query.map(|body| DnsTcpQuery { body, spki_pin }));
 }
 
-fn r2o_fetch_dot_query() -> Option<Vec<u8>> {
+fn r2o_fetch_dot_query() -> Option<DnsTcpQuery> {
     DOT_QUERY.with(|slot| slot.borrow().clone())
 }
 
@@ -5279,8 +5294,11 @@ mod tests {
         assert!(request.ends_with(&query));
         // Потокобезопасный setter нужен потому, что fetch идёт в worker'е
         // Discovery; после запроса он обязан сброситься.
-        r2o_fetch_doh_query_set(Some(query.clone()));
-        assert_eq!(r2o_fetch_doh_query(), Some(query.clone()));
+        r2o_fetch_doh_query_set(Some(query.clone()), None);
+        assert_eq!(
+            r2o_fetch_doh_query().map(|query| query.body),
+            Some(query.clone())
+        );
         let mut options = FetchOptions {
             name: "dns.example".into(),
             ip: None,
@@ -5292,7 +5310,7 @@ mod tests {
             mark: None,
         };
         assert!(options.validate().is_ok(), "DoH допускает query в path");
-        r2o_fetch_doh_query_set(None);
+        r2o_fetch_doh_query_set(None, None);
         assert!(r2o_fetch_doh_query().is_none());
         assert!(
             options.validate().is_err(),
@@ -5387,9 +5405,9 @@ mod tests {
             wire_len: None,
             mark: None,
         };
-        r2o_fetch_doh_query_set(Some(query.clone()));
+        r2o_fetch_doh_query_set(Some(query.clone()), None);
         let result = r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots);
-        r2o_fetch_doh_query_set(None);
+        r2o_fetch_doh_query_set(None, None);
         let request = request_receiver.recv().expect("получить DoH-запрос");
         server.join().unwrap();
         let result = result.expect("DoH fetch должен завершиться");
@@ -5437,10 +5455,10 @@ mod tests {
             wire_len: None,
             mark: None,
         };
-        r2o_fetch_doh_query_set(Some(query));
+        r2o_fetch_doh_query_set(Some(query), None);
         let result =
             r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots_invalid);
-        r2o_fetch_doh_query_set(None);
+        r2o_fetch_doh_query_set(None, None);
         server.join().unwrap();
         let result = result.expect("DoH fetch с невалидным телом завершается");
         assert_eq!(result.dns_probe, Some(crate::fetch::DnsTcpProtocol::Doh));
@@ -5453,11 +5471,14 @@ mod tests {
         use crate::dns_health::{DNS_QUERY_ID_DOH, DnsHealthFailure, dns_query_message};
         use bytes::Bytes;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use sha2::{Digest, Sha256};
         use std::net::TcpListener;
         use std::sync::Arc;
 
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let (_, leaf) = x509_parser::parse_x509_certificate(der.as_ref()).unwrap();
+        let pin: [u8; 32] = Sha256::digest(leaf.tbs_certificate.subject_pki.raw).into();
         let mut config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(
@@ -5540,6 +5561,8 @@ mod tests {
                             while connection.accept().await.is_some_and(|next| next.is_ok()) {}
                             reply_task.await.unwrap();
                         }
+                        let (socket, _) = listener.accept().await.unwrap();
+                        assert!(acceptor.accept(socket).await.is_err());
                     })
                     .await
                     .unwrap();
@@ -5588,25 +5611,40 @@ mod tests {
         for valid in [true, false] {
             let socket = TcpStream::connect(address).unwrap();
             let local_port = socket.local_addr().unwrap().port();
-            r2o_fetch_doh_query_set(Some(query.clone()));
+            r2o_fetch_doh_query_set(Some(query.clone()), Some(pin));
             let fetch = r2o_fetch_connected_stream_with_roots_and_encoding(
                 &options,
                 socket,
                 address,
                 Instant::now(),
                 R2oFetchEncoding::Identity,
-                roots.clone(),
+                RootCertStore::empty(),
                 None,
                 None,
                 None,
             );
-            r2o_fetch_doh_query_set(None);
+            r2o_fetch_doh_query_set(None, None);
             let fetch = fetch.unwrap();
             assert_eq!(fetch.local_port, local_port);
             assert_eq!(fetch.status, 200);
             assert_eq!(fetch.verified_dns_reply(), valid, "{fetch:?}");
             assert_eq!(fetch.application_verified, valid);
         }
+        let socket = TcpStream::connect(address).unwrap();
+        r2o_fetch_doh_query_set(Some(query), Some([0; 32]));
+        let rejected = r2o_fetch_connected_stream_with_roots_and_encoding(
+            &options,
+            socket,
+            address,
+            Instant::now(),
+            R2oFetchEncoding::Identity,
+            roots,
+            None,
+            None,
+            None,
+        );
+        r2o_fetch_doh_query_set(None, None);
+        assert!(rejected.unwrap_err().contains("SPKI"));
         server.join().unwrap();
     }
 
@@ -5676,9 +5714,9 @@ mod tests {
             frame.extend_from_slice(&query);
             frame
         };
-        r2o_fetch_dot_query_set(Some(frame.clone()));
+        r2o_fetch_dot_query_set(Some(frame.clone()), None);
         let result = r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots);
-        r2o_fetch_dot_query_set(None);
+        r2o_fetch_dot_query_set(None, None);
         let received = frame_receiver.recv().expect("получить DoT-кадр");
         server.join().unwrap();
         let result = result.expect("DoT fetch должен завершиться");

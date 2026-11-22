@@ -9286,17 +9286,18 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             false,
         );
     }
-    let (doh_request, dot_frame) = match dns_trial {
-        Ok(Some(R2oDnsTcpTrial::Doh(path, query))) => (Some((path, query)), None),
-        Ok(Some(R2oDnsTcpTrial::Dot(frame))) => (None, Some(frame)),
-        Ok(None) => (None, None),
+    let (doh_request, dot_frame, pin) = match dns_trial {
+        Ok(Some(R2oDnsTcpTrial::Doh(path, query, pin))) => (Some((path, query)), None, pin),
+        Ok(Some(R2oDnsTcpTrial::Dot(frame, pin))) => (None, Some(frame), pin),
+        Ok(None) => (None, None, None),
         Err(error) => return (Err(error.into()), false, false),
     };
     let is_dns = doh_request.is_some() || dot_frame.is_some();
     r2o_controller::fetch::r2o_fetch_doh_query_set(
         doh_request.as_ref().map(|(_, query)| query.clone()),
+        pin,
     );
-    r2o_controller::fetch::r2o_fetch_dot_query_set(dot_frame);
+    r2o_controller::fetch::r2o_fetch_dot_query_set(dot_frame, pin);
     let result = (|| {
         let remaining = |limit| r2o_probe_time_left(probe_deadline, limit);
         let mut phase_started = probe_deadline.map(|_| std::time::Instant::now());
@@ -9568,8 +9569,8 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         }
         Ok((fetch_result, applied, transport_established))
     })();
-    r2o_controller::fetch::r2o_fetch_doh_query_set(None);
-    r2o_controller::fetch::r2o_fetch_dot_query_set(None);
+    r2o_controller::fetch::r2o_fetch_doh_query_set(None, None);
+    r2o_controller::fetch::r2o_fetch_dot_query_set(None, None);
     match result {
         Ok((fetch, applied, transport_established)) => (fetch, applied, transport_established),
         Err(error) => (Err(error), false, false),
@@ -13819,8 +13820,8 @@ fn r2o_dns_unique_service<'a>(
 #[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 enum R2oDnsTcpTrial {
-    Doh(String, Vec<u8>),
-    Dot(Vec<u8>),
+    Doh(String, Vec<u8>, Option<[u8; 32]>),
+    Dot(Vec<u8>, Option<[u8; 32]>),
 }
 
 /// Выбирать DNS-контракт только для однозначного назначения.
@@ -13841,15 +13842,17 @@ fn r2o_dns_tcp_trial(
     if let Some(reason) = service.verification_limitation() {
         return Err(reason);
     }
+    let pin = service.spki_pin()?;
     Ok(Some(if service.protocol == "doh" {
         R2oDnsTcpTrial::Doh(
             service.path.clone(),
             r2o_controller::dns_health::dns_query_message(
                 r2o_controller::dns_health::DNS_QUERY_ID_DOH,
             ),
+            pin,
         )
     } else {
-        R2oDnsTcpTrial::Dot(r2o_controller::dns_health::dns_query_frame(1))
+        R2oDnsTcpTrial::Dot(r2o_controller::dns_health::dns_query_frame(1), pin)
     }))
 }
 
@@ -38924,7 +38927,7 @@ mod tests {
             family: 4,
             shape: SHAPE_MODERN,
         };
-        let Some(R2oDnsTcpTrial::Doh(path, query)) =
+        let Some(R2oDnsTcpTrial::Doh(path, query, None)) =
             super::r2o_dns_tcp_trial(&services, &target).unwrap()
         else {
             panic!("ожидался DoH-контракт");
@@ -38941,6 +38944,13 @@ mod tests {
             ..services[0].clone()
         };
         assert!(super::r2o_dns_tcp_trial(&[services[0].clone(), collision], &target).is_err());
+        let with_spki = r2k_core::dns_config::parse_keenetic(
+            "proxy-https:\nserver-https:\n  uri: https://dns.example/dns-query?token=secret\n  spki: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n",
+        );
+        assert!(matches!(
+            super::r2o_dns_tcp_trial(&with_spki, &target),
+            Ok(Some(R2oDnsTcpTrial::Doh(_, _, Some(pin)))) if pin == [0; 32]
+        ));
         let pinned = DnsService {
             host: "198.51.100.81".into(),
             ..services[0].clone()
@@ -38973,7 +38983,8 @@ mod tests {
         assert_eq!(
             super::r2o_dns_tcp_trial(&dot_services, &dot_target),
             Ok(Some(R2oDnsTcpTrial::Dot(
-                r2o_controller::dns_health::dns_query_frame(1)
+                r2o_controller::dns_health::dns_query_frame(1),
+                None,
             )))
         );
         assert_eq!(super::r2o_dns_tcp_trial(&services, &dot_target), Ok(None));

@@ -575,7 +575,7 @@ pub fn r2o_tls_ech_client_connection(
     ech: rustls::client::EchConfig,
     wire_len: Option<usize>,
 ) -> Result<rustls::ClientConnection, String> {
-    r2o_tls_ech_connection(name, ech, wire_len, None)
+    r2o_tls_ech_connection(name, ech, wire_len, None, None)
 }
 
 pub(crate) fn r2o_tls_ech_connection(
@@ -583,11 +583,13 @@ pub(crate) fn r2o_tls_ech_connection(
     ech: rustls::client::EchConfig,
     wire_len: Option<usize>,
     roots: Option<rustls::RootCertStore>,
+    pin: Option<[u8; 32]>,
 ) -> Result<rustls::ClientConnection, String> {
     if name.is_empty() {
         return Err("ECH требует origin и конфигурацию".to_owned());
     }
     let mut provider = rustls::crypto::ring::default_provider();
+    let algorithms = provider.signature_verification_algorithms;
     let verifier = R2oD2oServerCertVerifier {
         algorithms: provider.signature_verification_algorithms.clone(),
         verify_finished: true,
@@ -597,9 +599,16 @@ pub(crate) fn r2o_tls_ech_connection(
     let builder = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
         .with_ech(rustls::client::EchMode::Enable(ech))
         .map_err(|error| format!("не удалось включить ECH: {error}"))?;
-    let mut config = match roots {
-        Some(roots) => builder.with_root_certificates(roots),
-        None => builder
+    let mut config = match (pin, roots) {
+        (Some(pin), _) => {
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(std::sync::Arc::new(
+                    crate::dns_health::DnsSpkiVerifier::new(pin, algorithms),
+                ))
+        }
+        (None, Some(roots)) => builder.with_root_certificates(roots),
+        (None, None) => builder
             .dangerous()
             .with_custom_certificate_verifier(std::sync::Arc::new(verifier)),
     }

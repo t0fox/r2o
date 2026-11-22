@@ -76,18 +76,54 @@ impl DnsService {
         }
     }
 
+    pub fn spki_pin(&self) -> Result<Option<[u8; 32]>, &'static str> {
+        use base64::Engine;
+
+        let Some(pin) = self
+            .keenetic
+            .as_deref()
+            .map(|p| p.spki.as_str())
+            .filter(|pin| !pin.is_empty())
+        else {
+            return Ok(None);
+        };
+        let pin = pin
+            .strip_prefix('"')
+            .and_then(|pin| pin.strip_suffix('"'))
+            .or_else(|| {
+                pin.strip_prefix('\'')
+                    .and_then(|pin| pin.strip_suffix('\''))
+            })
+            .unwrap_or(pin);
+        let mut digest = [0; 32];
+        let size = base64::engine::general_purpose::STANDARD
+            .decode_slice(pin, &mut digest)
+            .map_err(|_| "Неверный отпечаток SPKI в настройках Keenetic")?;
+        if size != digest.len() {
+            return Err("Неверный отпечаток SPKI в настройках Keenetic");
+        }
+        Ok(Some(digest))
+    }
+
     pub fn verification_limitation(&self) -> Option<&'static str> {
         let policy = self.keenetic.as_deref()?;
         if !policy.doh_format.is_empty() && policy.doh_format != "dnsm" {
             Some("Настроен другой формат DoH, для него нужна отдельная проверка DNS-ответа")
-        } else if !policy.spki.is_empty() {
-            Some("В настройках Keenetic задан SPKI, для проверки требуется сверка этого ключа")
         } else if !policy.interface.is_empty() {
             Some("Сервис привязан к интерфейсу Keenetic, проверка должна пройти по этому маршруту")
         } else if !policy.domain.is_empty() {
             Some("Сервис настроен для отдельного домена, нужен запрос в пределах этого домена")
         } else {
-            None
+            match self.spki_pin() {
+                Err(reason) => Some(reason),
+                Ok(Some(_)) if self.protocol == "dot" && self.sni.is_empty() => {
+                    Some("Для DoT со SPKI в настройках Keenetic требуется имя SNI")
+                }
+                Ok(Some(_)) if !matches!(self.protocol.as_str(), "doh" | "dot") => {
+                    Some("Проверка Keenetic SPKI поддерживается для DoH и DoT")
+                }
+                _ => None,
+            }
         }
     }
 }
@@ -1234,6 +1270,28 @@ bootstrap invalid.example
         for service in services {
             assert_eq!(service.bootstrap_dns, "192.0.2.53,2001:db8::53");
         }
+    }
+
+    #[test]
+    fn keenetic_spki_decodes_a_sha256_pin_and_requires_sni_for_dot() {
+        let good = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let status = |pin: &str, sni: &str| {
+            super::parse_keenetic(&format!(
+                "proxy-tls:\nserver-tls:\n  address: 192.0.2.8\n  spki: {pin}\n  sni: {sni}\n"
+            ))
+            .remove(0)
+        };
+        let service = status(&format!("'{good}'"), "resolver.example");
+        assert_eq!(service.spki_pin(), Ok(Some([0; 32])));
+        assert_eq!(service.verification_limitation(), None);
+        assert!(
+            status(good, "")
+                .verification_limitation()
+                .unwrap()
+                .contains("SNI")
+        );
+        assert!(status(&good[..43], "resolver.example").spki_pin().is_err());
+        assert!(status("Zm9v", "resolver.example").spki_pin().is_err());
     }
 
     #[test]

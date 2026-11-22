@@ -686,8 +686,9 @@ pub(crate) fn trusted_dns_tls_connection(
     wire_len: Option<usize>,
     alpn: &[Vec<u8>],
     roots: Arc<RootCertStore>,
+    pin: Option<[u8; 32]>,
 ) -> Result<rustls::ClientConnection, String> {
-    let config = trusted_dns_tls_config(tls12, wire_len, alpn, roots)?;
+    let config = trusted_dns_tls_config(tls12, wire_len, alpn, roots, pin)?;
     let name = ServerName::try_from(name.to_owned()).map_err(|_| "DNS: недопустимое имя TLS")?;
     rustls::ClientConnection::new(config, name).map_err(|error| format!("DNS: TLS config: {error}"))
 }
@@ -697,22 +698,120 @@ fn trusted_dns_tls_config(
     wire_len: Option<usize>,
     alpn: &[Vec<u8>],
     roots: Arc<RootCertStore>,
+    pin: Option<[u8; 32]>,
 ) -> Result<Arc<rustls::ClientConfig>, String> {
     let versions = if tls12 {
         &[&rustls::version::TLS12][..]
     } else {
         &[&rustls::version::TLS13, &rustls::version::TLS12][..]
     };
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_protocol_versions(versions)
-    .map_err(|error| format!("DNS: TLS config: {error}"))?
-    .with_root_certificates(roots)
+    let provider = rustls::crypto::ring::default_provider();
+    let algorithms = provider.signature_verification_algorithms;
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(versions)
+        .map_err(|error| format!("DNS: TLS config: {error}"))?;
+    let mut config = match pin {
+        Some(pin) => builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(DnsSpkiVerifier::new(pin, algorithms))),
+        None => builder.with_root_certificates(roots),
+    }
     .with_no_client_auth();
     config.alpn_protocols = alpn.to_vec();
     config.r2o_client_hello_wire_len = wire_len;
     Ok(Arc::new(config))
+}
+
+#[derive(Debug)]
+pub(crate) struct DnsSpkiVerifier {
+    pin: [u8; 32],
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl DnsSpkiVerifier {
+    pub(crate) fn new(
+        pin: [u8; 32],
+        algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+    ) -> Self {
+        Self { pin, algorithms }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for DnsSpkiVerifier {
+    fn verify_server_cert(
+        &self,
+        leaf: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        name: &ServerName<'_>,
+        _ocsp: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        use rustls::{CertificateError, Error::InvalidCertificate};
+        use sha2::{Digest, Sha256};
+        let bad_encoding = InvalidCertificate(CertificateError::BadEncoding);
+        let (rest, cert) =
+            x509_parser::parse_x509_certificate(leaf.as_ref()).map_err(|_| bad_encoding.clone())?;
+        if !rest.is_empty() {
+            return Err(bad_encoding);
+        }
+        // Keenetic доверяет настроенному ключу конечного сертификата.
+        let digest: [u8; 32] = Sha256::digest(cert.tbs_certificate.subject_pki.raw).into();
+        if digest != self.pin {
+            return Err(InvalidCertificate(CertificateError::Other(
+                rustls::OtherError(Arc::new(std::io::Error::other(
+                    "SPKI сертификата DNS-сервера не совпадает с настройкой",
+                ))),
+            )));
+        }
+        let now = i64::try_from(now.as_secs())
+            .ok()
+            .and_then(|seconds| x509_parser::time::ASN1Time::from_timestamp(seconds).ok())
+            .ok_or(CertificateError::Expired)?;
+        if now < cert.validity().not_before {
+            return Err(CertificateError::NotValidYet.into());
+        }
+        if now > cert.validity().not_after {
+            return Err(CertificateError::Expired.into());
+        }
+        if cert
+            .extended_key_usage()
+            .map_err(|_| bad_encoding.clone())?
+            .is_some_and(|usage| !usage.value.any && !usage.value.server_auth)
+            || cert
+                .key_usage()
+                .map_err(|_| bad_encoding)?
+                .is_some_and(|usage| !usage.value.digital_signature())
+        {
+            return Err(CertificateError::InvalidPurpose.into());
+        }
+        rustls::client::verify_server_name(
+            &rustls::server::ParsedCertificate::try_from(leaf)?,
+            name,
+        )?;
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, signature, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, signature, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
 }
 
 fn tls_connect(
@@ -721,8 +820,9 @@ fn tls_connect(
     alpn: &[Vec<u8>],
     deadline: Instant,
     roots: Arc<RootCertStore>,
+    pin: Option<[u8; 32]>,
 ) -> Result<DnsTlsStream, (DnsHealthFailure, String)> {
-    let mut connection = trusted_dns_tls_connection(name, false, None, alpn, roots)
+    let mut connection = trusted_dns_tls_connection(name, false, None, alpn, roots, pin)
         .map_err(|error| (DnsHealthFailure::Configuration, error))?;
     let mut stream = stream;
     while connection.is_handshaking() {
@@ -816,6 +916,7 @@ pub(crate) fn connect_doh_tls(
     wire_len: Option<usize>,
     deadline: Instant,
     roots: Arc<RootCertStore>,
+    pin: Option<[u8; 32]>,
 ) -> Result<DohTls, (DnsHealthFailure, String)> {
     let configuration = |error| (DnsHealthFailure::Configuration, error);
     let local = |error: std::io::Error| (DnsHealthFailure::Local, error.to_string());
@@ -824,6 +925,7 @@ pub(crate) fn connect_doh_tls(
         wire_len,
         &[b"h2".to_vec(), b"http/1.1".to_vec()],
         roots,
+        pin,
     )
     .map_err(configuration)?;
     let name = ServerName::try_from(name.to_owned())
@@ -999,6 +1101,7 @@ fn probe_doh(
     mark: Option<u32>,
     deadline: Instant,
     roots: Arc<RootCertStore>,
+    pin: Option<[u8; 32]>,
 ) -> DnsHealthResult {
     let mut result = DnsHealthResult::default();
     if let Err(reason) = doh_validate(service) {
@@ -1030,7 +1133,7 @@ fn probe_doh(
         service.path.as_str()
     };
     let message = dns_query_message(DNS_QUERY_ID_DOH);
-    let mut stream = match connect_doh_tls(stream, name, false, None, deadline, roots) {
+    let mut stream = match connect_doh_tls(stream, name, false, None, deadline, roots, pin) {
         Ok(DohTls::Http1(tls)) => {
             result.tls_handshake = true;
             tls
@@ -1110,6 +1213,7 @@ fn probe_dot(
     mark: Option<u32>,
     deadline: Instant,
     roots: Arc<RootCertStore>,
+    pin: Option<[u8; 32]>,
 ) -> DnsHealthResult {
     let mut result = DnsHealthResult::default();
     let address = match resolve_service(service) {
@@ -1130,7 +1234,7 @@ fn probe_dot(
     } else {
         service.sni.as_str()
     };
-    let mut stream = match tls_connect(stream, name, &[b"dot".to_vec()], deadline, roots) {
+    let mut stream = match tls_connect(stream, name, &[b"dot".to_vec()], deadline, roots, pin) {
         Ok(tls) => {
             result.tls_handshake = true;
             tls
@@ -1533,6 +1637,12 @@ pub(crate) fn probe_dns_health_with_roots(
     if let Some(reason) = service.verification_limitation() {
         return DnsHealthResult::default().fail(DnsHealthFailure::Configuration, reason);
     }
+    let pin = match service.spki_pin() {
+        Ok(pin) => pin,
+        Err(reason) => {
+            return DnsHealthResult::default().fail(DnsHealthFailure::Configuration, reason);
+        }
+    };
     let started = Instant::now();
     let deadline = match deadline_from(timeout) {
         Ok(deadline) => deadline,
@@ -1545,9 +1655,9 @@ pub(crate) fn probe_dns_health_with_roots(
         }
     };
     let mut result = if service.protocol.eq_ignore_ascii_case("doh") {
-        probe_doh(service, mark, deadline, roots)
+        probe_doh(service, mark, deadline, roots, pin)
     } else if service.protocol.eq_ignore_ascii_case("dot") {
-        probe_dot(service, mark, deadline, roots)
+        probe_dot(service, mark, deadline, roots, pin)
     } else if service.protocol.eq_ignore_ascii_case("doq")
         || service.protocol.eq_ignore_ascii_case("doh3")
     {
@@ -1819,6 +1929,36 @@ mod tests {
     }
 
     #[test]
+    fn matching_dns_spki_still_requires_valid_name_and_dates() {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::UnixTime;
+        use sha2::{Digest, Sha256};
+
+        let (_, der) = test_server_config();
+        let (_, cert) = x509_parser::parse_x509_certificate(der.as_ref()).unwrap();
+        let pin = Sha256::digest(cert.tbs_certificate.subject_pki.raw).into();
+        let verifier = DnsSpkiVerifier::new(
+            pin,
+            rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        );
+        let check = |name, seconds| {
+            let name = ServerName::try_from(name).unwrap();
+            let now = UnixTime::since_unix_epoch(Duration::from_secs(seconds));
+            verifier.verify_server_cert(&der, &[], &name, &[], now)
+        };
+        assert!(check("localhost", 1_800_000_000).is_ok());
+        assert!(check("other.example", 1_800_000_000).is_err());
+        assert_eq!(
+            check("localhost", 0).unwrap_err(),
+            rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidYet)
+        );
+        assert_eq!(
+            check("localhost", 253_402_300_799).unwrap_err(),
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired)
+        );
+    }
+
+    #[test]
     fn dns_health_rejects_untrusted_tls_and_missing_bootstrap() {
         let (config, _) = test_server_config();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1942,25 +2082,39 @@ mod tests {
 
     #[test]
     fn loopback_dot_health_returns_valid_length_prefixed_reply() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
         use std::net::TcpListener;
         let (config, cert) = test_server_config();
+        let (_, leaf) = x509_parser::parse_x509_certificate(cert.as_ref()).unwrap();
+        let good_pin = Sha256::digest(leaf.tbs_certificate.subject_pki.raw);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            let mut stream = rustls::StreamOwned::new(
-                rustls::ServerConnection::new(Arc::new(config)).unwrap(),
-                socket,
-            );
-            let mut query = [0u8; 31];
-            stream.read_exact(&mut query).unwrap();
-            assert_eq!(&query[..2], &[0, 29]);
-            let reply = reply_for(DNS_QUERY_ID_DOT);
-            let mut frame = Vec::with_capacity(reply.len() + 2);
-            frame.extend_from_slice(&(reply.len() as u16).to_be_bytes());
-            frame.extend_from_slice(&reply);
-            stream.write_all(&frame).unwrap();
-            stream.flush().unwrap();
+            let config = Arc::new(config);
+            for valid in [true, true, false] {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut stream = rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(Arc::clone(&config)).unwrap(),
+                    socket,
+                );
+                let mut query = [0u8; 31];
+                if !valid {
+                    assert!(stream.read_exact(&mut query).is_err());
+                    continue;
+                }
+                stream.read_exact(&mut query).unwrap();
+                assert_eq!(&query[..2], &[0, 29]);
+                let reply = reply_for(DNS_QUERY_ID_DOT);
+                stream
+                    .write_all(&(reply.len() as u16).to_be_bytes())
+                    .unwrap();
+                stream.write_all(&reply).unwrap();
+                stream.flush().unwrap();
+            }
         });
         let service = DnsService {
             protocol: "dot".into(),
@@ -1972,14 +2126,33 @@ mod tests {
             port,
             keenetic: None,
         };
+        let pinned_service = |pin: &[u8]| {
+            let pin = base64::engine::general_purpose::STANDARD.encode(pin);
+            r2k_core::dns_config::parse_keenetic(&format!(
+                "proxy-tls:\nserver-tls:\n  address: 127.0.0.1\n  port: {port}\n  sni: localhost\n  spki: {pin}\n"
+            )).remove(0)
+        };
         let mut roots = RootCertStore::empty();
         roots.add(cert).unwrap();
-        let result =
-            probe_dns_health_with_roots(&service, None, Duration::from_secs(3), Arc::new(roots));
+        let timeout = Duration::from_secs(3);
+        let roots = Arc::new(roots);
+        for result in [
+            probe_dns_health_with_roots(&service, None, timeout, Arc::clone(&roots)),
+            probe_dns_health(&pinned_service(&good_pin), None, timeout),
+        ] {
+            assert!(result.tcp_reachable, "{}", result.reason);
+            assert!(result.tls_handshake, "{}", result.reason);
+            assert!(result.dns_reply, "{}", result.reason);
+        }
+        let rejected = probe_dns_health_with_roots(&pinned_service(&[0; 32]), None, timeout, roots);
+        assert_eq!(
+            rejected.failure,
+            Some(DnsHealthFailure::Certificate),
+            "{rejected:?}"
+        );
+        assert!(rejected.reason.contains("SPKI"));
+        assert!(!rejected.dns_reply);
         server.join().unwrap();
-        assert!(result.tcp_reachable, "{}", result.reason);
-        assert!(result.tls_handshake, "{}", result.reason);
-        assert!(result.dns_reply, "{}", result.reason);
     }
 
     #[test]
