@@ -14,7 +14,7 @@
 
 Проверка через установленный Playwright — `node prototype/panel/redesign.cjs` при работающем preview. Параметр `--record` сохраняет короткую запись через FFmpeg из PATH или по пути `R2O_CAPTURE_FFMPEG`. Скриншоты и видео появляются в `captures/redesign`.
 
-Вариант карточки подбора открывается по параметру `search-ui=1`. [Живой сценарий](http://127.0.0.1:4187/?search-ui=1&episode=live), [проверка](http://127.0.0.1:4187/?search-ui=1&episode=plan), [применённый план](http://127.0.0.1:4187/?search-ui=1&episode=applied) и [таймаут](http://127.0.0.1:4187/?search-ui=1&episode=failed) используют демонстрационные данные. Проверка и снимки карточки — `node prototype/panel/search-card.cjs`.
+Карточка подбора использует ресурсы рабочей панели. [Живой сценарий](http://127.0.0.1:4187/?search-ui=1&episode=live), [проверка](http://127.0.0.1:4187/?search-ui=1&episode=plan), [применённый план](http://127.0.0.1:4187/?search-ui=1&episode=applied) и [таймаут](http://127.0.0.1:4187/?search-ui=1&episode=failed) используют демонстрационные данные. Проверка и снимки карточки — `node prototype/panel/search-card.cjs`.
 
 Из корня репозитория запустите `node prototype/panel/preview.mjs`. Сборка берёт HTML, CSS, шрифты и скрипты из локального Git-объекта `64cf01b0` с обновлённой диагностикой. Оба патча применяются к копии панели в каталоге сборки. Параметр `--build` собирает файлы без запуска сервера.
 

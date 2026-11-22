@@ -167,17 +167,6 @@
     }).join(" · ");
   }
 
-  /* Кандидат плана — техническая строка. В карточке показываем только
-     первый приём и число остальных; полный текст раскрывается по клику. */
-  function candidateGist(text) {
-    var value = str(text).trim().replace(/^план\s+(?:поставлен|применён|применен|принят)\s*:\s*/i, "");
-    var parts = value.split(/\s*·\s*/).filter(Boolean);
-    if (!parts.length) return value;
-    var first = parts[0];
-    if (first.length > 36) first = first.slice(0, 35) + "…";
-    return parts.length > 1 ? first + " · ещё " + (parts.length - 1) : first;
-  }
-
   function describePlan(text) {
     var anchors = { sni_middle: "середины имени сервера (SNI)", sni_start: "начала имени сервера",
       sni_end: "конца имени сервера", hello_middle: "середины приветствия", record_end: "конца записи", payload_start: "начала данных" };
@@ -2197,7 +2186,7 @@
         if (listNode.children[i].__r2oKey === key) { row = listNode.children[i]; break; }
       }
       if (!row) {
-        row = self.searchRow(s);
+        row = self.searchRow();
         row.__r2oKey = key;
         entered.push(row);
       }
@@ -2286,61 +2275,30 @@
     for (var i = 0; i < waits.length; i++) waits[i].textContent = waits[i].__since ? "ждёт " + clock(now - waits[i].__since) : "";
   };
 
-  function searchArc(cx, cy, radius, start, end) {
-    var rad = function (deg) { return (deg - 90) * Math.PI / 180; };
-    var sx = cx + radius * Math.cos(rad(start)), sy = cy + radius * Math.sin(rad(start));
-    var ex = cx + radius * Math.cos(rad(end)), ey = cy + radius * Math.sin(rad(end));
-    var large = Math.abs(end - start) > 180 ? 1 : 0;
-    return "M" + sx.toFixed(2) + " " + sy.toFixed(2) + " A" + radius + " " + radius + " 0 " + large + " 1 " + ex.toFixed(2) + " " + ey.toFixed(2);
-  }
+  var SEARCH_MARKS = {
+    queued: "M12 6v6l3 2", running: "M4 12h3l2-4 3 8 3-7 2 3h3",
+    saved: "m6.5 12 3.5 3.5 7.5-8", partial: "M7 12h10", failed: "m8 8 8 8m0-8-8 8"
+  };
+  var SEARCH_RESULTS = new Map([
+    ["Установлено транспортное соединение", "Соединение установлено"],
+    ["Подтверждён ответ сервера", "Сервер ответил на проверку"],
+    ["Получен прикладной ответ", "Сервис ответил на проверку"],
+    ["Истекло время ожидания ответа", "Ответ не пришёл вовремя"]
+  ]);
 
-  /* Прибор подбора: семь сегментов, один центральный знак этапа и живой
-     пунктир только на текущем сегменте. Движение показывает, где именно
-     идёт работа, а не украшает карточку. */
   function searchVisual(doc) {
     var wrap = el(doc, "div", "search-visual");
     wrap.setAttribute("aria-hidden", "true");
-    var svg = svgEl(doc, "svg", { viewBox: "0 0 64 64" }, "probe-dial");
-    var segments = svgEl(doc, "g", {}, "probe-segments");
-    var segmentPaths = [];
-    for (var index = 0; index < 7; index += 1) {
-      var start = index * (360 / 7) + 3.2;
-      var end = (index + 1) * (360 / 7) - 3.2;
-      var path = searchArc(32, 32, 25, start, end);
-      segmentPaths.push(path);
-      var segment = svgEl(doc, "path", { d: path }, "probe-segment");
-      segment.setAttribute("data-stage", String(index));
-      segments.appendChild(segment);
-    }
-    svg.appendChild(segments);
-    var sweep = svgEl(doc, "g", {}, "probe-sweep");
-    sweep.appendChild(svgEl(doc, "path", { d: "M32 32 L32 7 A25 25 0 0 1 48 15 Z" }));
-    svg.appendChild(sweep);
-    var glyphs = svgEl(doc, "g", {}, "probe-glyphs");
-    TRACK_ICONS.forEach(function (d, index) {
-      var group = svgEl(doc, "g", {}, "probe-glyph");
-      group.setAttribute("data-glyph", String(index));
-      group.appendChild(svgEl(doc, "path", { d: d, transform: "translate(22.8 22.8) scale(1.15)" }));
-      glyphs.appendChild(group);
-    });
-    var voice = svgEl(doc, "g", {}, "probe-glyph");
-    voice.setAttribute("data-glyph", "voice");
-    voice.appendChild(svgEl(doc, "path", { d: VOICE_ICONS[0], transform: "translate(22.8 22.8) scale(1.15)" }));
-    glyphs.appendChild(voice);
-    svg.appendChild(glyphs);
-    var pulse = svgEl(doc, "circle", { cx: "32", cy: "32", r: "24" }, "probe-pulse");
-    svg.appendChild(pulse);
-    var code = el(doc, "span", "search-stage-code", "—");
-    wrap.append(svg, code);
-    wrap.__code = code;
-    wrap.__segments = segments;
-    wrap.__segmentPaths = segmentPaths;
-    wrap.__glyphs = glyphs;
-    wrap.__pulse = pulse;
+    var svg = svgEl(doc, "svg", { viewBox: "0 0 48 48" }, "status-mark");
+    var ring = { cx: 24, cy: 24, r: 19, pathLength: 100 };
+    wrap.__glyph = svgEl(doc, "path", { pathLength: 1, transform: "translate(12 12)" }, "status-mark-glyph");
+    wrap.__code = el(doc, "span", "search-stage-code", "—");
+    svg.append(svgEl(doc, "circle", ring, "status-mark-rail"), svgEl(doc, "circle", ring, "status-mark-arc"), wrap.__glyph);
+    wrap.append(svg, wrap.__code);
     return wrap;
   }
 
-  App.prototype.searchRow = function (s) {
+  App.prototype.searchRow = function () {
     var doc = this.doc;
     var li = el(doc, "li", "search");
     li.__parts = {
@@ -2350,15 +2308,17 @@
       clock: el(doc, "div", "search-clock"),
       phase: el(doc, "p", "search-phase"),
       question: el(doc, "p", "search-question"),
+      call: el(doc, "div", "search-call"),
+      callIcon: el(doc, "span", "search-call-icon"),
       plan: el(doc, "details", "search-plan-details"),
       planSummary: el(doc, "span", "search-plan-summary"),
       planBody: el(doc, "div", "search-plan-body"),
-      proof: el(doc, "p", "search-proof"),
       track: el(doc, "div", "track"),
       trackNote: el(doc, "p", "track-note")
     };
-    li.__parts.plan.hidden = true;
-    li.__parts.phase.setAttribute("role", "status");
+    var p = li.__parts;
+    p.plan.hidden = true;
+    p.phase.setAttribute("role", "status");
     var planHead = el(doc, "summary");
     planHead.appendChild(li.__parts.planSummary);
     add(li.__parts.plan, planHead, li.__parts.planBody);
@@ -2368,14 +2328,50 @@
     li.__parts.sweep = el(doc, "span", "search-sweep");
     li.__parts.sweepInner = el(doc, "span", "");
     li.__parts.sweep.appendChild(li.__parts.sweepInner);
-    li.__parts.question.hidden = true;
-    add(li, li.__parts.visual, li.__parts.target, li.__parts.clock, li.__parts.meta, li.__parts.phase, li.__parts.question, li.__parts.plan, li.__parts.proof, li.__parts.sweep, li.__parts.track, li.__parts.trackNote);
-    void s;
+    p.question.hidden = true;
+    p.callIcon.setAttribute("aria-hidden", "true");
+    var callFill = el(doc, "span", "search-call-fill");
+    callFill.setAttribute("aria-hidden", "true");
+    p.call.append(callFill, p.callIcon, p.phase, p.clock, p.question);
+    add(li, p.visual, p.target, p.meta, p.call, p.plan, p.sweep, p.track, p.trackNote);
     return li;
   };
 
   function searchText(value) {
     return str(value).replace(/(запасной перебор) d2o\b/gi, "$1").replace(/\bd2o\b/gi, "R2O");
+  }
+
+  function updateSearchMark(doc, row, parts, track, state) {
+    var key = state + ":" + (track ? track.at + ":" + track.voice : "");
+    if (parts.markKey === key) return;
+    var moved = parts.markKey !== undefined;
+    parts.markKey = key;
+    row.dataset.callState = state;
+    row.style.setProperty("--call-progress", state === "saved" ? 1 : track ? track.at / track.steps.length : 0);
+    parts.visual.__code.textContent = track ? (track.voice ? "голос" :
+      String(track.at + 1).padStart(2, "0") + "/" + String(track.steps.length).padStart(2, "0")) : "—";
+    var glyph = parts.visual.__glyph;
+    glyph.setAttribute("d", SEARCH_MARKS[state]);
+    var running = state === "queued" || state === "running";
+    var stageIcon = running && track && (track.voice ? VOICE_ICONS : TRACK_ICONS)[track.at];
+    var icon = svgEl(doc, "svg", { viewBox: stageIcon ? "0 0 16 16" : "0 0 24 24" });
+    icon.appendChild(svgEl(doc, "path", { d: stageIcon || SEARCH_MARKS[state] }));
+    parts.callIcon.replaceChildren(icon);
+    if (parts.markMotion) parts.markMotion.revert();
+    if (parts.sweepMotion) parts.sweepMotion.revert();
+    if (!Motion.on() || !moved) return;
+    var timeline = Motion.g.timeline().fromTo(parts.callIcon, { opacity: .2, y: 3 },
+      { opacity: 1, y: 0, duration: .22, ease: "power2.out", clearProps: "transform,opacity" });
+    if (!running) timeline.fromTo(glyph, { strokeDashoffset: 1 },
+      { strokeDashoffset: 0, duration: .24, ease: "power2.out", clearProps: "strokeDashoffset" }, 0);
+    if (state === "failed") timeline.to(parts.call, { keyframes: { x: [-2, 2, -1, 0] }, duration: .2, clearProps: "transform" }, 0);
+    parts.markMotion = Motion.track(timeline);
+    if (state === "saved") {
+      var width = row.clientWidth || 640;
+      parts.sweepMotion = Motion.track(Motion.g.timeline()
+        .fromTo(parts.sweepInner, { x: -width * .35, opacity: 0 }, { x: width * .1, opacity: .7, duration: .14, ease: "power2.out" })
+        .to(parts.sweepInner, { x: width * 1.1, opacity: 0, duration: .28, ease: "power2.in" }));
+    }
   }
 
   App.prototype.updateSearch = function (li, s) {
@@ -2394,7 +2390,10 @@
     }
     var phase = searchText(s.phase) || "этап не указан";
     var since = parseTime(s.since);
-    if (li.dataset.outcome && !s.outcome) li.__since = since;
+    if (li.dataset.outcome && !s.outcome) {
+      li.__since = since;
+      p.plan.open = false;
+    }
     else if (since) li.__since = li.__since ? Math.min(li.__since, since) : since;
     li.__finished = parseTime(s.completed_at);
     li.__resultAt = searchResultTime(s);
@@ -2404,7 +2403,11 @@
     li.__counters = counters.join(" · ");
     this.updateClock(li);
 
-    var phaseText = phase.charAt(0).toUpperCase() + phase.slice(1);
+    var savedResult = s.outcome === "saved", partialResult = s.outcome === "partial", failedResult = s.outcome === "closed";
+    var verifiedLevel = s.verified ? num(s.verify_level) : null;
+    var phaseText = savedResult ? (verifiedLevel === 3 ? "Обход проверен" : "План сохранён") :
+      partialResult ? "Проверено частично" : failedResult ? "Обход не подтверждён" :
+      phase === "проверяем выведенный план" ? "Проверяем план" : phase.charAt(0).toUpperCase() + phase.slice(1);
     if (p.phase.textContent !== phaseText) {
       if (p.phase.textContent && Motion.on()) {
         if (p.phaseMotion) p.phaseMotion.kill();
@@ -2415,38 +2418,55 @@
         p.phase.textContent = phaseText;
       }
     }
-    var savedId = str(s.plan_id);
-    var candidate = str(s.plan) || str(s.candidate) || savedId;
-    var savedResult = s.outcome === "saved", partialResult = s.outcome === "partial";
     var exactApplied = s.probe_applied === true;
+    var savedId = str(s.plan_id) || (exactApplied ? str(s.applied_plan_id) : "");
+    var candidate = str(s.plan) || str(s.candidate) || savedId;
     li.dataset.outcome = str(s.outcome);
-    p.plan.hidden = !candidate;
-    if (candidate) {
+    var application = searchText(s.application);
+    var lastResult = searchText(s.last_result);
+    var reportedResult = SEARCH_RESULTS.get(lastResult.replace(/\.$/, ""));
+    var checked = ["", "Соединение установлено", "Сервер ответил на проверку", "Сервис ответил на проверку"];
+    var findings = [
+      ["Применение", exactApplied ? "Применён для проверки" :
+        s.probe_applied === false && (s.completed_at || candidate || application) ? "Не подтверждено" : ""],
+      ["Результат проверки", reportedResult || checked[verifiedLevel]],
+      ["Состояние пробы", application === reportedResult ? "" : application],
+      ["Подробности зонда", reportedResult || lastResult === application ? "" : lastResult]
+    ].filter(function (fact) { return !!fact[1]; });
+    p.plan.hidden = !candidate && !findings.length;
+    if (!p.plan.hidden) {
       var planId = savedId;
-      var owner = list(this.m && this.m.boxes).find(function (box) {
+      var owner = planId && list(this.m && this.m.boxes).find(function (box) {
         return list(box.plans).some(function (entry) { return entry.id === planId; });
       });
       var saved = owner && owner.plans.find(function (entry) { return entry.id === planId; });
       var applied = savedResult || partialResult || exactApplied;
       var raw = saved ? str(saved.text) : candidate === planId ? "" : candidate;
-      var gist = raw && (raw.includes("\n") ? planGist(raw) : candidateGist(raw)) || saved && saved.human || "Состав плана не получен";
-      var label = savedResult ? "Сохранено" : partialResult ? "Частичный обход" : exactApplied ? "APPLIED · проба" : s.completed_at ? "Кандидат" : "Проверяем";
-      if (applied && raw && raw.includes("\n")) {
-        var methods = describePlan(raw);
-        if (methods.length) gist = methods.slice(0, 2).join(" ") + (methods.length > 2 ? " Ещё в подробностях." : "");
-      }
+      var methods = raw.includes("\n") ? describePlan(raw) : [];
+      var gist = methods.length ? methods.slice(0, 2).join(" ") : saved && saved.human ||
+        (candidate ? "Состав плана и параметры проверки" : "Подробности проверки");
+      var label = savedResult ? "Сохранено" : partialResult ? "Частичный обход" :
+        exactApplied ? "Применён в проверке" : !candidate ? "Проверка" : s.completed_at ? "Кандидат" : "Проверяем";
       p.plan.dataset.label = applied && !partialResult ? "Применено" : label;
       if (p.planSummary.textContent !== gist) p.planSummary.textContent = gist;
-      var planKey = JSON.stringify([candidate, planId, label, s.transport, saved, owner && owner.id]);
+      var planKey = JSON.stringify([candidate, planId, label, s.transport, saved, owner && owner.id, findings]);
       if (p.planBody.__key !== planKey) {
         p.planBody.__key = planKey;
-        var facts = el(doc, "dl", "candidate-facts");
-        function fact(label, value) { add(facts, el(doc, "dt", "", label), el(doc, "dd", "", value)); }
-        if (planId) fact("План каталога", planId);
-        fact("Транспорт", saved && saved.proto ? str(saved.proto).toUpperCase() : shapeLabel(s.shape, s.transport));
-        if (owner) fact("Коробка", str(owner.id));
-        p.planBody.replaceChildren(facts);
-        if (raw && raw.includes("\n") && (!applied || methods.length > 2)) add(p.planBody, planExplanation(doc, raw));
+        p.planBody.replaceChildren();
+        if (findings.length) {
+          var evidence = el(doc, "dl", "search-findings");
+          findings.forEach(function (fact) { add(evidence, el(doc, "dt", "", fact[0]), el(doc, "dd", "", fact[1])); });
+          p.planBody.appendChild(evidence);
+        }
+        if (candidate) {
+          var facts = el(doc, "dl", "candidate-facts");
+          function fact(label, value) { add(facts, el(doc, "dt", "", label), el(doc, "dd", "", value)); }
+          if (planId) fact("План каталога", planId);
+          fact("Транспорт", saved && saved.proto ? str(saved.proto).toUpperCase() : shapeLabel(s.shape, s.transport));
+          if (owner) fact("Коробка", str(owner.id));
+          p.planBody.appendChild(facts);
+        }
+        if (methods.length > 2) add(p.planBody, planExplanation(doc, raw));
         if (raw && raw !== gist) p.planBody.appendChild(el(doc, "pre", "candidate-source", raw));
       }
       var planHead = p.plan.querySelector("summary");
@@ -2458,54 +2478,22 @@
     }
     var classifying = s.phase === TRACK[2].phases[0] && !!str(s.question);
     p.question.hidden = !classifying;
-    var qText = classifying ? "Вопрос коробке: " + str(s.question) : "";
+    var qText = classifying ? "Что проверяем: " + str(s.question) : "";
     if (p.question.textContent !== qText) p.question.textContent = qText;
     var tr = trackFor(s.phase);
     if (savedResult) tr = { steps: TRACK, at: TRACK.length - 1, voice: false };
     if (partialResult) tr = { steps: TRACK, at: TRACK.length - 2, voice: false };
-    var proof = exactApplied ? "Точный APPLIED получен для пробы." : searchText(s.application);
-    var level = ["", "Установлено транспортное соединение.", "Подтверждён ответ сервера.", "Получен прикладной ответ."];
-    var proofText = [proof, searchText(s.last_result) || (s.verified && level[num(s.verify_level)])]
-      .filter(Boolean).map(function (line) { return line.replace(/\.$/, ""); }).join(" · ");
-    if (p.proof.textContent !== proofText) p.proof.textContent = proofText;
-    p.proof.hidden = !proofText;
+    if (failedResult && (!tr || /^подбор заверш/i.test(phase) || (tr.steps === TRACK && tr.at === TRACK.length - 1))) {
+      tr = p.lastTrack || null;
+    }
+    p.lastTrack = tr;
     var stageKey = tr ? (tr.voice ? "voice" : String(tr.at)) : "idle";
-    var oldStage = li.__stage;
-    li.__stage = stageKey;
     li.setAttribute("data-stage", stageKey);
     li.setAttribute("data-voice", String(!!tr && tr.voice));
-    if (p.visual && p.visual.__code) {
-      var stageCode = tr ? (tr.voice ? "голос" : ("0" + (tr.at + 1)).slice(-2) + "/" + ("0" + tr.steps.length).slice(-2)) : "—";
-      var codeChanged = p.visual.__code.textContent !== stageCode;
-      if (codeChanged) p.visual.__code.textContent = stageCode;
-      var visualStage = tr ? tr.at : 0;
-      var speeds = ["4.5s", "4s", "2.8s", "4s", "3.4s", "2.2s", "0s"];
-      p.visual.style.setProperty("--probe-speed", tr && !tr.voice ? (speeds[tr.at] || "3.4s") : "3s");
-      var segments = p.visual.__segments.children;
-      for (var si = 0; si < segments.length; si += 1) {
-        segments[si].setAttribute("data-state", si < visualStage ? "past" : si === visualStage ? "now" : "future");
-      }
-      var glyphs = p.visual.__glyphs.children;
-      for (var gi = 0; gi < glyphs.length; gi += 1) {
-        var on = glyphs[gi].getAttribute("data-glyph") === stageKey;
-        glyphs[gi].classList.toggle("is-on", on);
-      }
-      if (oldStage !== undefined && oldStage !== stageKey && Motion.on()) {
-        if (p.dialMotion) p.dialMotion.kill();
-        p.dialMotion = Motion.track(Motion.g.fromTo(p.visual.__pulse, { attr: { r: 16 }, opacity: .48 }, {
-          attr: { r: 28 }, opacity: 0, duration: .50, ease: "sine.out", clearProps: "opacity"
-        }));
-        if (codeChanged) Motion.g.fromTo(p.visual.__code, { y: 2, opacity: 0 }, { y: 0, opacity: 1, duration: 0.24, ease: "power2.out", clearProps: "transform,opacity" });
-        if (savedResult) {
-          var width = li.getBoundingClientRect().width || 640;
-          if (p.sweepMotion) p.sweepMotion.kill();
-          p.sweepMotion = Motion.track(Motion.g.timeline()
-            .fromTo(p.sweepInner, { x: -width * .35, opacity: 0 }, { x: width * .1, opacity: .7, duration: .14, ease: "power2.out" })
-            .to(p.sweepInner, { x: width * 1.1, opacity: 0, duration: .28, ease: "power2.in" }));
-        }
-      }
-    }
-    li.setAttribute("data-done", String(!!tr && !tr.voice && tr.at === TRACK.length - 1));
+    var done = savedResult || (!s.outcome && !!tr && !tr.voice && tr.at === TRACK.length - 1);
+    var state = done ? "saved" : partialResult ? "partial" : failedResult ? "failed" : stageKey === "0" ? "queued" : "running";
+    updateSearchMark(doc, li, p, tr, state);
+    li.setAttribute("data-done", String(done));
     if (p.trackNote) {
       var noteText = tr ? tr.steps[tr.at].label + " · этап " + (tr.at + 1) + " из " + tr.steps.length : "этап не распознан";
       if (p.trackNote.textContent !== noteText) p.trackNote.textContent = noteText;

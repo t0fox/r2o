@@ -712,20 +712,45 @@ esac
   await waitFor(() => evaluate("document.querySelector('.bindings tr[data-enabled] .t')?.textContent === 'Голос Discord'"), "голосовая привязка в коробке");
   assert.equal(await evaluate("document.querySelectorAll('.bindings .proof-note').length"), 0, "голосовая привязка не добавляет заметку о RTP, которой нет в d2o");
   assert.equal(await evaluate("[...document.querySelectorAll('.search-plan-details')].some(plan => !plan.hidden)"), true, "карточка Discovery раскрывает сведения о плане");
-  await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('Вопрос коробке: whole'))"), "текущий вопрос классификатора в карточке Discovery");
+  await waitFor(() => evaluate("[...document.querySelectorAll('.search-call .search-question')].some((row) => !row.hidden && row.textContent.includes('Что проверяем: whole'))"), "текущий вопрос классификатора в карточке Discovery");
   assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 4, "активные стадии представлены карточками, очередь выделена отдельно");
   assert.equal(await evaluate("document.querySelectorAll('#searches .search-visual').length"), 4, "у каждой карточки поиска есть сцена текущего этапа");
   assert.equal(await evaluate("[...document.querySelectorAll('#searches .search')].every((row) => row.dataset.stage !== undefined && row.dataset.stage !== 'idle')"), true, "сцена поиска получает этап подбора для анимации");
   assert.equal(await evaluate("document.querySelectorAll('#searches .queue-list .queue-target').length"), 1, "ожидающие замера собраны в список D2O");
   assert.equal(await evaluate("document.querySelector('#workload-meta').textContent"), "4 в работе · 1 ждут", "ожидающая задача не входит в число работающих");
   assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('#searches .search')].find((item) => item.querySelector('.search-target')?.textContent === 'starting.example'); return row?.querySelector('.search-phase')?.textContent === 'Заводим поиск' && row.querySelector('.search-clock').textContent.includes('идёт') && !row.querySelector('.search-clock').textContent.includes('в очереди'); })()"), true, "фаза запуска совпадает с D2O и не дублирует отдельную очередь");
-  assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('.search')].find((item) => item.querySelector('.search-target')?.textContent === 'failed.example'); return row?.querySelector('.search-phase')?.textContent.startsWith('Проверяем выведенный план') && !row.querySelector('.search-proof').hidden; })()"), true, "карточка сохраняет текущую фазу и показывает причину отказа");
+  assert.equal(await evaluate(`(() => {
+    const row = [...document.querySelectorAll('.search')].find(item => item.querySelector('.search-target')?.textContent === 'failed.example');
+    const details = row.querySelector('.search-plan-details');
+    return row.dataset.callState === 'running' && row.querySelector('.search-call .search-phase').textContent === 'Проверяем план'
+      && !!row.querySelector('.status-mark') && !details.open
+      && details.querySelector('.search-findings').textContent.includes('Resource temporarily unavailable');
+  })()`), true, "ошибка отдельной пробы остаётся в подробностях активного поиска");
   assert.equal(await evaluate("[...document.querySelectorAll('.search .track')].every((track) => track.querySelectorAll('.track-step').length === 7 && track.querySelector('.track-step:last-child').textContent === 'Подтверждено')"), true, "карточка использует исходные семь этапов d2o");
   const liveSearch = liveState.searches.find((search) => search.target === "classifying.example");
   liveSearch.probes = 2;
   liveSearch.question = "split";
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('Вопрос коробке: split'))"), "автоматическое обновление вопроса и числа зондов");
+  await waitFor(() => evaluate("[...document.querySelectorAll('.search-call .search-question')].some((row) => !row.hidden && row.textContent.includes('Что проверяем: split'))"), "автоматическое обновление вопроса и числа зондов");
+  const closed = liveState.searches.find((search) => search.target === "failed.example");
+  Object.assign(closed, {
+    phase: "подбор завершился без сохранения плана", outcome: "closed", completed_at: new Date().toISOString(),
+    candidate: "", probe_applied: false,
+    last_result: "TLS-рукопожатие не завершилось: Connection reset by peer (os error 104)"
+  });
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("document.querySelector('.search[data-outcome=closed][data-call-state=failed] .search-call') !== null"),
+    "неудачный поиск показывает итог без сохранённого плана");
+  assert.deepEqual(await evaluate(`(() => {
+    const row = document.querySelector('.search[data-outcome=closed]');
+    const details = row.querySelector('.search-plan-details');
+    const closed = !details.open && !details.hidden;
+    details.querySelector('summary').click();
+    const proof = details.querySelector('.search-findings');
+    return [closed, row.dataset.stage, details.open, row.querySelector('.search-phase').textContent,
+      proof.textContent.includes('Не подтверждено'), proof.textContent.includes('Connection reset by peer (os error 104)')];
+  })()`), [true, "5", true, "Обход не подтверждён", true, true],
+  "в раскрытых деталях сохранены данные о применении и полная ошибка зонда");
   const resolved = liveState.searches.shift();
   liveState.searches.push(resolved);
   fs.writeFileSync(livePath, JSON.stringify(liveState));
@@ -740,7 +765,13 @@ esac
   liveState.boxes[0].plans.push({ id: "test-plan", text: "r2o-plan 1 5\nproto tcp tls\nsplit sni_middle +0\norder reverse" });
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("document.querySelector('#searches .search:first-child[data-outcome=saved] summary')?.dataset.mark === 'Сохранено · test-plan'"), "завершённый поиск поднялся наверх, хотя в снимке он последний");
-  assert.equal(await evaluate("document.querySelector('.search[data-outcome=saved] .search-proof').textContent.includes('Точный APPLIED получен для пробы')"), true);
+  assert.equal(await evaluate(`(() => {
+    const row = document.querySelector('.search[data-outcome=saved][data-call-state=saved]');
+    const details = row.querySelector('.search-plan-details');
+    const proof = details.querySelector('.search-findings').textContent;
+    return !details.open && proof.includes('Применён для проверки') && proof.includes('Сервис ответил на проверку')
+      && proof.includes('полный HTTPS-ответ') && !row.querySelector('.search-proof');
+  })()`), true, "подтверждение, уровень и подробный ответ помещены в карточку плана");
   assert.equal(await evaluate("document.querySelector('.search[data-outcome=saved] summary').textContent.includes('Разделяет TLS-приветствие')"), true);
   assert.equal(await evaluate("document.querySelector('.search[data-outcome=saved]').textContent.toLowerCase().includes('d2o')"), false, "старые снимки отображаются без имени донора");
   if (captureDir) {

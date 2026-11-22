@@ -118,7 +118,7 @@
           ...(searchConcept && step===2?{question:'Обрывается ли соединение после приветствия?'}:{}),
           ...(redesign && outcome?{outcome,probe_applied:outcome!=='closed',verified:outcome!=='closed',
             verify_level:outcome==='saved'?3:outcome==='partial'?1:0,last_result:outcome==='saved'?'Получен прикладной ответ':
-              outcome==='partial'?'Установлено транспортное соединение':'Истекло время ожидания ответа'}:{}),
+              outcome==='partial'?'Установлено транспортное соединение':'TLS-рукопожатие не завершилось: Connection reset by peer (os error 104)'}:{}),
           completed_at:step===6 && (showcase || (redesign && fixed))?new Date(showcase?shownAt:epoch).toISOString():null,
           since:new Date(showcase?firstStageAt:(typeof fixed==='number'?epoch:Date.now())-cycle).toISOString(),attempts:step>=4?1:0,probes:step>=5?1:0,candidate:step>=5?groups[0].plan_id:''}]:[]}};
   }
