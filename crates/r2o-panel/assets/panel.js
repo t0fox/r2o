@@ -1306,6 +1306,7 @@
     this.renderCatalog(false);
     this.renderTelegram(m);
     this.renderDnsProtection(m);
+    this.renderMetaProtection(m);
     this.renderDiagnostics(m);
     this.renderOverview(m);
     this.renderNav(m);
@@ -1430,10 +1431,81 @@
     return b;
   };
 
+  App.prototype.renderMetaProtection = function (m) {
+    var doc = this.doc, self = this, button = this.$("meta-protection-switch");
+    if (!button || !m) return;
+    var status = m.snap.meta_protection || {};
+    var busy = !!this.pending || m.snap.control_state === "running";
+    var enabled = status.enabled === true;
+    button.setAttribute("aria-checked", String(enabled));
+    button.disabled = busy || !m.snap.controls_enabled || typeof status.enabled !== "boolean";
+    button.textContent = enabled ? "ON" : "OFF";
+    button.onclick = function () { self.act(enabled ? "meta-protection-off" : "meta-protection-on"); };
+    var summary = typeof status.enabled !== "boolean" ? "Нет данных"
+      : !enabled ? "Выключена" : !status.running ? "Планировщик остановлен"
+      : status.error ? "Работает с ошибкой проверки"
+      : status.checked_at ? "Планировщик работает" : "Первая проверка";
+    var state = this.$("meta-protection-state");
+    if (state.textContent !== summary) state.textContent = summary;
+    var signature = JSON.stringify([status.families, status.sources, status.searches, enabled, Math.floor(Date.now() / 3600000)]);
+    if (this.metaSignature === signature) return;
+    this.metaSignature = signature;
+    var names = {
+      facebook: "Facebook", instagram: "Instagram", whatsapp: "WhatsApp", messenger: "Messenger",
+      threads: "Threads", quest: "Meta Quest", fbcdn: "Meta CDN"
+    };
+    var checked = function (epoch) { return epoch ? new Date(epoch * 1000).toLocaleString() : "ещё не проверено"; };
+    var families = this.$("meta-protection-families");
+    var open = Array.from(families.querySelectorAll("details[open]")).map(function (row) { return row.dataset.family; });
+    var rows = list(status.families);
+    families.replaceChildren.apply(families, Object.keys(names).map(function (key) {
+      var row = rows.find(function (family) { return family.product === key; }) || {};
+      var card = el(doc, "details", "meta-details meta-family");
+      card.dataset.family = key;
+      card.open = open.indexOf(key) !== -1;
+      var title = el(doc, "summary", "meta-family-head");
+      title.append(el(doc, "strong", "", names[key]), el(doc, "span", "mono",
+        row.checked ? "TLS " + row.verified_domains + "/" + row.checked : "Нет проверок"));
+      card.append(title);
+      card.append(el(doc, "p", "dns-summary", (row.domains || 0) + " доменов · " +
+        (row.observed || 0) + " в трафике · DNS " + (row.dns_ok || 0) + "/" + (row.checked || 0)));
+      card.append(el(doc, "p", "dns-summary", "Подтверждены IPv4 " + (row.ipv4 || 0) +
+        " · IPv6 " + (row.ipv6 || 0) + " · без подтверждения " + (row.unverified || 0) +
+        (enabled ? " · DNS-записей R2O " + (row.pinned || 0) : "")));
+      card.append(el(doc, "p", "dns-summary", "Проверка · " + checked(row.checked_at)));
+      if (row.local_dns) card.append(el(doc, "p", "dns-summary",
+        "Локальный DNS · " + row.local_dns.host + " · " + row.local_dns.status));
+      if (row.last_failure) card.append(el(doc, "p", "meta-failure",
+        row.last_failure.host + " · " + row.last_failure.detail + " · " + checked(row.last_failure.at)));
+      var details = el(doc, "ul", "meta-sources");
+      list(row.sample).forEach(function (item) {
+        var address = item.address || {};
+        details.append(el(doc, "li", "", item.host + " · " + address.ip +
+          (address.asn ? " · AS" + address.asn : "") + " · " + address.result));
+      });
+      list(status.searches).filter(function (search) { return search.product === key; }).forEach(function (search) {
+        details.append(el(doc, "li", "", search.host + " · Discovery · " +
+          [search.phase, search.plan, search.application, search.last_result].filter(Boolean).join(" · ")));
+      });
+      if (details.childElementCount) card.append(details);
+      return card;
+    }));
+    var sources = this.$("meta-protection-sources");
+    sources.replaceChildren.apply(sources, list(status.sources).map(function (source) {
+      var stale = source.synced_at && Date.now() / 1000 - source.synced_at > 86400;
+      var when = source.synced_at ? checked(source.synced_at) : "синхронизации ещё не было";
+      return el(doc, "li", "", [source.id, when, source.entries + " записей",
+        stale && "устарел", source.error, source.sha256 && "SHA-256 " + source.sha256.slice(0, 12)]
+        .filter(Boolean).join(" · "));
+    }));
+    if (!sources.childElementCount) sources.append(el(doc, "li", "", "Списки ещё не загружены."));
+  };
+
   var ENDPOINTS = {
     start: "start", stop: "stop", restart: "restart", "clear-found": "clear-found",
     "telegram-enable": "telegram-enable", "telegram-disable": "telegram-disable",
-    "telegram-check": "telegram-check"
+    "telegram-check": "telegram-check",
+    "meta-protection-on": "meta-protection-on", "meta-protection-off": "meta-protection-off"
   };
 
   /* ОПЕРАЦИИ, КОТОРЫЕ СПРАШИВАЮТ ДИАЛОГОМ.
@@ -1657,6 +1729,7 @@
     if (!ENDPOINTS[action] || this.pending) return;
     this.pending = action;
     this.renderActions();
+    this.renderMetaProtection(this.m);
     this.renderTelegram(this.m, true);
     this.win.fetch("/api/control/" + ENDPOINTS[action], { method: "POST", cache: "no-store" })
       .then(function (r) {

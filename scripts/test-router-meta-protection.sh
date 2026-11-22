@@ -1,0 +1,45 @@
+#!/bin/sh
+# Проверяет сохранение переключателя и то, что команды касаются только Meta.
+set -eu
+
+REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+TEMP=$(mktemp -d)
+trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
+
+ROOT=$TEMP/router
+STATE=$ROOT/state
+META_DISABLED=$STATE/meta-protection.disabled
+MANAGER=$TEMP/manager
+TRACE=$TEMP/trace
+export TRACE
+mkdir -p "$STATE"
+cat > "$MANAGER" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$TRACE"
+case " $* " in
+    *" --remove-meta-dns "*) exit 0 ;;
+    *) exit 2 ;;
+esac
+EOF
+chmod 0755 "$MANAGER"
+
+prepare_dirs() { mkdir -p "$STATE"; }
+meta_dns_scheduler_start() { printf 'meta start\n' >> "$TRACE"; }
+meta_dns_scheduler_stop() { printf 'meta stop\n' >> "$TRACE"; }
+
+# Вызываем штатные обработчики команд, используя имитации запуска и backend.
+eval "$(awk '/^meta_protection_(enable|disable)\(\) \{/ { print_block=1 }
+    print_block { print }
+    /^\}/ { print_block=0 }' "$REPO/router/S99r2o")"
+
+meta_protection_disable
+test "$(cat "$META_DISABLED")" = 0
+test "$(sh -c 'cat "$1/meta-protection.disabled"' sh "$STATE")" = 0
+test "$(awk 'NR == 1' "$TRACE")" = 'meta stop'
+test "$(awk 'NR == 2' "$TRACE")" = "exec --root $ROOT --component r2o-telegram -- --remove-meta-dns"
+
+meta_protection_enable
+test ! -e "$META_DISABLED"
+test "$(tail -n 1 "$TRACE")" = 'meta start'
+test "$(wc -l < "$TRACE")" -eq 3
+printf '%s\n' 'Meta Protection ON/OFF и сохранение состояния: OK'

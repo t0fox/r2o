@@ -130,6 +130,8 @@ LM_PID=$RUN/r2o-log-maintenance.pid
 PPE_ADAPTER=${R2O_PPE_ADAPTER:-$SCRIPT_DIR/r2o-ppe-deoffload.sh}
 R2O_PPE_DEOFFLOAD=${R2O_PPE_DEOFFLOAD:-1}
 CATALOG=$STATE/catalog.json
+META_DISABLED=$STATE/meta-protection.disabled
+export R2O_META_STATE_DIR="$STATE" R2O_MANAGER="$MANAGER"
 export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$PPE_ADAPTER" \
     R2O_RUNTIME_DIR="$RUNTIME" R2O_FIREWALL="$FIREWALL" R2O_DNS_MODE="$MODE" \
     R2O_MEASUREMENT_LIMIT \
@@ -329,6 +331,14 @@ component_running() {
     esac
 }
 
+telegram_auxiliary_process() {
+    aux_cmdline=$(tr '\000' ' ' < "$PROC/$1/cmdline" 2>/dev/null) || return 1
+    case " $aux_cmdline " in
+        *" --meta-dns-scheduler "*|*" --rt-proxy "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Погасить все процессы компонента, даже если pid-файл потерян или
 # перезаписан неудачным запуском. Иначе старый datapath держит NFQUEUE и
 # удалённые control-сокеты, а новый controller не может к ним подключиться.
@@ -346,6 +356,7 @@ stop_component_processes() {
             esac
             pid=${link#"$PROC"/}
             pid=${pid%/exe}
+            if [ "$component" = r2o-telegram ] && telegram_auxiliary_process "$pid"; then continue; fi
             if [ "$attempt" -eq 0 ]; then
                 kill -TERM "$pid" 2>/dev/null || true
             fi
@@ -362,6 +373,7 @@ stop_component_processes() {
                 esac
                 pid=${link#"$PROC"/}
                 pid=${pid%/exe}
+                if [ "$component" = r2o-telegram ] && telegram_auxiliary_process "$pid"; then continue; fi
                 kill -KILL "$pid" 2>/dev/null || true
             done
         fi
@@ -687,7 +699,11 @@ meta_dns_scheduler_pids() {
     for link in "$PROC"/[0-9]*/cmdline; do
         [ -r "$link" ] || continue
         cmdline=$(tr '\000' ' ' < "$link" 2>/dev/null) || continue
-        case "$cmdline" in *--meta-dns-scheduler*) ;; *) continue ;; esac
+        case " $cmdline " in *" --meta-dns-scheduler "*) ;; *) continue ;; esac
+        case "$cmdline" in
+            "$MANAGER "*|"$ROOT"/releases/*/builds/r2o-telegram-linux-*|*"/r2o-telegram "*) ;;
+            *) continue ;;
+        esac
         pid=${link#"$PROC"/}
         pid=${pid%/cmdline}
         printf '%s\n' "$pid"
@@ -702,6 +718,7 @@ meta_dns_scheduler_running() {
 }
 
 meta_dns_scheduler_start() {
+    [ ! -e "$META_DISABLED" ] || return 0
     if type ndmc >/dev/null 2>&1; then
         export R2O_META_DNS_DISABLED=0
         case "$R2O_META_RANGES" in
@@ -717,8 +734,8 @@ meta_dns_scheduler_start() {
         # OpenWrt без ndmc: Meta DNS закрепляется через dnsmasq hostrecord.
         export R2O_META_DNS_DISABLED=0
     else
-        export R2O_META_DNS_DISABLED=1
-        say "нет ndmc/dnsmasq: Meta DNS пропускается, списки обновляются"
+        say "нет ndmc/dnsmasq: нет поддерживаемого backend Meta DNS"
+        return 1
     fi
     meta_dns_scheduler_running && return 0
     # Это второй процесс того же бинарника, что и прокси. Обычный
@@ -760,6 +777,28 @@ meta_dns_scheduler_stop() {
     fi
     rm -f "$META_DNS_PID"
 }
+
+meta_protection_enable() {
+    prepare_dirs || return 1
+    if [ -e "$META_DISABLED" ]; then
+        rm -f "$META_DISABLED" || return 1
+    fi
+    meta_dns_scheduler_start
+}
+
+meta_protection_disable() {
+    prepare_dirs || return 1
+    if [ ! -e "$META_DISABLED" ]; then
+        meta_marker=$(mktemp "$STATE/.meta-protection.XXXXXX") || return 1
+        printf '0\n' > "$meta_marker" && mv -f "$meta_marker" "$META_DISABLED" || {
+            rm -f "$meta_marker"
+            return 1
+        }
+    fi
+    meta_dns_scheduler_stop || return 1
+    "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --remove-meta-dns
+}
+
 
 rt_proxy_running() {
     [ -s "$RT_PROXY_PID" ] || return 1
@@ -1440,7 +1479,11 @@ start() {
     telegram_start || say "Telegram не запущен; см. $LOG/telegram.log и $TG_STATUS"
     panel_start || say "панель не запущена; datapath продолжает работу"
     rt_proxy_start || say "rt-proxy RuTracker не запущен; rutracker останется без прокси"
-    meta_dns_scheduler_start || say "планировщик Meta DNS не запустился"
+    if [ -e "$META_DISABLED" ]; then
+        meta_protection_disable || say "не удалось снять принадлежащие R2O записи Meta DNS"
+    else
+        meta_dns_scheduler_start || say "планировщик Meta DNS не запустился"
+    fi
     update_scheduler_start || say "ночная проверка обновлений не запустилась"
 }
 
@@ -1637,8 +1680,10 @@ status() {
     else
         echo "  rt-proxy RuTracker: выключен конфигурацией"
     fi
-    if command -v ndmc >/dev/null 2>&1; then
-        meta_dns_scheduler_running && echo "  планировщик Meta DNS: работает" || echo "  планировщик Meta DNS: не работает"
+    if [ -e "$META_DISABLED" ]; then
+        echo "  Meta Protection: выключена"
+    else
+        meta_dns_scheduler_running && echo "  Meta Protection: планировщик работает" || echo "  Meta Protection: планировщик не работает"
     fi
     component_running r2o-panel "$PN_PID" && echo "  панель: работает" || echo "  панель: не работает"
     log_maintenance_running && echo "  ротация журналов: работает" || echo "  ротация журналов: не работает"
@@ -1653,7 +1698,7 @@ status() {
 }
 
 case "${1:-}" in
-    "") echo "usage: $0 {start|stop|restart|supervise|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-dns-refresh|lists-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    "") echo "usage: $0 {start|stop|restart|supervise|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-protection-on|meta-protection-off|meta-dns-refresh|lists-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
     start) start ;;
     stop) stop ;;
     restart) stop && start ;;
@@ -1696,6 +1741,8 @@ case "${1:-}" in
     telegram-restart) telegram_restart ;;
     telegram-check) telegram_check ;;
     telegram-reapply) telegram_reapply ;;
+    meta-protection-on) meta_protection_enable ;;
+    meta-protection-off) meta_protection_disable ;;
     meta-dns-refresh) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --refresh-meta-dns ;;
     lists-refresh) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --refresh-lists ;;
     meta-dns-remove) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --remove-meta-dns ;;
@@ -1710,5 +1757,5 @@ case "${1:-}" in
     heal) heal ;;
     tg-heal) telegram_reapply ;;
     tg-stop-rules) "$TG_FIREWALL" stop ;;
-    *) echo "usage: $0 {start|stop|restart|supervise|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-dns-refresh|lists-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
+    *) echo "usage: $0 {start|stop|restart|supervise|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-protection-on|meta-protection-off|meta-dns-refresh|lists-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
 esac

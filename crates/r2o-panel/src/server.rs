@@ -1037,7 +1037,7 @@ fn api_status(config: &Config, query: &str) -> Response {
         }
         None => unavailable_knowledge(),
     };
-    let snapshot = snapshot(
+    let mut snapshot = snapshot(
         config,
         linked,
         have_catalog,
@@ -1045,6 +1045,21 @@ fn api_status(config: &Config, query: &str) -> Response {
         engine_pid.is_some(),
         controller_running,
     );
+    let meta_searches: Vec<_> = knowledge["searches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|search| {
+            let product = r2k_core::meta::product(search["target"].as_str()?)?;
+            Some(json!({
+                "product":product,"host":search["target"],"phase":search["phase"],
+                "plan":search["plan"],"last_result":search["last_result"],
+                "application":search["application"],"transport":search["transport"],
+            }))
+        })
+        .take(20)
+        .collect();
+    snapshot["meta_protection"]["searches"] = json!(meta_searches);
     let mut result = json!({"snapshot": snapshot, "knowledge": knowledge});
     if let Some(revision) = revision {
         result["catalog_revision"] = Value::String(revision);
@@ -1324,6 +1339,13 @@ fn snapshot(
     if !linked {
         absent.push(stage("traffic", "Наблюдаемый трафик", false, "Нечем: контроллер не подключён к датапату. Это не «ноль соединений», а отсутствие измерения."));
     }
+    let meta_enabled = !config.state_dir.join("meta-protection.disabled").exists();
+    let meta_running = meta_enabled
+        && pid_path_running(&config.manager_root.join("run/meta-dns-scheduler.pid")).is_some();
+    let mut meta = read_json_object(&config.state_dir.join("meta-status.json"), 64 * 1024)
+        .unwrap_or_else(|| json!({}));
+    meta["enabled"] = json!(meta_enabled);
+    meta["running"] = json!(meta_running);
     json!({
         "taken":taken,"version":config.version,"commit":config.commit,"built":config.built,"dirty":config.dirty,
         "config_path":config.config_path,"config_exists":config.config_exists,"mode":config.mode,"panel_listen":config.panel_listen,
@@ -1332,6 +1354,7 @@ fn snapshot(
         "telegram_configured":tg_configured,"telegram_running":tg_running,"telegram_status":tg_status,"telegram_port":config.tg_port,"telegram_stats":read_telegram_stats(&config.telegram_stats_path),
         "state_dir":config.state_dir,"state_dir_note":state_dir_note(&config.state_dir),"queue_num":config.queue_num,
         "unknown_keys":config.unknown_keys,"started_at":started,"uptime_seconds":uptime,"stages":stages,"absent":absent,
+        "meta_protection":meta,
         "telegram_diagnostics":telegram_diagnostics_snapshot(config)
     })
 }
@@ -1393,6 +1416,16 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
             "/api/control/telegram-check",
             "telegram-check",
             "Проверка Telegram-туннеля",
+        ),
+        (
+            "/api/control/meta-protection-on",
+            "meta-protection-on",
+            "Включение Meta Protection",
+        ),
+        (
+            "/api/control/meta-protection-off",
+            "meta-protection-off",
+            "Отключение Meta Protection",
         ),
         (
             "/api/control/update-check",
@@ -2584,7 +2617,11 @@ mod differential_tests {
         STOP_REQUESTED.store(false, Ordering::Release);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
-        let handle = std::thread::spawn(move || serve(listener, Config::default()));
+        let config = Config {
+            asset_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
+            ..Config::default()
+        };
+        let handle = std::thread::spawn(move || serve(listener, config));
 
         let mut first = TcpStream::connect(address).unwrap();
         first

@@ -580,6 +580,17 @@ main { min-width: 0; }
 
 .overview-dns { margin-block: 16px; container-type: inline-size; scroll-margin-top: 110px; }
 .overview-dns-head { align-items: baseline; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 10px; }
+/* Состояние Meta читается даже без цвета и без раскрытия карточек. */
+.meta-switch { min-width: 4rem; min-height: 44px; font-variant-numeric: tabular-nums; }
+.meta-switch[aria-checked="true"] { border-color: var(--acc); }
+.meta-families { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr)); gap: .5rem; margin: .8rem 0; align-items: start; }
+.meta-details { overflow-wrap: anywhere; color: var(--ink-2); }
+.meta-family { border: 1px solid var(--line); border-radius: .5rem; padding: .5rem .65rem; }
+.meta-family-head { min-height: 44px; cursor: pointer; color: var(--ink); }
+.meta-family-head .mono { margin-inline-start: .5rem; }
+.meta-family p, .meta-sources { margin-block: .35rem; }
+.meta-sources { padding-inline-start: 1.25rem; font-size: .82rem; }
+.meta-failure { font-size: .82rem; overflow-wrap: anywhere; }
 .overview-dns-head h2, .dns-summary { margin: 0; }
 .dns-summary { color: var(--ink-2); font-size: .83rem; }
 .dns-list {

@@ -621,7 +621,12 @@ fn installed_manager_exposes_update_state_and_drives_update_actions() {
         format!("update-check\n--root\n{}\n", root.display())
     );
 
-    for action in ["update-auto-on", "update-auto-off"] {
+    for action in [
+        "update-auto-on",
+        "update-auto-off",
+        "meta-protection-on",
+        "meta-protection-off",
+    ] {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let (status, _, body) = request(
@@ -640,7 +645,7 @@ fn installed_manager_exposes_update_state_and_drives_update_actions() {
     }
     let deadline = Instant::now() + Duration::from_secs(2);
     while !fs::read_to_string(&service_arguments)
-        .is_ok_and(|args| args.contains("update-auto-on\n") && args.contains("update-auto-off\n"))
+        .is_ok_and(|args| args.contains("meta-protection-off\n"))
         && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(10));
@@ -648,6 +653,8 @@ fn installed_manager_exposes_update_state_and_drives_update_actions() {
     let service_log = fs::read_to_string(&service_arguments).unwrap();
     assert!(service_log.contains("update-auto-on\n"));
     assert!(service_log.contains("update-auto-off\n"));
+    assert!(service_log.contains("meta-protection-on\n"));
+    assert!(service_log.contains("meta-protection-off\n"));
 
     let mut install_config = Config::default();
     install_config.manager_path = config.manager_path.clone();

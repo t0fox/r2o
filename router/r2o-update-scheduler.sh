@@ -47,6 +47,10 @@ tick() {
     (umask 077; printf '%s\n' "$day" > "$temporary") || return 1
     mv -f "$temporary" "$MARKER" || { rm -f "$temporary"; return 1; }
 
+    # Общие списки продолжают обновляться, даже когда Meta Protection выключена.
+    R2O_LISTS_EXCLUDE_META=1 "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --refresh-lists \
+        >>"$LOG" 2>&1 || log "ночное обновление общих списков не удалось"
+
     if ! result=$("$MANAGER" update-check --root "$ROOT" 2>>"$LOG"); then
         log "ночная проверка обновлений не удалась"
         return 0
