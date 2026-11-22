@@ -305,8 +305,18 @@ pub async fn run_with_listen(
         let stats = Arc::clone(runtime.stats());
         let runtime = Arc::clone(&runtime);
         let path = config.stats_socket_path.clone();
+        let direct_wss = config.direct_wss;
+        let progress_path = config.check_progress_path.clone();
         background_tasks.spawn(async move {
-            if let Err(error) = crate::stats::serve_with_runtime(path, stats, Some(runtime)).await {
+            if let Err(error) = crate::stats::serve_with_runtime(
+                path,
+                stats,
+                Some(runtime),
+                direct_wss,
+                progress_path,
+            )
+            .await
+            {
                 warn!("Локальный сокет статистики TG не запущен: {error}");
             }
         });

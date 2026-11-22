@@ -27,6 +27,8 @@ fn route(
         tls_ms: Some(3),
         websocket_ms: Some(4),
         mtproto_ms: (state == "healthy").then_some(5),
+        first_response_ms: None,
+        extended: false,
         is_media: None,
         wire: None,
         sni: None,
@@ -34,13 +36,20 @@ fn route(
 }
 
 fn dc(dc: u32, state: &'static str, routes: Vec<RouteDiagnostic>) -> DcDiagnostic {
-    DcDiagnostic { dc, state, routes }
+    DcDiagnostic {
+        dc,
+        state,
+        pending: 0,
+        routes,
+    }
 }
 
 fn print_report(name: &str, state: &'static str, data_centers: Vec<DcDiagnostic>) {
     let report = DiagnosticReport {
         checked_at: 1_800_000_000,
         state,
+        running: false,
+        phase: None,
         data_centers,
     };
     println!(

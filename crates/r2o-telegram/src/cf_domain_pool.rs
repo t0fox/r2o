@@ -81,6 +81,10 @@ impl CfDomainPool {
         self.enabled
     }
 
+    pub(crate) fn manual_domains(&self) -> &[String] {
+        &self.manual_domains
+    }
+
     pub fn is_rate_limited(&self, domain: &str) -> bool {
         self.rate_limits
             .lock()

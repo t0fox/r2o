@@ -166,6 +166,14 @@ pub struct Config {
     #[arg(long, requires = "check")]
     pub check_live: bool,
 
+    /// Дополнительно проверить публичный пул Cloudflare.
+    #[arg(long, requires = "check")]
+    pub check_extended: bool,
+
+    /// Записывать промежуточные результаты диагностики в локальный файл.
+    #[arg(long)]
+    pub check_progress_path: Option<PathBuf>,
+
     /// Создать или проверить локальную идентичность установки.
     #[arg(long, conflicts_with = "resolve_meta")]
     pub initialize_identity: bool,
@@ -370,7 +378,11 @@ pub struct Config {
     #[arg(long = "cf-ip", value_delimiter = ',', env = "TG_CF_IP")]
     pub cf_ips: Vec<IpAddr>,
 
-    /// Порядок выбора direct WSS и Cloudflare WSS.
+    /// Разрешить прямой WSS к Telegram, в том числе в диагностике.
+    #[arg(long, env = "TG_DIRECT_WSS")]
+    pub direct_wss: bool,
+
+    /// Порядок выбора маршрутов при включённом direct WSS.
     #[arg(
         long = "ws-routing",
         value_enum,

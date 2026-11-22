@@ -1709,6 +1709,7 @@
     start: "start", stop: "stop", restart: "restart", "clear-found": "clear-found",
     "telegram-enable": "telegram-enable", "telegram-disable": "telegram-disable",
     "telegram-check": "telegram-check",
+    "telegram-check-extended": "telegram-check-extended",
     "meta-protection-on": "meta-protection-on", "meta-protection-off": "meta-protection-off"
   };
 
@@ -3211,7 +3212,9 @@
     report = report && typeof report === "object" ? report : { state: "never" };
     var key = JSON.stringify(report);
     if (root.__r2oKey === key) return;
-    if (report.state === "running") root.open = true;
+    var running = report.running === true || report.state === "running";
+    if (running && !root.__r2oRunning) root.open = true;
+    root.__r2oRunning = running;
     root.__r2oKey = key;
     var status = root.querySelector("[data-tg-check-state]");
     var checked = root.querySelector("[data-tg-check-time]");
@@ -3225,16 +3228,32 @@
       never: "Активная проверка ещё не запускалась.",
       error: str(report.message) || "Не удалось запустить проверку маршрутов."
     };
-    if (status) status.textContent = states[report.state] || "Результат проверки не распознан.";
+    var phases = {
+      worker: "Cloudflare Worker", proxy: "настроенный прокси Cloudflare", direct: "прямой WSS",
+      fallback: "публичный резерв Cloudflare", tcp: "резервный TCP", extended: "расширенная проверка публичного пула"
+    };
+    if (status) {
+      var result = states[report.state] || "Результат проверки не распознан.";
+      var phase = phases[report.phase];
+      if (running && phase) result = "Идёт проверка: " + phase + ". " + result;
+      if (report.interrupted) result += " Проверка прервана, показаны полученные результаты.";
+      if (status.textContent !== result) status.textContent = result;
+    }
     if (checked) {
       checked.textContent = Number.isFinite(Number(report.checked_at)) && Number(report.checked_at) > 0
         ? "Проверено: " + new Date(Number(report.checked_at) * 1000).toLocaleString("ru-RU") : "";
     }
     if (!centers) return;
+    var opened = Array.from(centers.querySelectorAll("details[open]"), function (detail) {
+      return detail.getAttribute("data-dc");
+    });
+    var active = root.ownerDocument.activeElement;
+    var focusDetail = active && active.closest("details[data-dc]");
+    var focused = centers.contains(focusDetail) ? focusDetail.getAttribute("data-dc") : null;
     centers.replaceChildren();
     if (!Array.isArray(report.data_centers)) return;
     var dcStates = {
-      healthy: "resPQ подтверждён", blocked: "маршруты заблокированы",
+      healthy: "resPQ подтверждён", partial: "resPQ подтверждён частично", blocked: "маршруты заблокированы",
       unavailable: "нет подтверждённого маршрута", unverified: "не подтверждено"
     };
     var routeStates = {
@@ -3247,11 +3266,14 @@
       "cf-proxy": "Прокси Cloudflare", "cf-h2": "Cloudflare /api", "tcp-fallback": "Резервный TCP"
     };
     var timings = [["dns_ms", "DNS"], ["tcp_ms", "TCP"], ["tls_ms", "TLS"],
-      ["websocket_ms", "WebSocket"], ["mtproto_ms", "resPQ"]];
+      ["websocket_ms", "WebSocket"], ["mtproto_ms", "resPQ"], ["first_response_ms", "всего до resPQ"]];
     report.data_centers.forEach(function (dc) {
       if (!dc || !Number.isInteger(Number(dc.dc)) || Number(dc.dc) < 1 || Number(dc.dc) > 5) return;
       var details = el(root.ownerDocument, "details", "tg-check-dc");
+      details.setAttribute("data-dc", String(dc.dc));
+      details.open = opened.indexOf(String(dc.dc)) !== -1;
       var label = "DC" + Number(dc.dc) + " · " + (dcStates[dc.state] || "статус неизвестен");
+      if (running && dc.pending > 0) label += " · проверка идёт";
       details.appendChild(el(root.ownerDocument, "summary", "", label));
       var list = el(root.ownerDocument, "ul", "tg-check-routes");
       (Array.isArray(dc.routes) ? dc.routes : []).forEach(function (route) {
@@ -3259,6 +3281,7 @@
         var item = el(root.ownerDocument, "li", "tg-check-route");
         var name = transports[route.transport] || str(route.transport) || "Маршрут";
         var parts = [name, routeStates[route.state] || "статус неизвестен"];
+        if (route.extended) parts.push("расширенная проверка");
         if (typeof route.is_media === "boolean") parts.push(route.is_media ? "медиа" : "чат");
         if (route.wire) parts.push(str(route.wire));
         if (route.domain) parts.push(str(route.domain));
@@ -3280,6 +3303,7 @@
       if (!list.children.length) list.appendChild(el(root.ownerDocument, "li", "", "Маршруты не перечислены."));
       details.appendChild(list);
       centers.appendChild(details);
+      if (focused === String(dc.dc)) details.firstElementChild.focus({ preventScroll: true });
     });
   }
 
@@ -3348,6 +3372,7 @@
         buttons.push(this.button("telegram-enable", "Запустить прокси", "send", "primary", busy || !snap.telegram_configured));
       }
       buttons.push(this.button("telegram-check", "Проверить DC1–DC5", "check", "primary", busy || !snap.telegram_configured));
+      buttons.push(this.button("telegram-check-extended", "Расширенная проверка", null, null, busy || !snap.telegram_configured));
     }
     buttons.push(this.button("telegram-workers", "Мои Workers", null, null, busy));
     ui.actions.replaceChildren.apply(ui.actions, buttons);

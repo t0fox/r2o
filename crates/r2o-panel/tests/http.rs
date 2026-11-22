@@ -1,5 +1,5 @@
 use r2o_panel::server::{Config, handle_request, parse_config};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
@@ -1531,7 +1531,7 @@ fn telegram_check_runs_as_an_authenticated_async_service_action() {
     fs::write(
         &service,
         format!(
-            "#!/bin/sh\n[ \"$1\" = telegram-check ] || exit 8\nprintf started > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
+            "#!/bin/sh\n[ \"$1\" = telegram-check-extended ] || exit 8\nprintf started > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n",
             started.display(),
             release.display()
         ),
@@ -1542,11 +1542,12 @@ fn telegram_check_runs_as_an_authenticated_async_service_action() {
     config.config_path = config_path;
     config.service_path = service;
     config.state_dir = temp.file("state");
+    config.live_path = temp.file("live.json");
     config.control_enabled = true;
 
     let raw = b"POST /api/control/telegram-check HTTP/1.1\r\nHost: router.local\r\nOrigin: http://other.local\r\nContent-Length: 0\r\n\r\n";
     assert_eq!(handle_request(&config, raw).status, 403);
-    let raw = b"POST /api/control/telegram-check HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n";
+    let raw = b"POST /api/control/telegram-check-extended HTTP/1.1\r\nHost: router.local\r\nOrigin: http://router.local\r\nContent-Length: 0\r\n\r\n";
     assert_eq!(handle_request(&config, raw).status, 202);
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1566,6 +1567,29 @@ fn telegram_check_runs_as_an_authenticated_async_service_action() {
         value["snapshot"]["telegram_diagnostics"]["state"],
         "running"
     );
+    let progress = json!({
+        "state":"partial", "checked_at":1, "running":true, "phase":"extended",
+        "data_centers": (1..=5).map(|dc| json!({
+            "dc":dc, "state":if dc == 1 { "partial" } else { "unverified" },
+            "routes": if dc == 1 { vec![json!({"transport":"cf-worker","state":"healthy"})] } else { vec![] }
+        })).collect::<Vec<_>>()
+    });
+    fs::write(
+        temp.file("telegram-diagnostics-progress.json"),
+        progress.to_string(),
+    )
+    .unwrap();
+    let (_, _, body) = request(
+        &config,
+        "GET /tunnel/check HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), progress);
+    fs::create_dir(&config.state_dir).unwrap();
+    fs::write(
+        config.state_dir.join("telegram-diagnostics.json"),
+        progress.to_string(),
+    )
+    .unwrap();
     fs::write(&release, "done").unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1575,8 +1599,12 @@ fn telegram_check_runs_as_an_authenticated_async_service_action() {
             "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
         );
         let value: Value = serde_json::from_str(&body).unwrap();
-        if value["snapshot"]["control_state"] == "done" {
-            assert_eq!(value["snapshot"]["telegram_diagnostics"]["state"], "never");
+        let report = &value["snapshot"]["telegram_diagnostics"];
+        if value["snapshot"]["control_state"] == "done" && report["running"] != true {
+            assert_eq!(report["state"], "partial");
+            assert_eq!(report["interrupted"], true);
+            assert_eq!(report["running"], false);
+            assert_eq!(report["data_centers"], progress["data_centers"]);
             break;
         }
         assert!(

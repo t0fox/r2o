@@ -189,7 +189,12 @@ async fn main() {
 
     if config.check {
         if config.check_live {
-            match r2o_telegram::stats::read_live_check(&config.stats_socket_path).await {
+            match r2o_telegram::stats::read_live_check(
+                &config.stats_socket_path,
+                config.check_extended,
+            )
+            .await
+            {
                 Ok(Some(report)) => {
                     println!("{report}");
                     if report["state"] != "healthy" {

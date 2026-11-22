@@ -45,8 +45,10 @@ case "${1:-}" in
             esac
         done
         [ "$component" = r2o-telegram ] || exit 2
-        case "$*" in
-            *--check*)
+        case " $* " in
+            *" --check "*)
+                case " $* " in *" --default-domains "*) exit 8 ;; esac
+                printf '%s\n' "$*" >> "$R2O_TG_CHECK_CAPTURE"
                 printf '%s\n' '{"checked_at":1800000000,"state":"partial","data_centers":[{"dc":1,"state":"healthy","routes":[]},{"dc":2,"state":"healthy","routes":[]},{"dc":3,"state":"unavailable","routes":[]},{"dc":4,"state":"healthy","routes":[]},{"dc":5,"state":"healthy","routes":[]}]}'
                 exit 2 ;;
             *--stats*)
@@ -79,6 +81,7 @@ run_service() {
         TG_WATCHDOG_RESTART_WINDOW=60 TG_WATCHDOG_MAX_RESTARTS=2 \
         TG_WATCHDOG_BACKOFF_BASE=1 TG_WATCHDOG_BACKOFF_MAX=1 \
         R2O_RUNTIME_DIR="$TEMP/runtime" R2O_TG_ENV_CAPTURE="$TEMP/tg-env-capture" \
+        R2O_TG_CHECK_CAPTURE="$TEMP/tg-check-args" \
         R2O_NFQUEUE_STATUS=/dev/null TG_FW_CALLS="$TEMP/firewall-calls" \
         sh "$ROOT/router/S99r2o" "$1"
 }
@@ -89,6 +92,9 @@ grep -q '^local$' "$TEMP/root/state/telegram.status"
 [ -s "$TEMP/root/run/r2o-telegram.pid" ]
 [ -s "$TEMP/root/run/r2o-telegram-watchdog.pid" ]
 run_service telegram-check
+! grep -q -- --check-extended "$TEMP/tg-check-args" || fail "обычная проверка запустила расширенную"
+run_service telegram-check-extended
+grep -q -- --check-extended "$TEMP/tg-check-args" || fail "расширенный режим не передан диагностике"
 python3 - "$TEMP/root/state/telegram-diagnostics.json" <<'PY'
 import json
 import sys

@@ -21,6 +21,8 @@ const TELEGRAM_DIAGNOSTICS_MAX: usize = 256 * 1024;
 // D2O reserves the last byte of its 131072-byte buffer and requires a separate EOF read.
 const TELEGRAM_STATS_MAX: usize = 131_071;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
+// Включает предел фаз диагностики Telegram и передачу отчёта через локальный сокет.
+const TELEGRAM_CHECK_TIMEOUT: Duration = Duration::from_secs(255);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const UPDATE_INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -358,7 +360,7 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
             return json_response(200, &telegram_diagnostics_snapshot(config));
         }
         if request.method == "POST" {
-            return match start_telegram_check(config) {
+            return match start_telegram_check(config, "telegram-check") {
                 Ok(()) => json_response(202, &json!({"ok": true})),
                 Err(ActionError::Busy) => json_response(
                     409,
@@ -1443,6 +1445,11 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
             "Проверка Telegram-туннеля",
         ),
         (
+            "/api/control/telegram-check-extended",
+            "telegram-check-extended",
+            "Расширенная проверка Telegram-туннеля",
+        ),
+        (
             "/api/control/meta-protection-on",
             "meta-protection-on",
             "Включение Meta Protection",
@@ -1530,7 +1537,8 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
             &json!({"ok":false,"message":"В config задан MODE=off; сначала измените режим движка"}),
         );
     }
-    if matches!(command, "telegram-enable" | "telegram-check")
+    let telegram_check = matches!(command, "telegram-check" | "telegram-check-extended");
+    if (command == "telegram-enable" || telegram_check)
         && !telegram_config_flags(&config.config_path).1
     {
         return json_response(
@@ -1546,8 +1554,8 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
     let manager_present = is_executable_file(&config.manager_path);
     let result = if let Some((product, state)) = meta_product {
         start_service_action(config, command, &[product, state])
-    } else if command == "telegram-check" {
-        start_telegram_check(config)
+    } else if telegram_check {
+        start_telegram_check(config, command)
     } else if manager_present
         && matches!(
             command,
@@ -1639,7 +1647,7 @@ fn start_service_action(config: &Config, command: &str, args: &[&str]) -> Result
     start_action_command(config, child_command, timeout)
 }
 
-fn start_telegram_check(config: &Config) -> Result<(), ActionError> {
+fn start_telegram_check(config: &Config, action: &str) -> Result<(), ActionError> {
     if config.service_path.as_os_str().is_empty() {
         return Err(ActionError::Start);
     }
@@ -1652,9 +1660,9 @@ fn start_telegram_check(config: &Config) -> Result<(), ActionError> {
     }
     let running = Arc::clone(&config.telegram_check_running);
     let mut command = Command::new(config.service_path.clone());
-    command.arg("telegram-check");
+    command.arg(action);
     let result =
-        start_action_command_with_completion(config, command, CONTROL_TIMEOUT, move || {
+        start_action_command_with_completion(config, command, TELEGRAM_CHECK_TIMEOUT, move || {
             running.store(false, Ordering::Release)
         });
     if result.is_err() {
@@ -3324,11 +3332,22 @@ mod differential_tests {
 }
 
 fn telegram_diagnostics_snapshot(config: &Config) -> Value {
+    let progress = config
+        .live_path
+        .with_file_name("telegram-diagnostics-progress.json");
+    let saved = config.state_dir.join("telegram-diagnostics.json");
     if config.telegram_check_running.load(Ordering::Acquire) {
+        if let Some(report) = read_telegram_diagnostics(&progress) {
+            return report;
+        }
         return json!({"state":"running"});
     }
-    read_telegram_diagnostics(&config.state_dir.join("telegram-diagnostics.json"))
-        .unwrap_or_else(|| json!({"state":"never"}))
+    let mut report = read_telegram_diagnostics(&saved).unwrap_or_else(|| json!({"state":"never"}));
+    if report["running"] == true {
+        report["running"] = json!(false);
+        report["interrupted"] = json!(true);
+    }
+    report
 }
 
 fn read_telegram_diagnostics(path: &Path) -> Option<Value> {
@@ -3353,6 +3372,7 @@ fn valid_telegram_diagnostics(report: &Value) -> bool {
                                             matches!(
                                                 state,
                                                 "healthy"
+                                                    | "partial"
                                                     | "blocked"
                                                     | "unavailable"
                                                     | "unverified"

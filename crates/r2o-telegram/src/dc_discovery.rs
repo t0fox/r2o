@@ -289,7 +289,7 @@ async fn fetch_discovered_ws_config(
     })
     .await;
     if !confirmed {
-        reject_route(feedback);
+        reject_route(feedback, true);
     }
     result
 }

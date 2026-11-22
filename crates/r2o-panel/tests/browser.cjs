@@ -140,7 +140,10 @@ async function main() {
     checked_at: 1_800_000_000,
     state: "partial",
     data_centers: [
-      { dc: 1, state: "healthy", routes: [{ transport: "direct-wss", state: "healthy", domain: "kws1.web.telegram.org", selected_ip: "203.0.113.1", http_status: null, dns_ms: 2, tcp_ms: null, tls_ms: 5, websocket_ms: 3, mtproto_ms: 4 }] },
+      { dc: 1, state: "healthy", routes: [
+        { transport: "cf-worker", state: "healthy", domain: "worker.example", selected_ip: "203.0.113.1", http_status: null, dns_ms: 2, tcp_ms: null, tls_ms: 5, websocket_ms: 3, mtproto_ms: 4, first_response_ms: 14 },
+        { transport: "cf-proxy", state: "unavailable", domain: "kws1.pool.example", extended: true, failed_stage: "timeout" },
+      ] },
       { dc: 2, state: "blocked", routes: [] },
       { dc: 3, state: "unavailable", routes: [] },
       { dc: 4, state: "unverified", routes: [] },
@@ -858,6 +861,9 @@ esac
   assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('DC2 · маршруты заблокированы')"), true, "панель показывает заблокированный DC из отчёта");
   assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('HTTP 0')"), false, "отсутствующий HTTP status не превращается в ноль");
   assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Проверить DC1–DC5'))"), true, "в Telegram-секции есть запуск активной проверки");
+  assert.equal(await evaluate("document.querySelector('[data-control=telegram-check-extended]')?.textContent.includes('Расширенная проверка')"), true, "расширенная проверка запускается отдельно");
+  assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('всего до resPQ 14 мс')"), true, "показано полное время до MTProto-ответа");
+  assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('расширенная проверка')"), true, "таймаут публичного пула помечен как результат расширенной проверки");
   assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Запустить прокси'))"), true, "остановленный прокси предлагает запуск");
   assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Остановить прокси'))"), false, "остановленный прокси не предлагает остановку");
   assert.equal(await evaluate("document.querySelector('[data-tg-state-badge]').textContent"), "Остановлен", "состояние прокси показано явно");

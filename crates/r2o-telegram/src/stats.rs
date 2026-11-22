@@ -1196,7 +1196,7 @@ impl Drop for ConnectionGuard {
 
 #[cfg(unix)]
 pub async fn serve_unix(path: PathBuf, stats: Arc<RuntimeStats>) -> Result<(), String> {
-    serve_with_runtime(path, stats, None).await
+    serve_with_runtime(path, stats, None, false, None).await
 }
 
 #[cfg(unix)]
@@ -1204,6 +1204,8 @@ pub(crate) async fn serve_with_runtime(
     path: PathBuf,
     stats: Arc<RuntimeStats>,
     runtime: Option<Arc<crate::runtime::Runtime>>,
+    direct_wss: bool,
+    progress_path: Option<PathBuf>,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("создание каталога сокета: {error}"))?;
@@ -1240,14 +1242,22 @@ pub(crate) async fn serve_with_runtime(
         })
         .await;
         let request = read.unwrap_or_default();
-        if request == b"check\n"
+        let extended = request == b"check-extended\n";
+        if (extended || request == b"check\n")
             && let Some(runtime) = runtime.as_ref()
         {
             while checks.try_join_next().is_some() {}
             if checks.is_empty() {
                 let runtime = Arc::clone(runtime);
+                let progress_path = progress_path.clone();
                 checks.spawn(async move {
-                    let report = crate::diagnostics::run_with_runtime(&runtime).await;
+                    let report = crate::diagnostics::run_with_runtime(
+                        &runtime,
+                        direct_wss,
+                        extended,
+                        progress_path.as_deref(),
+                    )
+                    .await;
                     if let Ok(response) = serde_json::to_vec(&report) {
                         write_socket_response(&mut stream, &response).await;
                     }
@@ -1296,6 +1306,8 @@ pub(crate) async fn serve_with_runtime(
     path: PathBuf,
     stats: Arc<RuntimeStats>,
     _runtime: Option<Arc<crate::runtime::Runtime>>,
+    _direct_wss: bool,
+    _progress_path: Option<PathBuf>,
 ) -> Result<(), String> {
     serve_unix(path, stats).await
 }
@@ -1334,8 +1346,17 @@ pub async fn read_socket(path: &Path) -> Result<Vec<u8>, String> {
     request_socket(path, b"snapshot\n", Duration::from_secs(1), 64 * 1024).await
 }
 
-pub async fn read_live_check(path: &Path) -> Result<Option<serde_json::Value>, String> {
-    let response = request_socket(path, b"check\n", Duration::from_secs(56), 256 * 1024).await?;
+pub async fn read_live_check(
+    path: &Path,
+    extended: bool,
+) -> Result<Option<serde_json::Value>, String> {
+    let request: &[u8] = if extended {
+        b"check-extended\n"
+    } else {
+        b"check\n"
+    };
+    let response =
+        request_socket(path, request, crate::diagnostics::SOCKET_WAIT, 256 * 1024).await?;
     let report: serde_json::Value =
         serde_json::from_slice(&response).map_err(|error| error.to_string())?;
     match report.get("error").and_then(serde_json::Value::as_str) {

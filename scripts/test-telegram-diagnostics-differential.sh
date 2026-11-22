@@ -34,6 +34,9 @@ printf '\n[patch.crates-io]\nrustls = { path = "%s" }\n' "$ROOT/vendor/rustls" \
 mkdir -p "$TEMP/donor/examples"
 sed -e 's/r2o_telegram/z2kow_tg_transparent/g' \
     -e '/^        is_media: None,$/d' -e '/^        wire: None,$/d' -e '/^        sni: None,$/d' \
+    -e '/^        first_response_ms: None,$/d' -e '/^        extended: false,$/d' \
+    -e '/^        running: false,$/d' -e '/^        phase: None,$/d' -e '/^        pending: 0,$/d' \
+    -e 's/, pending: 0//' \
     "$ROOT/crates/r2o-telegram/examples/tg23_diagnostics_trace.rs" \
     > "$TEMP/donor/examples/tg23_diagnostics_trace.rs"
 CARGO_TARGET_DIR="$TEMP/target-donor" \

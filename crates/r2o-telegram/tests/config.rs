@@ -5,6 +5,8 @@ use r2o_telegram::config::{Config, WsRoutingPolicy};
 fn default_state_paths_are_scoped_to_r2o() {
     let config = Config::try_parse_from(["r2o-telegram"]).unwrap();
 
+    assert!(!config.direct_wss);
+
     assert_eq!(
         config.stats_socket_path,
         std::path::PathBuf::from("/var/run/r2o/r2o-telegram-stats.sock")
@@ -22,7 +24,7 @@ fn default_state_paths_are_scoped_to_r2o() {
 #[test]
 fn transparent_options_configure_the_listener() {
     let config = Config::try_from_cli_line(
-        "--host :: --port 1443 --transparent-ports 443,5222 --transparent-cidrs 149.154.160.0/20 --max-connections 48 --ws-routing hedged --ws-hedge-delay-ms 100 --ws-hedge-limit 4 --cf-domain cf.example --cf-worker-domain https://worker.example/path",
+        "--host :: --port 1443 --transparent-ports 443,5222 --transparent-cidrs 149.154.160.0/20 --max-connections 48 --direct-wss --ws-routing hedged --ws-hedge-delay-ms 100 --ws-hedge-limit 4 --cf-domain cf.example --cf-worker-domain https://worker.example/path",
     )
     .unwrap();
 
@@ -32,6 +34,7 @@ fn transparent_options_configure_the_listener() {
     assert_eq!(config.transparent_cidrs, ["149.154.160.0/20"]);
     assert_eq!(config.max_connections, Some(48));
     assert_eq!(config.ws_routing, WsRoutingPolicy::Hedged);
+    assert!(config.direct_wss);
     assert_eq!(config.ws_hedge_delay_ms, 100);
     assert_eq!(config.ws_hedge_limit, 4);
     assert_eq!(config.cf_domains, ["cf.example"]);
@@ -87,6 +90,11 @@ fn worker_domains_have_a_bounded_configuration_list() {
 fn standalone_check_mode_is_an_explicit_runtime_option() {
     let config = Config::try_from_cli_line("--check").unwrap();
     assert!(config.check);
+    assert!(!config.check_extended);
+
+    let config = Config::try_from_cli_line("--check --check-extended").unwrap();
+    assert!(config.check_extended);
+    assert!(Config::try_from_cli_line("--check-extended").is_err());
 
     let config = Config::try_from_cli_line("").unwrap();
     assert!(!config.check);

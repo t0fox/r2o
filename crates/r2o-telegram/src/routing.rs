@@ -299,10 +299,13 @@ pub(crate) fn record_mtproto_failure(feedback: &RouteFeedback) {
     if let Some(domain) = worker_domain {
         crate::stats::global().record_worker_failure(domain, "не получен MTProto-ответ");
     }
-    reject_route(feedback);
+    reject_route(feedback, true);
 }
 
-pub(crate) fn reject_route(feedback: &RouteFeedback) {
+pub(crate) fn reject_route(feedback: &RouteFeedback, clear_preference: bool) {
+    if clear_preference {
+        PREFERRED_CF.clear(&feedback.direct_key);
+    }
     if let Some((host, peer)) = feedback.edge() {
         let cooldown = match &feedback.kind {
             RouteFeedbackKind::CfWorker { cooldown, .. }
@@ -312,7 +315,6 @@ pub(crate) fn reject_route(feedback: &RouteFeedback) {
             }
         };
         crate::ws_client::fail_cf_ws(host, &feedback.edge_scope(), peer, cooldown);
-        PREFERRED_CF.clear(&feedback.direct_key);
         return;
     }
     match &feedback.kind {
@@ -333,7 +335,6 @@ pub(crate) fn reject_route(feedback: &RouteFeedback) {
             CF_PROXY_FAIL.set(route_key.clone(), *cooldown);
         }
     }
-    PREFERRED_CF.clear(&feedback.direct_key);
 }
 
 pub(crate) fn record_tcp_connect_success(dc: u32, is_media: bool, target_ip: &str) {
@@ -712,6 +713,12 @@ where
 ///
 /// `target_ip` берётся только из проверенного SO_ORIGINAL_DST и dcOption.
 pub(crate) async fn select_upstream(route: &Route<'_>, target_ip: &str) -> Option<Upstream> {
+    if !route.config.direct_wss {
+        return route
+            .cf_tiers(target_ip, "приоритет Cloudflare")
+            .await
+            .or_else(|| route.tcp_last_resort(target_ip, "сбой Cloudflare"));
+    }
     let has_fallback = route.has_fallback();
     let route_key = direct_route_key(route.dc, route.is_media, target_ip);
     let ip_cooling = IP_FAIL.active(&route_key);
@@ -899,9 +906,6 @@ impl Route<'_> {
     /// `--cf-priority` и на каждом соединении ждала полный тайм-аут прямого WS,
     /// прежде чем перейти к единственному рабочему маршруту.
     pub(crate) async fn cf_tiers(&self, dst: &str, reason: &str) -> Option<Upstream> {
-        if let Some(upstream) = self.cf_media().await {
-            return Some(upstream);
-        }
         if let Some((ws, worker_domain)) = self.cf_worker(dst, reason).await {
             let feedback = RouteFeedback::cf_worker(
                 self.dc,
@@ -917,6 +921,9 @@ impl Route<'_> {
                 route_type: "WSS через Cloudflare Worker",
                 feedback,
             });
+        }
+        if let Some(upstream) = self.cf_media().await {
+            return Some(upstream);
         }
 
         self.cf_proxy(dst, reason).await.map(|(ws, domain, host)| {
@@ -2048,6 +2055,9 @@ mod tests {
         ));
         let feedback = RouteFeedback::cf_proxy(dc, true, ip, domain, pool, Duration::from_secs(30));
 
+        PREFERRED_CF.set(route.clone(), Duration::from_secs(30));
+        super::reject_route(&feedback, false);
+        assert!(PREFERRED_CF.active(&route));
         record_mtproto_failure(&feedback);
 
         assert!(CF_PROXY_FAIL.active(&cf_route));
@@ -2121,6 +2131,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_wss_по_умолчанию_не_попадает_в_перебор() {
+        let config = Config::try_from_cli_line("--ws-routing hedged").unwrap();
+        let runtime = Runtime::new(OutboundConnector::direct());
+        let connection = runtime.stats().connection_started();
+        let route = Route::new(
+            "127.0.0.1:32000".parse().unwrap(),
+            &config,
+            &runtime,
+            2,
+            false,
+            Some(connection.telemetry()),
+        );
+        let upstream = super::select_upstream(&route, "127.0.0.1").await;
+        assert!(matches!(upstream, Some(super::Upstream::Tcp(_))));
+        assert_eq!(
+            runtime.stats().snapshot().active_sessions[0].direct_state,
+            "idle"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "требуется изолированный сетевой namespace с портом 80"]
     #[allow(clippy::result_large_err)]
     async fn отказ_worker_переключает_на_cf_proxy() {
@@ -2130,7 +2161,7 @@ mod tests {
         use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
         let config = Config::try_from_cli_line(
-            "--cf-domain pool.example --cf-worker-domain worker.example --cf-ip 127.0.0.1 --cf-transport plain --ws-routing cf-first",
+            "--cf-domain pool.example --cf-worker-domain worker.example --cf-ip 127.0.0.1 --cf-transport plain",
         ).unwrap();
         let runtime = Runtime::new(config.outbound_connector())
             .with_cf_ips(config.cf_ips.clone())
