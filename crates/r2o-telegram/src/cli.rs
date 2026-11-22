@@ -9,7 +9,7 @@
 //!
 //! # Схема соединения
 //!
-//! ```
+//! ```text
 //! Telegram Desktop → MTProto (TCP 1443) → r2o-telegram → WebSocket (TLS 443) → узел Telegram
 //! ```
 //!

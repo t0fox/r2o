@@ -50,6 +50,14 @@ for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager 
     destination=$BUNDLE/builds/$component-linux-testhost
     if [ "$component" = r2o-manager ]; then
         cp "$MANAGER_BIN" "$destination"
+    elif [ "$component" = r2o-controller ]; then
+        cat > "$destination" <<EOF
+#!/bin/sh
+case "\${0##*/}" in
+    r2o-manager|r2o-manager-linux-*) exec "$MANAGER_BIN" "\$@" ;;
+esac
+exit 0
+EOF
     else
         printf '#!/bin/sh\nexit 0\n' > "$destination"
     fi
@@ -157,6 +165,12 @@ install_release r2o-install-test2
 cmp "$TEMP/config.before-upgrade" "$INSTALL_ROOT/config"
 grep -qx 'PANEL_LISTEN=0.0.0.0:8090' "$INSTALL_ROOT/config" || {
     echo "обновление перезаписало явно настроенный PANEL_LISTEN" >&2
+    exit 1
+}
+manager_identity=$(stat -c '%d:%i' "$INSTALL_ROOT/r2o-manager")
+controller_identity=$(stat -c '%d:%i' "$INSTALL_ROOT/releases/r2o-install-test2/builds/r2o-controller-linux-testhost")
+[ "$manager_identity" = "$controller_identity" ] || {
+    echo "менеджер не использует общий исполняемый файл контроллера" >&2
     exit 1
 }
 
