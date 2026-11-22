@@ -106,6 +106,15 @@ pub(super) fn fetch(work: &Path, root: &Path, architecture: &str) -> Result<Cata
         "update-catalog-head.json",
         &json!({"catalog_sequence":sequence,"catalog_tag":tag}),
     )?;
+    if let Err(error) = lifecycle::prune_rejected(
+        root,
+        result
+            .releases
+            .iter()
+            .map(|manifest| manifest.release_id.as_str()),
+    ) {
+        eprintln!("r2o-manager: очистка отметок отклонённых выпусков: {error}");
+    }
     let releases: Vec<_> = result
         .releases
         .into_iter()

@@ -1938,6 +1938,33 @@ mod tests {
     }
 
     #[test]
+    fn obsolete_rejection_markers_are_pruned_after_recovery() {
+        let temp = TestDir::new();
+        let root = &temp.0;
+        for file in [
+            "update-rejected-r2o-old.json",
+            "update-rejected-r2o-latest.json",
+            "update-other.json",
+        ] {
+            write_json(root, file, &json!({})).unwrap();
+        }
+        write_json(
+            root,
+            "update-pending.json",
+            &json!({"version":1,"old":"r2o-local","target":"r2o-old"}),
+        )
+        .unwrap();
+        lifecycle::prune_rejected(root, ["r2o-latest"]).unwrap();
+        assert!(lifecycle::release_rejected(root, "r2o-old").unwrap());
+
+        fs::remove_file(root.join("state/update-pending.json")).unwrap();
+        lifecycle::prune_rejected(root, ["r2o-latest"]).unwrap();
+        assert!(!lifecycle::release_rejected(root, "r2o-old").unwrap());
+        assert!(lifecycle::release_rejected(root, "r2o-latest").unwrap());
+        assert!(root.join("state/update-other.json").is_file());
+    }
+
+    #[test]
     fn recording_bad_previous_release_updates_runtime_failure_state() {
         let temp = TestDir::new();
         let root = &temp.0;

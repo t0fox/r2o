@@ -440,6 +440,40 @@ pub(super) fn release_rejected(root: &Path, release: &str) -> Result<bool, Updat
         .try_exists()?)
 }
 
+pub(super) fn prune_rejected<'a>(
+    root: &Path,
+    catalog_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<(), UpdateError> {
+    if pending(root)?.is_some() {
+        return Ok(());
+    }
+    let published: std::collections::HashSet<_> = catalog_ids.into_iter().collect();
+    let state_dir = root.join("state");
+    let mut removed = false;
+    for entry in fs::read_dir(&state_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(release) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("update-rejected-"))
+            .and_then(|name| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if !published.contains(release)
+            && rejected_file(release).is_ok()
+            && entry.file_type()?.is_file()
+        {
+            fs::remove_file(entry.path())?;
+            removed = true;
+        }
+    }
+    if removed {
+        crate::install::sync_directory(&state_dir)?;
+    }
+    Ok(())
+}
+
 fn clear_rejected(root: &Path, release: &str) -> Result<(), UpdateError> {
     let state_dir = root.join("state");
     match fs::remove_file(state_dir.join(rejected_file(release)?)) {
