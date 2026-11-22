@@ -8,6 +8,8 @@ const JOURNAL: &str = "update-pending.json";
 struct Transaction {
     version: u32,
     old: String,
+    #[serde(default)]
+    old_previous: Option<String>,
     target: String,
     #[serde(default)]
     committed: bool,
@@ -114,12 +116,23 @@ fn recover(root: &Path, tx: &Transaction, reason: &str) -> Result<(), UpdateErro
     }
     let switched = slots.current == tx.target && slots.previous.as_deref() == Some(tx.old.as_str());
     if switched {
-        crate::install::rollback_during_update(root)?;
+        write_json(
+            root,
+            &rejected_file(&tx.target)?,
+            &json!({"utc":now_epoch()}),
+        )?;
+        crate::install::restore_update_slots(
+            root,
+            &tx.target,
+            &InstallSlots {
+                current: tx.old.clone(),
+                previous: tx.old_previous.clone(),
+            },
+        )?;
     } else if slots.current != tx.old {
         return Err(io::Error::other("активный слот не совпадает с журналом обновления").into());
     }
     let mut state = read_state(root)?;
-    let failed_after_activation = state["busy"] == "health";
     state["busy"] = json!("");
     state["current"] = json!(tx.old);
     state["previous"] = json!(read_install_slots(root)?.and_then(|slots| slots.previous));
@@ -128,24 +141,8 @@ fn recover(root: &Path, tx: &Transaction, reason: &str) -> Result<(), UpdateErro
     state["last_release"] = json!(tx.target);
     state["last_message"] = json!(short_error(reason));
     record(&mut state, &tx.target, false, reason);
-    if switched
-        || (slots.current == tx.old
-            && slots.previous.as_deref() == Some(tx.target.as_str())
-            && failed_after_activation)
-    {
+    if release_rejected(root, &tx.target)? {
         state["bad_release"] = json!(tx.target);
-        if !state["bad_releases"].is_object() {
-            state["bad_releases"] = json!({});
-        }
-        let bad = state["bad_releases"]
-            .as_object_mut()
-            .expect("карта отказов");
-        if bad.len() == 32 && !bad.contains_key(&tx.target) {
-            if let Some(oldest) = bad.keys().next().cloned() {
-                bad.remove(&oldest);
-            }
-        }
-        bad.insert(tx.target.clone(), json!(true));
     }
     write_state(root, &state)?;
     clear_staged(root);
@@ -266,6 +263,7 @@ pub fn run_router_update(
     let mut tx = Transaction {
         version: 1,
         old: old.current,
+        old_previous: old.previous,
         target: target.to_owned(),
         committed: false,
     };
@@ -346,6 +344,9 @@ fn finalize(root: &Path, tx: &Transaction) -> Result<(), UpdateError> {
     if let Some(blocked) = state["bad_releases"].as_object_mut() {
         blocked.remove(&tx.target);
     }
+    if state["bad_release"] == tx.target {
+        state["bad_release"] = json!("");
+    }
     if state["history"]
         .as_array()
         .and_then(|history| history.last())
@@ -354,6 +355,7 @@ fn finalize(root: &Path, tx: &Transaction) -> Result<(), UpdateError> {
         record(&mut state, &tx.target, true, "Проверка служб пройдена");
     }
     write_state(root, &state)?;
+    clear_rejected(root, &tx.target)?;
     clear(root)?;
     if let Err(error) =
         crate::install::refresh_launcher(root).and_then(|()| crate::install::cleanup_releases(root))
@@ -361,6 +363,27 @@ fn finalize(root: &Path, tx: &Transaction) -> Result<(), UpdateError> {
         eprintln!("r2o-manager: очистка после установки: {error}");
     }
     Ok(())
+}
+
+fn rejected_file(release: &str) -> Result<String, UpdateError> {
+    crate::validate_token(release, "release_id", 128)?;
+    Ok(format!("update-rejected-{release}.json"))
+}
+
+pub(super) fn release_rejected(root: &Path, release: &str) -> Result<bool, UpdateError> {
+    Ok(root
+        .join("state")
+        .join(rejected_file(release)?)
+        .try_exists()?)
+}
+
+fn clear_rejected(root: &Path, release: &str) -> Result<(), UpdateError> {
+    let state_dir = root.join("state");
+    match fs::remove_file(state_dir.join(rejected_file(release)?)) {
+        Ok(()) => Ok(crate::install::sync_directory(&state_dir)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn check_catalog_schema(root: &Path) -> Result<(), UpdateError> {

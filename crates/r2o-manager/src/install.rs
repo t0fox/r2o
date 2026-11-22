@@ -687,9 +687,22 @@ pub fn rollback(root: &Path) -> Result<InstallSlots, InstallError> {
     rollback_locked(root)
 }
 
-pub(crate) fn rollback_during_update(root: &Path) -> Result<InstallSlots, InstallError> {
+pub(crate) fn restore_update_slots(
+    root: &Path,
+    active_trial: &str,
+    slots: &InstallSlots,
+) -> Result<(), InstallError> {
     let _lock = ManagerLock::acquire(root)?;
-    rollback_locked(root)
+    let active = read_install_slots(root)?.ok_or(InstallError::NoActiveRelease)?;
+    if active.current != active_trial || active.previous.as_deref() != Some(slots.current.as_str())
+    {
+        return Err(InstallError::InvalidSlotFile);
+    }
+    ensure_release_dir(root, &slots.current)?;
+    if let Some(previous) = &slots.previous {
+        ensure_release_dir(root, previous)?;
+    }
+    write_slots_atomically(root, slots)
 }
 
 fn rollback_locked(root: &Path) -> Result<InstallSlots, InstallError> {
@@ -1275,6 +1288,37 @@ mod tests {
         assert_eq!(rolled.previous.as_deref(), Some("r2o-3"));
         assert!(root.join("releases/r2o-3").exists());
         assert!(root.join("releases/foreign").exists());
+    }
+
+    #[test]
+    fn failed_trial_restores_both_previously_healthy_slots() {
+        let temp = TestDir::new();
+        let root = temp.0.join("install");
+        let first = bundle(&temp.0, "first", "mipsel");
+        let second = bundle(&temp.0, "second", "mipsel");
+        let trial = bundle(&temp.0, "trial", "mipsel");
+        activate_bundle(&root, &first, "r2o-first", "mipsel").unwrap();
+        let before = activate_bundle(&root, &second, "r2o-second", "mipsel").unwrap();
+        fs::create_dir_all(root.join("state")).unwrap();
+        fs::write(root.join("state/update-pending.json"), "{}").unwrap();
+        activate_prepared(
+            &root,
+            &PreparedRelease {
+                release_id: "r2o-trial".to_owned(),
+                architecture: "mipsel".to_owned(),
+                bundle: trial,
+                work: root.join("prepared"),
+            },
+        )
+        .unwrap();
+        assert!(root.join("releases/r2o-first").exists());
+
+        restore_update_slots(&root, "r2o-trial", &before).unwrap();
+        assert_eq!(read_install_slots(&root).unwrap(), Some(before));
+        cleanup_releases(&root).unwrap();
+        assert!(root.join("releases/r2o-first").exists());
+        assert!(root.join("releases/r2o-second").exists());
+        assert!(!root.join("releases/r2o-trial").exists());
     }
 
     #[test]

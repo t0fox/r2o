@@ -321,8 +321,7 @@ pub use install::{
     read_install_slots, rollback,
 };
 pub use update::{
-    UpdateError, check_update, finish_router_update,
-    mark_bad_previous_release, set_auto_update,
+    UpdateError, check_update, finish_router_update, mark_bad_previous_release, set_auto_update,
 };
 
 /// Принять сырые байты Ed25519, 64 шестнадцатеричных символа или PEM Ed25519 SPKI.

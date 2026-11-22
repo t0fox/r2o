@@ -128,7 +128,8 @@ pub fn check_update(root: &Path, architecture: &str) -> Result<Value, UpdateErro
                 .map(|value| value.current.as_str())
                 .unwrap_or("");
             let available = manifest.release_id != current;
-            let auto_retry_blocked = bad_release_matches(&state, &manifest.release_id);
+            let auto_retry_blocked = bad_release_matches(&state, &manifest.release_id)
+                || lifecycle::release_rejected(root, &manifest.release_id)?;
             let latest = catalog::describe(&manifest, architecture);
             state["previous"] = json!(slots.as_ref().and_then(|slots| slots.previous.as_deref()));
             let now = now_epoch();
@@ -362,7 +363,9 @@ fn stage_update_in(
             slots.expect("current release was checked"),
         ));
     }
-    if should_skip_failed_release(automatic, &read_state(root)?, &manifest.release_id) {
+    if should_skip_failed_release(automatic, &read_state(root)?, &manifest.release_id)
+        || automatic && lifecycle::release_rejected(root, &manifest.release_id)?
+    {
         return Err(UpdateError::PreviouslyFailedRelease(manifest.release_id).into());
     }
     if slots.as_ref().is_some_and(|installed| {
