@@ -2589,6 +2589,7 @@ mod app {
                     let mut redirect_candidate = None;
                     let mut http80_log_candidate = None;
                     let mut udp_quic_deny = false;
+                    let mut address_stun_replan = false;
                     let decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
                         if options.mode == RuntimeMode::Apply {
                             if !controller_probe {
@@ -2605,8 +2606,10 @@ mod app {
                                     &mut flow_journal,
                                     &journal_origin,
                                 );
-                                if let Some(r2o_proof) =
-                                    voice_trial_proofs.observe_response(bytes, now)
+                                if let Some(r2o_proof) = voice_trial_proofs
+                                    .observe_response_with_stun_evidence(bytes, now, || {
+                                        udp_sessions.address_stun_provable(bytes)
+                                    })
                                 {
                                     if send_voice_proof_event(
                                         &mut control,
@@ -2730,11 +2733,15 @@ mod app {
                             )
                         };
                         let selected_plan = selected.unwrap_or(&plan);
+                        address_stun_replan = selected_plan.transport == 17
+                            && selected_plan.proto == r2k_core::plan::PROTO_VOICE
+                            && selected_plan.ipfrag == 1
+                            && udp_sessions.address_stun_can_fragment(bytes);
                         // Текст C `plan_done` считается по состоянию ДО
                         // отметки текущего приветствия: именованный Initial,
                         // впервые названный этим пакетом, в C ещё не взвёл
                         // `saw_hello` в момент проверки.
-                        let quic_plan_skip_note = if quic_deny_skip {
+                        let quic_plan_skip_note = if quic_deny_skip || address_stun_replan {
                             None
                         } else {
                             quic_second_hello_skip.or_else(|| {
@@ -2902,6 +2909,7 @@ mod app {
                                             bytes,
                                             controller_probe,
                                             quic_plan_skip_note,
+                                            address_stun_replan,
                                             || {
                                                 let decision = decide_with_tcp_session_mode(
                                                     &mut tcp_sessions,
@@ -3931,7 +3939,12 @@ mod app {
                     }
                     if execution_succeeded && let Some(event) = applied_candidate {
                         if !controller_probe && let Some(packet) = tx_original {
-                            voice_trial_proofs.note_applied(packet, &event, Instant::now());
+                            if address_stun_replan {
+                                udp_sessions.note_address_stun_fragmented(packet);
+                            }
+                            if !address_stun_replan || udp_sessions.address_stun_provable(packet) {
+                                voice_trial_proofs.note_applied(packet, &event, Instant::now());
+                            }
                         }
                         if !controller_probe && let Some(sequence) = tx_sequence {
                             holding.note_http_execution(sequence, &event);
@@ -5373,6 +5386,7 @@ mod app {
             packet,
             false,
             plan_skip,
+            false,
             decide,
         )
     }
@@ -5384,6 +5398,7 @@ mod app {
         packet: &[u8],
         controller_probe: bool,
         plan_skip: Option<&'static str>,
+        address_stun_replan: bool,
         decide: impl FnOnce() -> PacketDecision,
     ) -> PacketDecision {
         // C `handle_udp`: `fl->quic_deny` проверяется до разбора содержимого,
@@ -5397,7 +5412,7 @@ mod app {
             r2o_datapath::reason_stats::record_reason(note);
             return PacketDecision::SkippedUdp { note };
         }
-        if sessions.r2o_plan_applied(packet) {
+        if !address_stun_replan && sessions.r2o_plan_applied(packet) {
             // План уже на потоке, но датаграмма не клиентская: C уходит в
             // ветку обратного направления до выбора/исполнения плана.
             return PacketDecision::SkippedUdp {
@@ -9715,6 +9730,7 @@ mod app {
                 &packet,
                 false,
                 None,
+                false,
                 || decide_with_session(&mut tcp_sessions, selected, &packet),
             );
             assert!(matches!(
@@ -9735,6 +9751,7 @@ mod app {
                 &packet,
                 false,
                 Some(second_skip),
+                false,
                 || panic!("второй Initial не должен доходить до decide"),
             );
             assert_eq!(

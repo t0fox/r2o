@@ -77,6 +77,18 @@ struct StunAttempt {
     started: Instant,
     repeated: bool,
     finished: bool,
+    fragmented: bool,
+}
+
+fn stun_packet_transaction(
+    packet: &[u8],
+) -> Option<(R2oUdpFlowKey, &[u8; STUN_TRANSACTION_ID_LEN])> {
+    let view = PacketView::parse(packet)?;
+    let payload = packet.get(view.udp_payload_range(packet)?)?;
+    Some((
+        flow_key_from_packet(packet)?,
+        payload.get(8..20)?.try_into().ok()?,
+    ))
 }
 
 impl StunAttempt {
@@ -355,6 +367,7 @@ impl R2oUdpSessions {
                     started: now,
                     repeated: false,
                     finished: false,
+                    fragmented: false,
                 });
             }
             return;
@@ -411,6 +424,52 @@ impl R2oUdpSessions {
     /// Забрать накопленные события UDP-обмена и STUN-подтверждения.
     pub fn r2o_take_udp_exchange_events(&mut self) -> Vec<R2oUdpExchangeEvent> {
         self.udp_exchange_events.drain(..).collect()
+    }
+
+    fn address_stun_attempt(&self, packet: &[u8]) -> Option<&StunAttempt> {
+        let (key, txid) = stun_packet_transaction(packet)?;
+        self.flows
+            .get(&key)?
+            .stun
+            .as_ref()?
+            .address_attempts
+            .as_ref()?
+            .iter()
+            .flatten()
+            .find(|attempt| attempt.transaction_id == *txid)
+    }
+
+    pub fn address_stun_can_fragment(&self, packet: &[u8]) -> bool {
+        self.r2o_client_flow(packet)
+            .is_some_and(|flow| !flow.damaged)
+            && self
+                .address_stun_attempt(packet)
+                .is_some_and(|attempt| !attempt.fragmented)
+    }
+
+    pub fn address_stun_provable(&self, packet: &[u8]) -> bool {
+        self.address_stun_attempt(packet)
+            .is_some_and(|attempt| attempt.fragmented && !attempt.repeated)
+    }
+
+    pub fn note_address_stun_fragmented(&mut self, packet: &[u8]) {
+        let Some((key, txid)) = stun_packet_transaction(packet) else {
+            return;
+        };
+        if let Some(attempt) = self
+            .flows
+            .get_mut(&key)
+            .and_then(|flow| flow.stun.as_mut())
+            .and_then(|stun| stun.address_attempts.as_mut())
+            .and_then(|attempts| {
+                attempts
+                    .iter_mut()
+                    .flatten()
+                    .find(|attempt| attempt.transaction_id == *txid)
+            })
+        {
+            attempt.fragmented = true;
+        }
     }
 
     /// Сообщить повтор Binding Request в тишину только при видимой обратной очереди.

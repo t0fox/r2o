@@ -185,6 +185,7 @@ for family, af, address in [(4, socket.AF_INET, "127.0.0.1"), (6, socket.AF_INET
                 client.send(request)
                 assert server.recv(64) == request
             wait_stun_suspect(ctl, family, ip, local_port)
+            request = request[:8] + bytes(range(1, 13))
             trial = bytes([17 + family]) * 16
             plan = bytes([33 + family]) * 16
             tlv = b"R2OP" + struct.pack("!4H", 1, 7, 0, 3)

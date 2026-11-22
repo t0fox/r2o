@@ -283,10 +283,20 @@ impl R2oVoiceTrialProofs {
         true
     }
 
-    pub fn observe_response(
+    #[cfg(test)]
+    fn observe_response(
         &mut self,
         packet: &[u8],
         now: Instant,
+    ) -> Option<r2k_core::control::R2oVoiceProofEvent> {
+        self.observe_response_with_stun_evidence(packet, now, || true)
+    }
+
+    pub fn observe_response_with_stun_evidence(
+        &mut self,
+        packet: &[u8],
+        now: Instant,
+        address_stun_provable: impl FnOnce() -> bool,
     ) -> Option<r2k_core::control::R2oVoiceProofEvent> {
         let view = PacketView::parse(packet)
             .filter(|view| view.protocol == 17 && view.fragment & 0x3fff == 0)?;
@@ -337,8 +347,8 @@ impl R2oVoiceTrialProofs {
             }
             PendingVoiceProofKind::StunBinding { transaction_id } => {
                 if pending.stun_execution.is_some() {
-                    pending.response_confirmed =
-                        r2k_core::stun::verified_binding_address(payload, &transaction_id)
+                    pending.response_confirmed = address_stun_provable()
+                        && r2k_core::stun::verified_binding_address(payload, &transaction_id)
                             .is_some();
                     return None;
                 }
