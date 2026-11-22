@@ -19,7 +19,7 @@ use rustls_pki_types::ServerName;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -906,7 +906,7 @@ impl<F: ListFetch> ListUpdater<F> {
             .r2o_dir
             .join("files")
             .join(format!("{}.txt", source.name));
-        let body = std::fs::read_to_string(path).ok()?;
+        let body = read_cached_text(&path, MAX_RESPONSE_BYTES as u64)?;
         match source.kind {
             ListKind::Cidr => normalize_cidrs(&body, source).ok(),
             ListKind::Domains => {
@@ -1124,11 +1124,7 @@ fn read_existing(
     manifest_path: &Path,
     now: u64,
 ) -> Option<(ListManifest, String)> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_RESPONSE_BYTES as u64 {
-        return None;
-    }
-    let body = std::fs::read_to_string(path).ok()?;
+    let body = read_cached_text(path, MAX_RESPONSE_BYTES as u64)?;
     match source.kind {
         ListKind::Cidr => {
             normalize_cidrs(&body, source).ok()?;
@@ -1183,13 +1179,28 @@ pub(crate) fn verified_meta_source(
     Some((manifest.fetched_at, manifest.sha256, body))
 }
 
-fn read_manifest(path: &Path) -> Option<ListManifest> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MANIFEST_LIMIT {
+fn read_cached_text(path: &Path, limit: u64) -> Option<String> {
+    use std::io::Read;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > limit {
         return None;
     }
-    let body = std::fs::read(path).ok()?;
-    serde_json::from_slice(&body).ok()
+    let mut body = String::with_capacity(metadata.len() as usize);
+    file.take(limit + 1).read_to_string(&mut body).ok()?;
+    (body.len() as u64 <= limit).then_some(body)
+}
+
+fn read_manifest(path: &Path) -> Option<ListManifest> {
+    serde_json::from_str(&read_cached_text(path, MANIFEST_LIMIT)?).ok()
 }
 
 fn normalize_cidrs(text: &str, source: &ListSource) -> Result<String, String> {
@@ -1228,7 +1239,16 @@ fn normalize_cidrs(text: &str, source: &ListSource) -> Result<String, String> {
             invalid += 1;
             continue;
         }
-        networks.insert((address, prefix));
+        // Адреса с разными host bits описывают одну и ту же сеть.
+        let network = match address {
+            IpAddr::V4(ip) => {
+                IpAddr::V4(Ipv4Addr::from(u32::from(ip) & (u32::MAX << (32 - prefix))))
+            }
+            IpAddr::V6(ip) => IpAddr::V6(Ipv6Addr::from(
+                u128::from(ip) & (u128::MAX << (128 - prefix)),
+            )),
+        };
+        networks.insert((network, prefix));
     }
     if total == 0 {
         return Err("в ответе нет CIDR-строк".to_string());
@@ -1460,6 +1480,18 @@ mod tests {
         assert!(normalize_cidrs("31.13.24.0/21\n", source).is_err());
         let valid = normalize_cidrs(&cidr_body(12), source).unwrap();
         assert_eq!(count_data_lines(&valid), 12);
+    }
+
+    #[test]
+    fn cidr_normalization_merges_equal_networks_in_both_families() {
+        let source = ListSource {
+            min_lines: 2,
+            ..SOURCES[0]
+        };
+        let raw = "31.13.0.13/24\n31.13.0.42/24\n2a03:2880::1/32\n2a03:2880::2/32\n";
+        let saved = normalize_cidrs(raw, &source).unwrap();
+        assert_eq!(count_data_lines(&saved), 2);
+        assert!(saved.ends_with("31.13.0.0/24\n2a03:2880::/32\n"));
     }
 
     #[test]
