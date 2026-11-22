@@ -1532,6 +1532,10 @@ panel_start() {
 
 start() {
     [ "$MODE" = off ] && { say "MODE=off — R2O остаётся остановленным"; return 1; }
+    if [ -f "$SCRIPT_DIR/controller-applets" ]; then
+        "$MANAGER" exec --root "$ROOT" --component r2o-manager -- link-active-applets --root "$ROOT" ||
+            say "не удалось объединить бинарники активного выпуска"
+    fi
     engine_start || return 1
     telegram_start || say "Telegram не запущен; см. $LOG/telegram.log и $TG_STATUS"
     panel_start || say "панель не запущена; datapath продолжает работу"

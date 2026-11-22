@@ -72,10 +72,6 @@ for ARCH do
     install -m 0644 "$ROOT/router/files/meta-ranges.txt" "$STAGE/router/files/meta-ranges.txt"
     install -m 0644 "$ROOT/router/rollback-xz" "$STAGE/router/rollback-xz"
     install -m 0644 "$ROOT/router/controller-applets" "$STAGE/router/controller-applets"
-    case "$ARCH" in
-        mipsel|mipsel-openwrt-musl)
-            printf '%s\n' R2O-CONTROLLER-APPLETS-4 > "$STAGE/router/controller-applets" ;;
-    esac
     printf '%s\n' "$RELEASE_SEQUENCE" > "$STAGE/router/update-sequence"
     printf '%s\n' "${R2O_R2_PUBLIC_URL:-}" > "$STAGE/router/update-r2"
     chmod 0644 "$STAGE/router/update-sequence" "$STAGE/router/update-r2"

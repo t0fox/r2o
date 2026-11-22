@@ -7,6 +7,7 @@ description = "Адаптивный контроллер и каталог ре�
 [dependencies]
 r2k-core = { package = "r2k-core", path = "../r2k-core" }
 r2o-datapath = { package = "r2o-datapath", path = "../r2o-datapath" }
+r2o-manager = { path = "../r2o-manager" }
 r2o-panel = { path = "../r2o-panel" }
 r2o-telegram = { path = "../r2o-telegram" }
 base64 = "0.22"

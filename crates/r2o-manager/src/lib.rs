@@ -1,5 +1,9 @@
 //! Строгая проверка подписанных метаданных выпусков r2o и архивов выпуска.
 
+extern crate self as r2o_manager;
+
+#[path = "main.rs"]
+pub mod cli;
 pub mod config;
 pub use update::{
     cancel_router_update, compact_install_rollback, recover_router_update, run_router_update,
@@ -317,8 +321,8 @@ mod update;
 
 pub use install::{
     InstallError, InstallSlots, PreparedRelease, activate_bundle, activate_prepared,
-    active_component_path, install_archive, prepare_archive, read_install_architecture,
-    read_install_slots, rollback,
+    active_component_path, install_archive, link_active_applets, prepare_archive,
+    read_install_architecture, read_install_slots, rollback,
 };
 pub use update::{
     UpdateError, check_update, finish_router_update, mark_bad_previous_release, set_auto_update,

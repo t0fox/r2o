@@ -316,6 +316,20 @@ pub(crate) fn refresh_launcher(root: &Path) -> Result<(), InstallError> {
     install_manager_launcher(root, &root.join("releases").join(current), &arch)
 }
 
+pub fn link_active_applets(root: &Path) -> Result<(), InstallError> {
+    let _lock = ManagerLock::acquire(root)?;
+    let current = read_install_slots(root)?
+        .ok_or(InstallError::NoActiveRelease)?
+        .current;
+    let architecture = read_release_architecture(root, &current)?;
+    let release = root.join("releases").join(current);
+    link_controller_applets(&release, &architecture)?;
+    if !root.join("state/update-pending.json").try_exists()? {
+        install_manager_launcher(root, &release, &architecture)?;
+    }
+    Ok(())
+}
+
 /// Активировать ранее подготовленный выпуск, не перепроверяя архив.
 pub fn activate_prepared(
     root: &Path,
@@ -875,7 +889,7 @@ fn read_release_architecture(root: &Path, release_id: &str) -> Result<String, In
 }
 
 fn link_controller_applets(staging: &Path, architecture: &str) -> io::Result<()> {
-    const FORMAT: &[u8] = b"R2O-CONTROLLER-APPLETS-4\n";
+    const FORMAT: &[u8] = b"R2O-CONTROLLER-APPLETS-5\n";
     let marker = staging.join("router/controller-applets");
     let file = match File::open(marker) {
         Ok(file) => file,
@@ -888,27 +902,50 @@ fn link_controller_applets(staging: &Path, architecture: &str) -> io::Result<()>
         b"R2O-CONTROLLER-APPLETS-1\n" => &["r2o-fetch", "r2o-detect"],
         b"R2O-CONTROLLER-APPLETS-2\n" => &["r2o-fetch", "r2o-detect", "r2o-telegram"],
         b"R2O-CONTROLLER-APPLETS-3\n" => &["r2o-fetch", "r2o-detect", "r2o-telegram", "r2o-panel"],
-        FORMAT if matches!(architecture, "mipsel" | "mipsel-openwrt-musl") => &[
+        b"R2O-CONTROLLER-APPLETS-4\n" => &[
             "r2o-fetch",
             "r2o-detect",
             "r2o-telegram",
             "r2o-panel",
             "r2o-datapath",
         ],
+        FORMAT => &[
+            "r2o-fetch",
+            "r2o-detect",
+            "r2o-telegram",
+            "r2o-panel",
+            "r2o-datapath",
+            "r2o-manager",
+        ],
         _ => return Ok(()),
     };
 
     let builds = staging.join("builds");
     let controller = builds.join(format!("r2o-controller-linux-{architecture}"));
+    let controller_metadata = fs::metadata(&controller)?;
+    let mut changed = false;
     for applet in applets {
+        if *applet == "r2o-datapath" && !matches!(architecture, "mipsel" | "mipsel-openwrt-musl") {
+            continue;
+        }
         let installed = builds.join(format!("{applet}-linux-{architecture}"));
         let temporary = builds.join(format!(".{applet}.link"));
+        let Ok(metadata) = fs::metadata(&installed) else {
+            continue;
+        };
         // На ФС без жёстких ссылок оставляем отдельный проверенный ELF из архива.
-        if installed.is_file() && fs::hard_link(&controller, &temporary).is_ok() {
+        if metadata.is_file()
+            && !rollback_archive::same_file(&metadata, &controller_metadata)
+            && fs::hard_link(&controller, &temporary).is_ok()
+        {
             fs::rename(temporary, installed)?;
+            changed = true;
         }
     }
-    sync_directory(&builds)
+    if changed {
+        sync_directory(&builds)?;
+    }
+    Ok(())
 }
 
 fn install_manager_launcher(
@@ -934,6 +971,11 @@ fn install_manager_launcher(
             use std::os::unix::fs::PermissionsExt;
             // Ссылка экономит копию ELF. Если ФС или режим файла мешают, сохраняем копирование.
             if source_metadata.permissions().mode() & 0o7777 == 0o755 {
+                if let Ok(metadata) = fs::symlink_metadata(&launcher)
+                    && rollback_archive::same_file(&source_metadata, &metadata)
+                {
+                    return Ok(());
+                }
                 match fs::hard_link(&source, &temporary) {
                     Ok(()) => {
                         let result = fs::rename(&temporary, &launcher);
@@ -1352,7 +1394,7 @@ mod tests {
         fs::create_dir(incoming.join("router")).unwrap();
         fs::write(
             incoming.join("router/controller-applets"),
-            "R2O-CONTROLLER-APPLETS-4\n",
+            "R2O-CONTROLLER-APPLETS-5\n",
         )
         .unwrap();
         let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
@@ -1369,7 +1411,13 @@ mod tests {
         activate_download(&root, &prepared).unwrap();
         let controller =
             fs::metadata(active_component_path(&root, "r2o-controller").unwrap()).unwrap();
-        for name in ["r2o-fetch", "r2o-telegram", "r2o-panel", "r2o-datapath"] {
+        for name in [
+            "r2o-fetch",
+            "r2o-telegram",
+            "r2o-panel",
+            "r2o-datapath",
+            "r2o-manager",
+        ] {
             let applet = fs::metadata(active_component_path(&root, name).unwrap()).unwrap();
             assert_eq!(
                 (applet.dev(), applet.ino()),
@@ -1418,6 +1466,40 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn startup_links_applets_extracted_by_an_older_manager() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TestDir::new();
+        let root = temp.0.join("install");
+        let incoming = bundle(&temp.0, "incoming", "mipsel");
+        activate_bundle(&root, &incoming, "r2o-current", "mipsel").unwrap();
+        let release = root.join("releases/r2o-current");
+        fs::create_dir(release.join("router")).unwrap();
+        fs::write(
+            release.join("router/controller-applets"),
+            "R2O-CONTROLLER-APPLETS-5\n",
+        )
+        .unwrap();
+
+        let builds = release.join("builds");
+        for _ in 0..2 {
+            link_active_applets(&root).unwrap();
+            let controller = active_component_path(&root, "r2o-controller").unwrap();
+            let controller = fs::metadata(controller).unwrap();
+            for name in ["r2o-datapath", "r2o-manager"] {
+                let file = active_component_path(&root, name).unwrap();
+                assert_eq!(fs::metadata(file).unwrap().ino(), controller.ino());
+                assert!(!builds.join(format!(".{name}.link")).exists());
+            }
+            assert_eq!(
+                fs::metadata(root.join("r2o-manager")).unwrap().ino(),
+                controller.ino()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn compacted_rollback_preserves_bytes_and_never_activates_a_corrupt_archive() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -1431,7 +1513,7 @@ mod tests {
         fs::create_dir(previous.join("router")).unwrap();
         fs::write(
             previous.join("router/controller-applets"),
-            "R2O-CONTROLLER-APPLETS-4\n",
+            "R2O-CONTROLLER-APPLETS-5\n",
         )
         .unwrap();
         let detect = previous.join("builds/r2o-detect-linux-mipsel");
@@ -1473,6 +1555,7 @@ mod tests {
             "r2o-telegram",
             "r2o-panel",
             "r2o-datapath",
+            "r2o-manager",
         ] {
             assert_eq!(
                 fs::metadata(active_component_path(&root, name).unwrap())

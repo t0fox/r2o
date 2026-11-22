@@ -307,6 +307,7 @@ fn main() {
         "r2o-datapath" => return r2o_datapath::cli::main(),
         "r2o-detect" => return r2o_detect_applet::main(),
         "r2o-fetch" => return r2o_fetch_applet::main(),
+        "r2o-manager" => return r2o_manager::cli::main(),
         "r2o-panel" => return r2o_panel::cli::run_cli(),
         "r2o-telegram" => return r2o_telegram::cli::run(),
         _ => {}

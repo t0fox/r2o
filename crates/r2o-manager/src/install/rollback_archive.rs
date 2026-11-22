@@ -9,7 +9,7 @@ use std::io::{self, BufReader, BufWriter, Read};
 use std::path::Path;
 
 pub(super) const ARCHIVE: &str = ".rollback-builds.tar.xz";
-pub(super) const FORMAT: &[u8] = b"R2O-ROLLBACK-XZ-3\n";
+pub(super) const FORMAT: &[u8] = b"R2O-ROLLBACK-XZ-4\n";
 const DICTIONARY_BYTES: u32 = 2 * 1024 * 1024;
 const DECODE_LIMIT_KIB: u32 = DICTIONARY_BYTES / 1024 + 128;
 
@@ -190,18 +190,19 @@ fn is_applet(name: &std::ffi::OsStr, architecture: &str) -> bool {
         "r2o-telegram",
         "r2o-panel",
         "r2o-datapath",
+        "r2o-manager",
     ]
     .iter()
     .any(|applet| name == std::ffi::OsStr::new(&format!("{applet}-linux-{architecture}")))
 }
 
 #[cfg(unix)]
-fn same_file(a: &Metadata, b: &Metadata) -> bool {
+pub(super) fn same_file(a: &Metadata, b: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     (a.dev(), a.ino()) == (b.dev(), b.ino())
 }
 
 #[cfg(not(unix))]
-fn same_file(_a: &Metadata, _b: &Metadata) -> bool {
+pub(super) fn same_file(_a: &Metadata, _b: &Metadata) -> bool {
     false
 }
