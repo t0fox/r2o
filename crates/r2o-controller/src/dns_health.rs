@@ -687,6 +687,17 @@ pub(crate) fn trusted_dns_tls_connection(
     alpn: &[Vec<u8>],
     roots: Arc<RootCertStore>,
 ) -> Result<rustls::ClientConnection, String> {
+    let config = trusted_dns_tls_config(tls12, wire_len, alpn, roots)?;
+    let name = ServerName::try_from(name.to_owned()).map_err(|_| "DNS: недопустимое имя TLS")?;
+    rustls::ClientConnection::new(config, name).map_err(|error| format!("DNS: TLS config: {error}"))
+}
+
+fn trusted_dns_tls_config(
+    tls12: bool,
+    wire_len: Option<usize>,
+    alpn: &[Vec<u8>],
+    roots: Arc<RootCertStore>,
+) -> Result<Arc<rustls::ClientConfig>, String> {
     let versions = if tls12 {
         &[&rustls::version::TLS12][..]
     } else {
@@ -701,9 +712,7 @@ pub(crate) fn trusted_dns_tls_connection(
     .with_no_client_auth();
     config.alpn_protocols = alpn.to_vec();
     config.r2o_client_hello_wire_len = wire_len;
-    let name = ServerName::try_from(name.to_owned()).map_err(|_| "DNS: недопустимое имя TLS")?;
-    rustls::ClientConnection::new(Arc::new(config), name)
-        .map_err(|error| format!("DNS: TLS config: {error}"))
+    Ok(Arc::new(config))
 }
 
 fn tls_connect(
@@ -761,12 +770,7 @@ fn doh_validate(service: &DnsService) -> Result<(), String> {
     Ok(())
 }
 
-fn doh_authority(service: &DnsService) -> Result<String, String> {
-    let host = if service.sni.is_empty() {
-        service.host.as_str()
-    } else {
-        service.sni.as_str()
-    };
+fn doh_authority(host: &str, port: u16) -> Result<String, String> {
     if host.is_empty() {
         return Err("DoH: недопустимый Host".into());
     }
@@ -781,11 +785,213 @@ fn doh_authority(service: &DnsService) -> Result<String, String> {
     } else {
         host.to_owned()
     };
-    Ok(if service.port == 443 {
+    Ok(if port == 443 {
         authority_host
     } else {
-        format!("{authority_host}:{}", service.port)
+        format!("{authority_host}:{port}")
     })
+}
+
+pub(crate) enum DohTls {
+    Http1(DnsTlsStream),
+    Http2(DohHttp2),
+}
+
+pub(crate) struct DohHttp2 {
+    runtime: tokio::runtime::Runtime,
+    stream: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+}
+
+pub(crate) struct DohHttp2Result {
+    pub health: DnsHealthResult,
+    pub tls: Option<&'static str>,
+    pub body_len: usize,
+    pub content_length: Option<usize>,
+}
+
+pub(crate) fn connect_doh_tls(
+    socket: TcpStream,
+    name: &str,
+    tls12: bool,
+    wire_len: Option<usize>,
+    deadline: Instant,
+    roots: Arc<RootCertStore>,
+) -> Result<DohTls, (DnsHealthFailure, String)> {
+    let configuration = |error| (DnsHealthFailure::Configuration, error);
+    let local = |error: std::io::Error| (DnsHealthFailure::Local, error.to_string());
+    let config = trusted_dns_tls_config(
+        tls12,
+        wire_len,
+        &[b"h2".to_vec(), b"http/1.1".to_vec()],
+        roots,
+    )
+    .map_err(configuration)?;
+    let name = ServerName::try_from(name.to_owned())
+        .map_err(|_| configuration("DNS: недопустимое имя TLS".into()))?;
+    socket.set_nonblocking(true).map_err(local)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(local)?;
+    let stream = runtime.block_on(async {
+        let socket = tokio::net::TcpStream::from_std(socket).map_err(local)?;
+        tokio::time::timeout_at(
+            deadline.into(),
+            tokio_rustls::TlsConnector::from(config).connect(name, socket),
+        )
+        .await
+        .map_err(|_| (DnsHealthFailure::Network, "истёк срок TLS".into()))?
+        .map_err(|error| (socket_failure(&error), format!("TLS: {error}")))
+    })?;
+    if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
+        return Ok(DohTls::Http2(DohHttp2 { runtime, stream }));
+    }
+    // Продолжаем HTTP/1.1 на том же TCP-сокете и в той же TLS-сессии.
+    let (socket, connection) = stream.into_inner();
+    let socket = socket.into_std().map_err(local)?;
+    socket.set_nonblocking(false).map_err(local)?;
+    Ok(DohTls::Http1(rustls::StreamOwned::new(connection, socket)))
+}
+
+impl DohHttp2 {
+    pub(crate) fn exchange(
+        self,
+        name: &str,
+        port: u16,
+        path: &str,
+        query: &[u8],
+        deadline: Instant,
+    ) -> DohHttp2Result {
+        use bytes::Bytes;
+
+        let mut health = DnsHealthResult {
+            local_endpoint: self.stream.get_ref().0.local_addr().ok(),
+            tcp_reachable: true,
+            tls_handshake: true,
+            ..Default::default()
+        };
+        let tls = match self.stream.get_ref().1.protocol_version() {
+            Some(rustls::ProtocolVersion::TLSv1_3) => Some("1.3"),
+            Some(rustls::ProtocolVersion::TLSv1_2) => Some("1.2"),
+            _ => None,
+        };
+        let mut body = Vec::new();
+        let mut content_length = None;
+        let result = self.runtime.block_on(async {
+            tokio::time::timeout_at(deadline.into(), async {
+                let invalid = |reason: &str| (DnsHealthFailure::DnsResponse, reason.to_owned());
+                let h2_error = |error: h2::Error| {
+                    let kind = error
+                        .get_io()
+                        .map_or(DnsHealthFailure::Server, socket_failure);
+                    (kind, error.to_string())
+                };
+                let authority = doh_authority(name, port)
+                    .map_err(|error| (DnsHealthFailure::Configuration, error))?;
+                let uri = http::Uri::builder()
+                    .scheme("https")
+                    .authority(authority)
+                    .path_and_query(path)
+                    .build()
+                    .map_err(|error| (DnsHealthFailure::Configuration, error.to_string()))?;
+                let request = http::Request::post(uri)
+                    .version(http::Version::HTTP_2)
+                    .header(http::header::ACCEPT, "application/dns-message")
+                    .header(http::header::CONTENT_TYPE, "application/dns-message")
+                    .header(http::header::CONTENT_LENGTH, query.len())
+                    .body(())
+                    .map_err(|error| (DnsHealthFailure::Configuration, error.to_string()))?;
+                let (sender, connection) = h2::client::Builder::new()
+                    .enable_push(false)
+                    .header_table_size(0)
+                    .max_header_list_size(DOH_HEADER_MAX as u32)
+                    .initial_window_size((DOH_BODY_MAX + 1) as u32)
+                    .handshake(self.stream)
+                    .await
+                    .map_err(h2_error)?;
+                tokio::spawn(connection);
+
+                let mut sender = sender.ready().await.map_err(h2_error)?;
+                let sent = Instant::now();
+                let (response, mut stream) =
+                    sender.send_request(request, false).map_err(h2_error)?;
+                stream
+                    .send_data(Bytes::copy_from_slice(query), true)
+                    .map_err(h2_error)?;
+                let response = response.await.map_err(h2_error)?;
+                health.http_status = i32::from(response.status().as_u16());
+                if response.status() != http::StatusCode::OK {
+                    return Err((
+                        DnsHealthFailure::Server,
+                        format!("сервер вернул HTTP {}", health.http_status),
+                    ));
+                }
+                if !response
+                    .headers()
+                    .get(http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.split(';').next())
+                    .is_some_and(|media| {
+                        media.trim().eq_ignore_ascii_case("application/dns-message")
+                    })
+                {
+                    return Err(invalid("неверный Content-Type"));
+                }
+                let lengths = response.headers().get_all(http::header::CONTENT_LENGTH);
+                let mut lengths = lengths.iter();
+                if let Some(length) = lengths.next() {
+                    content_length = length.to_str().ok().and_then(|value| value.parse().ok());
+                    if content_length.is_none_or(|length| length > DOH_BODY_MAX)
+                        || lengths.next().is_some()
+                    {
+                        return Err(invalid("неверный Content-Length"));
+                    }
+                }
+                let mut recv = response.into_body();
+                while let Some(chunk) = recv.data().await {
+                    let chunk = chunk.map_err(|_| invalid("обрыв DNS-ответа"))?;
+                    if body.len() + chunk.len() > DOH_BODY_MAX {
+                        return Err(invalid("слишком большой DNS-ответ"));
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                if content_length.is_some_and(|length| length != body.len()) {
+                    return Err(invalid("Content-Length не совпадает с DNS-ответом"));
+                }
+                let query_id = query
+                    .get(..2)
+                    .ok_or_else(|| invalid("некорректный DNS-запрос"))?;
+                if !dns_probe_reply(&body, u16::from_be_bytes([query_id[0], query_id[1]])) {
+                    return Err(invalid("некорректный DNS-ответ"));
+                }
+                Ok(sent.elapsed().as_millis() as u64)
+            })
+            .await
+        });
+        health = match result {
+            Ok(Ok(rtt)) => {
+                health.dns_reply = true;
+                health.answer_rtt_ms = Some(rtt);
+                health.reason = "DoH (HTTP/2): получен корректный DNS-ответ".into();
+                health
+            }
+            Ok(Err((kind, reason))) => health.fail(kind, format!("DoH (HTTP/2): {reason}")),
+            Err(_) => {
+                let kind = if health.http_status == 0 {
+                    DnsHealthFailure::Network
+                } else {
+                    DnsHealthFailure::DnsResponse
+                };
+                health.fail(kind, "DoH (HTTP/2): истёк срок проверки")
+            }
+        };
+        DohHttp2Result {
+            health,
+            tls,
+            body_len: body.len(),
+            content_length,
+        }
+    }
 }
 
 fn probe_doh(
@@ -818,23 +1024,28 @@ fn probe_doh(
     } else {
         service.sni.as_str()
     };
-    let mut stream = match tls_connect(stream, name, &[b"http/1.1".to_vec()], deadline, roots) {
-        Ok(tls) => {
-            result.tls_handshake = true;
-            tls
-        }
-        Err((kind, reason)) => return result.fail(kind, format!("DoH: {reason}")),
-    };
-    let authority = match doh_authority(service) {
-        Ok(authority) => authority,
-        Err(reason) => return result.fail(DnsHealthFailure::Configuration, reason),
-    };
     let path = if service.path.is_empty() {
         "/"
     } else {
         service.path.as_str()
     };
     let message = dns_query_message(DNS_QUERY_ID_DOH);
+    let mut stream = match connect_doh_tls(stream, name, false, None, deadline, roots) {
+        Ok(DohTls::Http1(tls)) => {
+            result.tls_handshake = true;
+            tls
+        }
+        Ok(DohTls::Http2(tls)) => {
+            return tls
+                .exchange(name, service.port, path, &message, deadline)
+                .health;
+        }
+        Err((kind, reason)) => return result.fail(kind, format!("DoH: {reason}")),
+    };
+    let authority = match doh_authority(name, service.port) {
+        Ok(authority) => authority,
+        Err(reason) => return result.fail(DnsHealthFailure::Configuration, reason),
+    };
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         message.len()
@@ -1186,7 +1397,7 @@ async fn probe_doh3_on(
     use bytes::{Buf, Bytes};
 
     let mut result = DnsHealthResult::default();
-    let authority = match doh_authority(service) {
+    let authority = match doh_authority(host, service.port) {
         Ok(authority) => authority,
         Err(error) => return result.fail(DnsHealthFailure::Configuration, error),
     };
@@ -1313,7 +1524,7 @@ pub fn probe_dns_health(
     probe_dns_health_with_roots(service, mark, timeout, dns_roots())
 }
 
-fn probe_dns_health_with_roots(
+pub(crate) fn probe_dns_health_with_roots(
     service: &DnsService,
     mark: Option<u32>,
     timeout: Duration,

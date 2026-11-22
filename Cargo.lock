@@ -1644,6 +1644,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "bytes",
+ "h2",
  "h3",
  "h3-quinn",
  "hpke",
@@ -1661,6 +1662,7 @@ dependencies = [
  "time",
  "tls-parser",
  "tokio",
+ "tokio-rustls",
  "webpki-roots 0.26.11",
  "x509-parser",
 ]

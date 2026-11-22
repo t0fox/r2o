@@ -1843,33 +1843,111 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     let dot_query = r2o_fetch_dot_query();
     let doh_query = r2o_fetch_doh_query();
     let dns_probe = dot_query.is_some() || doh_query.is_some();
-    let mut connection = if let Some(ech) = ech {
-        crate::r2o_tls::r2o_tls_ech_connection(
-            &options.name,
-            ech.clone(),
-            options.wire_len,
-            dns_probe.then_some(roots),
-        )?
-    } else if dns_probe {
-        let alpn = if dot_query.is_some() {
-            b"dot".as_slice()
-        } else {
-            b"http/1.1"
-        };
-        crate::dns_health::trusted_dns_tls_connection(
+    let (mut connection, socket) = if let Some(query) =
+        doh_query.as_deref().filter(|_| ech.is_none())
+    {
+        let session = crate::dns_health::connect_doh_tls(
+            socket,
             &options.name,
             options.tls12,
             options.wire_len,
-            &[alpn.to_vec()],
+            deadline,
             std::sync::Arc::new(roots),
-        )?
+        )
+        .map_err(|(_, reason)| reason)?;
+        match session {
+            crate::dns_health::DohTls::Http1(stream) => (stream.conn, stream.sock),
+            crate::dns_health::DohTls::Http2(stream) => {
+                let deadline = match phase_timeout {
+                    Some(timeout) => Instant::now()
+                        .checked_add(timeout)
+                        .ok_or("срок HTTP-шага слишком велик")?,
+                    None => deadline,
+                };
+                let exchange =
+                    stream.exchange(&options.name, options.port, &options.path, query, deadline);
+                let health = exchange.health;
+                let local_port = health
+                    .local_endpoint
+                    .ok_or("не удалось получить местный порт DoH-зонда")?
+                    .port();
+                let status = health.http_status as u16;
+                let body_bytes = exchange.body_len as u64;
+                let body_expected = exchange.content_length.map(|length| length as u64);
+                let negotiated_tls = match exchange.tls {
+                    Some("1.3") => Some(0x0304),
+                    Some("1.2") => Some(0x0303),
+                    _ => None,
+                };
+                return Ok(FetchResult {
+                    address,
+                    local_port,
+                    tls: exchange.tls,
+                    peer_name_ok: Some(true),
+                    ech_accepted: None,
+                    status,
+                    http_outcome: R2oFetchHttpOutcome::Neutral,
+                    cloudflare_challenge: false,
+                    body_bytes,
+                    body_expected,
+                    body_has_length: body_expected.is_some(),
+                    location: String::new(),
+                    chunked: false,
+                    gzip: false,
+                    complete: health.dns_reply,
+                    application_verified: health.dns_reply,
+                    handshake_verified: false,
+                    connection_close: false,
+                    dns_probe: Some(DnsTcpProtocol::Doh),
+                    dns_reply: health.dns_reply,
+                    elapsed: started.elapsed(),
+                    reason: Some(health.reason),
+                    r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation {
+                        stage: if status == 0 {
+                            crate::r2o_volume::R2oVolumeProbeStage::Handshake
+                        } else {
+                            crate::r2o_volume::R2oVolumeProbeStage::Application
+                        },
+                        name_valid: negotiated_tls.is_some(),
+                        negotiated_tls,
+                        status,
+                        body_complete: health.dns_reply,
+                        body_bytes,
+                        body_expected: body_expected.unwrap_or(0),
+                        body_has_length: body_expected.is_some(),
+                        body_framing_valid: health.dns_reply,
+                        ..Default::default()
+                    },
+                    budget_note: None,
+                    r2o_resources: Vec::new(),
+                });
+            }
+        }
     } else {
-        crate::r2o_tls::r2o_tls_client_connection(
-            &options.name,
-            options.tls12,
-            options.wire_len,
-            roots,
-        )?
+        let connection = if let Some(ech) = ech {
+            crate::r2o_tls::r2o_tls_ech_connection(
+                &options.name,
+                ech.clone(),
+                options.wire_len,
+                dns_probe.then_some(roots),
+            )?
+        } else if dot_query.is_some() {
+            crate::dns_health::trusted_dns_tls_connection(
+                &options.name,
+                options.tls12,
+                options.wire_len,
+                &[b"dot".to_vec()],
+                std::sync::Arc::new(roots),
+            )?
+        } else {
+            crate::r2o_tls::r2o_tls_client_connection(
+                &options.name,
+                options.tls12,
+                options.wire_len,
+                roots,
+            )?
+        };
+        (connection, socket)
     };
     let mut r2o_socket = R2oTlsTcpStream::new(socket);
     while connection.is_handshaking() {
@@ -5368,6 +5446,168 @@ mod tests {
         assert_eq!(result.dns_probe, Some(crate::fetch::DnsTcpProtocol::Doh));
         assert!(!result.dns_reply);
         assert!(!result.application_verified);
+    }
+
+    #[test]
+    fn doh_http2_health_and_connected_fetch_require_the_dns_reply() {
+        use crate::dns_health::{DNS_QUERY_ID_DOH, DnsHealthFailure, dns_query_message};
+        use bytes::Bytes;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let mut config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![der.clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                    certificate.serialize_private_key_der(),
+                )),
+            )
+            .unwrap();
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let mut roots = RootCertStore::empty();
+        roots.add(der).unwrap();
+        let query = dns_query_message(DNS_QUERY_ID_DOH);
+        let mut dns_reply = query.clone();
+        dns_reply[2..4].copy_from_slice(&[0x81, 0x80]);
+        dns_reply[6..8].copy_from_slice(&[0, 1]);
+        dns_reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 8]);
+        let mut wrong_id = dns_reply.clone();
+        wrong_id[1] ^= 1;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let path = "/dns-query?route=%2Fprobe&profile=one";
+        let expected_query = query.clone();
+        let server = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_secs(12), async {
+                        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                        let (connection, _) = listener.accept().await.unwrap();
+                        assert!(acceptor.accept(connection).await.is_err());
+                        for (status, body) in [
+                            (200, dns_reply.clone()),
+                            (200, wrong_id.clone()),
+                            (403, Vec::new()),
+                            (200, vec![0; crate::dns_health::DOH_BODY_MAX + 1]),
+                            (200, dns_reply),
+                            (200, wrong_id),
+                        ] {
+                            let (socket, _) = listener.accept().await.unwrap();
+                            let tls = acceptor.accept(socket).await.unwrap();
+                            assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+                            let mut connection = h2::server::handshake(tls).await.unwrap();
+                            let (request, mut respond) =
+                                connection.accept().await.unwrap().unwrap();
+                            assert_eq!(request.method(), http::Method::POST);
+                            assert_eq!(
+                                request.uri().authority().unwrap().as_str(),
+                                format!("localhost:{}", address.port())
+                            );
+                            assert_eq!(request.uri().path_and_query().unwrap().as_str(), path);
+                            assert_eq!(
+                                request.headers()[http::header::CONTENT_TYPE],
+                                "application/dns-message"
+                            );
+                            let expected = expected_query.clone();
+                            let reply_task = tokio::spawn(async move {
+                                let mut received = Vec::new();
+                                let mut stream = request.into_body();
+                                while let Some(chunk) = stream.data().await {
+                                    received.extend_from_slice(&chunk.unwrap());
+                                }
+                                assert_eq!(received, expected);
+                                let response = http::Response::builder()
+                                    .status(status)
+                                    .header(http::header::CONTENT_TYPE, "application/dns-message")
+                                    .body(())
+                                    .unwrap();
+                                respond
+                                    .send_response(response, false)
+                                    .unwrap()
+                                    .send_data(Bytes::from(body), true)
+                                    .unwrap();
+                            });
+                            while connection.accept().await.is_some_and(|next| next.is_ok()) {}
+                            reply_task.await.unwrap();
+                        }
+                    })
+                    .await
+                    .unwrap();
+                });
+        });
+        let mut service = r2k_core::dns_config::DnsService {
+            protocol: "doh".into(),
+            host: address.ip().to_string(),
+            sni: "wrong.local".into(),
+            port: address.port(),
+            path: path.into(),
+            ..Default::default()
+        };
+        let probe = |service: &r2k_core::dns_config::DnsService| {
+            crate::dns_health::probe_dns_health_with_roots(
+                service,
+                None,
+                Duration::from_secs(2),
+                Arc::new(roots.clone()),
+            )
+        };
+        assert_eq!(probe(&service).failure, Some(DnsHealthFailure::Certificate));
+        service.sni = "localhost".into();
+        for (status, failure) in [
+            (200, None),
+            (200, Some(DnsHealthFailure::DnsResponse)),
+            (403, Some(DnsHealthFailure::Server)),
+            (200, Some(DnsHealthFailure::DnsResponse)),
+        ] {
+            let result = probe(&service);
+            assert_eq!(result.http_status, status, "{result:?}");
+            assert_eq!(result.failure, failure, "{result:?}");
+            assert_eq!(result.dns_reply, failure.is_none());
+            assert_eq!(result.answer_rtt_ms.is_some(), failure.is_none());
+        }
+        let options = FetchOptions {
+            name: service.sni,
+            port: address.port(),
+            ip: Some(address.ip()),
+            path: path.into(),
+            deadline: Duration::from_secs(2),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        for valid in [true, false] {
+            let socket = TcpStream::connect(address).unwrap();
+            let local_port = socket.local_addr().unwrap().port();
+            r2o_fetch_doh_query_set(Some(query.clone()));
+            let fetch = r2o_fetch_connected_stream_with_roots_and_encoding(
+                &options,
+                socket,
+                address,
+                Instant::now(),
+                R2oFetchEncoding::Identity,
+                roots.clone(),
+                None,
+                None,
+                None,
+            );
+            r2o_fetch_doh_query_set(None);
+            let fetch = fetch.unwrap();
+            assert_eq!(fetch.local_port, local_port);
+            assert_eq!(fetch.status, 200);
+            assert_eq!(fetch.verified_dns_reply(), valid, "{fetch:?}");
+            assert_eq!(fetch.application_verified, valid);
+        }
+        server.join().unwrap();
     }
 
     #[test]
