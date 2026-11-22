@@ -22,6 +22,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(7);
 const RECHECK_INTERVAL: Duration = Duration::from_secs(90);
 const RETRY: Duration = Duration::from_secs(300);
+// При очереди один TCP-сервис уступает слот, сохраняя полный бюджет без соседей.
+const TCP_SEARCH_WITH_WAITERS: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
 struct Request {
@@ -344,7 +346,9 @@ impl Recheck {
 
 enum Phase {
     Open(RouteCommand, Option<Binding>),
-    Search,
+    Search {
+        started: Instant,
+    },
     QuicCapture {
         local: SocketAddr,
         snapshot: Option<Vec<u8>>,
@@ -511,7 +515,22 @@ impl Recovery {
             );
         }
 
-        if let Some(attempt) = self.attempt.take() {
+        if let Some(mut attempt) = self.attempt.take() {
+            if let Phase::Search { started } = attempt.phase
+                && now < attempt.expires
+                && now.saturating_duration_since(started) >= TCP_SEARCH_WITH_WAITERS
+                && self
+                    .ready_request(
+                        state,
+                        worker,
+                        quic.as_deref(),
+                        now,
+                        Some(attempt.request.generation),
+                    )
+                    .is_some()
+            {
+                attempt.expires = now;
+            }
             self.advance(attempt, client, state, worker, quic, now, wall);
             return;
         }
@@ -524,31 +543,40 @@ impl Recovery {
             self.open(entry.request, Some(entry.binding), client, state, now);
             return;
         }
-        let request = (0..state.services.len()).find_map(|index| {
+        if let Some(request) = self.ready_request(state, worker, quic.as_deref(), now, None) {
+            if request.transport() == 6 && worker.r2o_is_watching(&request.target) {
+                worker.r2o_forget_watching_task(&r2o_discovery_task_key(&request.target));
+            }
+            self.open(request, None, client, state, now);
+        }
+    }
+
+    fn ready_request(
+        &self,
+        state: &R2oDnsServices,
+        worker: &DiscoveryWorker,
+        quic: Option<&R2oQuicDiscoveryWorker>,
+        now: Instant,
+        skip_generation: Option<u64>,
+    ) -> Option<Request> {
+        (0..state.services.len()).find_map(|index| {
             let request = Request::from_failures(state, index, self.family)?;
-            (state.live[index]
-                .recovery_retry_at
-                .is_none_or(|retry| now >= retry)
+            (Some(request.generation) != skip_generation
+                && state.live[index]
+                    .recovery_retry_at
+                    .is_none_or(|retry| now >= retry)
                 && !self.retained.iter().any(|entry| {
                     entry.request.endpoint == request.endpoint
                         && entry.request.transport() == request.transport()
                 })
                 && if request.transport() == 17 {
                     self.doq_marks.is_some()
-                        && quic
-                            .as_ref()
-                            .is_some_and(|worker| !worker.active.contains_key(&request.endpoint))
+                        && quic.is_some_and(|worker| !worker.active.contains_key(&request.endpoint))
                 } else {
                     !worker.is_active(&request.target)
                 })
             .then_some(request)
-        });
-        if let Some(request) = request {
-            if request.transport() == 6 && worker.r2o_is_watching(&request.target) {
-                worker.r2o_forget_watching_task(&r2o_discovery_task_key(&request.target));
-            }
-            self.open(request, None, client, state, now);
-        }
+        })
     }
 
     fn open(
@@ -592,7 +620,7 @@ impl Recovery {
     ) {
         let current = attempt.request.needs_recovery(state);
         match &mut attempt.phase {
-            Phase::Search => {
+            Phase::Search { .. } => {
                 if current.is_none() || now >= attempt.expires {
                     attempt.expires = now;
                     let key = r2o_discovery_task_key(&attempt.request.target);
@@ -724,7 +752,7 @@ impl Recovery {
                 } else if !worker.is_active(&attempt.request.target)
                     && worker.queue_with_planned(attempt.request.target.clone(), false)
                 {
-                    attempt.phase = Phase::Search;
+                    attempt.phase = Phase::Search { started: now };
                 } else {
                     self.release(&attempt.request, None, client, state, now, None);
                     return;
@@ -865,7 +893,8 @@ impl Recovery {
         now: Instant,
     ) -> bool {
         if !self.attempt.as_ref().is_some_and(|attempt| {
-            matches!(attempt.phase, Phase::Search) && attempt.request.matches(&outcome.target)
+            matches!(attempt.phase, Phase::Search { .. })
+                && attempt.request.matches(&outcome.target)
         }) {
             return false;
         }
@@ -1019,6 +1048,82 @@ mod tests {
         state.services.pop();
         state.live[0].generation += 1;
         assert_eq!(request.index(&state), None);
+    }
+
+    #[test]
+    fn dns_tcp_recovery_yields_only_when_another_service_can_start() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let start = Instant::now();
+        let gate = R2oMeasurementGate::new(1);
+        let mut worker = DiscoveryWorker::new(None, gate.clone());
+        let mut state = R2oDnsServices {
+            services: Vec::new(),
+            live: Vec::new(),
+            tasks: Vec::new(),
+            generation: 2,
+        };
+        for generation in 1..=2 {
+            let host = format!("192.0.2.{generation}");
+            state.services.push(DnsService {
+                protocol: "dot".into(),
+                host: host.clone(),
+                sni: format!("resolver{generation}.example"),
+                port: 853,
+                ..Default::default()
+            });
+            state.live.push(DnsServiceLive {
+                state: DnsServiceState::Failed,
+                ip: host,
+                generation,
+                consecutive_network_failures: 2,
+                ..Default::default()
+            });
+        }
+        let request = Request::from_failures(&state, 0, Some(4)).unwrap();
+        let key = r2o_discovery_task_key(&request.target);
+        let cancel = Arc::new(AtomicBool::new(false));
+        worker.active.insert(key.clone(), request.target.clone());
+        worker
+            .active_cancels
+            .lock()
+            .unwrap()
+            .insert(key, cancel.clone());
+        let mut recovery = Recovery {
+            firewall: PathBuf::new(),
+            family: Some(4),
+            doq_marks: None,
+            gate,
+            attempt: Some(Attempt {
+                request,
+                phase: Phase::Search { started: start },
+                expires: start + ROUTE_TTL,
+            }),
+            retained: Vec::new(),
+            cleanup: Vec::new(),
+            next_tick: start,
+            next_scan: start,
+        };
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(&control::encode_greeting(1500).unwrap())
+            .unwrap();
+        let mut client = ControlClient::handshake(socket).unwrap();
+        let before_share = start + TCP_SEARCH_WITH_WAITERS - Duration::from_secs(1);
+        recovery.tick(&mut client, &mut state, &mut worker, None, before_share, 0);
+        assert!(!cancel.load(Ordering::Relaxed));
+
+        state.live[1].recovery_retry_at =
+            Some(start + TCP_SEARCH_WITH_WAITERS + Duration::from_secs(1));
+        let share = start + TCP_SEARCH_WITH_WAITERS;
+        recovery.tick(&mut client, &mut state, &mut worker, None, share, 0);
+        assert!(!cancel.load(Ordering::Relaxed));
+
+        let ready = share + Duration::from_secs(1);
+        recovery.tick(&mut client, &mut state, &mut worker, None, ready, 0);
+        assert!(cancel.load(Ordering::Relaxed));
     }
 
     #[test]
