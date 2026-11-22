@@ -40,7 +40,15 @@ add rule inet r2o_endpoint out ip daddr 127.0.0.1 udp dport { 3478, 3479, 8443, 
 add rule inet r2o_endpoint out ip6 daddr ::1 udp dport { 3478, 3479, 8443, 8543 } counter queue num 65122
 NFT
 if [ "$stun" = 1 ]; then
-    nft insert rule inet r2o_endpoint out udp dport 3478 ct state '{ new, established }' counter
+    nft add chain inet r2o_endpoint dns_out '{ type filter hook postrouting priority mangle; policy accept; }'
+    nft add rule inet r2o_endpoint dns_out meta mark 19051 return
+    nft add rule inet r2o_endpoint dns_out ip daddr 127.0.0.1 udp dport 5353 counter queue num 65121
+    nft add rule inet r2o_endpoint dns_out ip6 daddr ::1 udp dport 5353 counter queue num 65122
+    nft add chain inet r2o_endpoint dns_block '{ type filter hook postrouting priority -149; policy accept; }'
+    nft add rule inet r2o_endpoint dns_block meta mark 19052 udp dport 5353 @th,64,16 0x1234 counter drop
+    nft add rule inet r2o_endpoint dns_block meta mark 19052 udp dport 5353 counter
+    nft add rule inet r2o_endpoint dns_block udp dport 5353 @th,64,16 0x1234 counter
+    nft insert rule inet r2o_endpoint out udp dport '{ 3478, 5353 }' ct state '{ new, established }' counter
     nft add chain inet r2o_endpoint in '{ type filter hook input priority 0; policy accept; }'
     nft add rule inet r2o_endpoint in ip saddr 127.0.0.1 udp sport 3478 counter queue num 65121
     nft add rule inet r2o_endpoint in ip6 saddr ::1 udp sport 3478 counter queue num 65122
@@ -52,6 +60,7 @@ pid4=$!
 pid6=$!
 
 if ! python3 - "$temp" "$root/crates/r2k-core/tests/fixtures" "$stun" <<'PY'
+import hashlib
 import pathlib
 import socket
 import struct
@@ -77,17 +86,18 @@ def frame(stream):
     p = exact(stream, size)
     return int.from_bytes(p[:2], "big"), p[2:]
 
-def command(stream, opcode, data, trial=None):
+def command(stream, opcode, data, trial=None, rejection=None):
     stream.sendall(struct.pack("!IH", len(data) + 2, opcode) + data)
     while True:
         kind, body = frame(stream)
         if kind == 8 and body[38:40] == opcode.to_bytes(2, "big"):
-            assert body[40:42] == b"\x01\x00", (opcode, body.hex())
+            result = bytes([0, rejection]) if rejection is not None else b"\x01\x00"
+            assert body[40:42] == result, (opcode, body.hex())
             if trial is not None:
                 assert body[42:58] == trial, body.hex()
             return body
 
-def wait_apply(stream, plan, want, port=8443, trial=None):
+def wait_apply(stream, plan, want, port=8443, trial=None, shape=5):
     deadline = time.monotonic() + (3 if want else .3)
     seen = []
     while time.monotonic() < deadline:
@@ -105,7 +115,7 @@ def wait_apply(stream, plan, want, port=8443, trial=None):
             if trial is not None:
                 assert body[54:70] == trial, body.hex()
                 assert int.from_bytes(body[70:78], "big") > 0, body.hex()
-                assert body[86:90] == bytes([2, body[0], 5, 1]), body.hex()
+                assert body[86:90] == bytes([2, body[0], shape, 1]), body.hex()
             stream.settimeout(3)
             return body
     stream.settimeout(3)
@@ -137,6 +147,16 @@ def wait_stun_suspect(stream, family, address, local_port):
             stream.settimeout(3)
             return
     raise AssertionError("событие молчания STUN не получено")
+
+def expect_dns_block(server):
+    server.settimeout(.2)
+    try:
+        received = server.recv(512)
+    except TimeoutError:
+        return
+    finally:
+        server.settimeout(3)
+    raise AssertionError(("DNS-запрос неожиданно прошёл блокировку", received))
 
 for family, af, address in [(4, socket.AF_INET, "127.0.0.1"), (6, socket.AF_INET6, "::1")]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as ctl:
@@ -219,6 +239,65 @@ for family, af, address in [(4, socket.AF_INET, "127.0.0.1"), (6, socket.AF_INET
             wait_stun_exchange(ctl, applied, True)
             command(ctl, 0x008a, flow + trial, trial)
             print(f"IPv{family}: молчание STUN, точный APPLIED через NFQUEUE, сборка фрагментов, Binding Response, DEL")
+
+        with socket.socket(af, socket.SOCK_DGRAM) as server, socket.socket(af, socket.SOCK_DGRAM) as client:
+            server.bind((address, 5353))
+            server.settimeout(3)
+            client.connect((address, 5353))
+            client.settimeout(3)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, 19052)
+            local_port = client.getsockname()[1]
+            flow = bytes([family]) + ip + ip + struct.pack("!HHB", local_port, 5353, 17)
+            query = bytes.fromhex("123401000001000000000000076578616d706c6503636f6d0000010001")
+            baseline = b"\x56\x78" + query[2:]
+            reply = query[:2] + bytes.fromhex("81800001000100000000") + query[12:]
+            reply += bytes.fromhex("c00c000100010000003c0004c000020a")
+            trial = bytes([49 + family]) * 16
+            plan = bytes([65 + family]) * 16
+            tlv = b"R2OP" + struct.pack("!4H", 1, 7, 0, 3)
+            tlv += b"\0\x01\0\x10" + plan + b"\0\x02\0\x02\x11\x02\x01\x0c\0\x01\x01"
+            guard = struct.pack("!IH", 10000, len(query)) + hashlib.sha256(query).digest()
+            command(ctl, 0x009c, flow + trial + guard + tlv, trial)
+            command(ctl, 0x009c, flow + trial + guard + tlv, trial, rejection=3)
+            foreign_trial = bytes([81 + family]) * 16
+            command(ctl, 0x008a, flow + foreign_trial, foreign_trial)
+
+            # Иной ID подтверждает кортеж, но не считается обработанным запросом.
+            client.send(baseline)
+            assert server.recv(512) == baseline
+            wait_apply(ctl, plan, False, 5353, trial, shape=14)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, 0)
+            client.send(query)
+            assert server.recv(512) == query
+            wait_apply(ctl, plan, False, 5353, trial, shape=14)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, 19052)
+            with socket.socket(af, socket.SOCK_DGRAM) as other:
+                other.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, 19052)
+                other.sendto(query, (address, 5353))
+            wait_apply(ctl, plan, False, 5353, trial, shape=14)
+            expect_dns_block(server)
+
+            client.send(query)
+            applied = wait_apply(ctl, plan, True, 5353, trial, shape=14)
+            assert applied[:33] == bytes([family]) + ip + ip
+            assert set(struct.unpack("!HH", applied[33:37])) == {local_port, 5353}
+            received, peer = server.recvfrom(512)
+            assert received == query and peer[1] == local_port
+            server.sendto(reply, peer)
+            received = client.recv(512)
+            assert received[:2] == query[:2] and received[2:12] == bytes.fromhex("81800001000100000000")
+            assert received[12:-16] == query[12:] and socket.inet_ntoa(received[-4:]) == "192.0.2.10"
+            expect_dns_block(server)
+            command(ctl, 0x008a, flow + trial, trial)
+            client.send(query)
+            wait_apply(ctl, plan, False, 5353, trial, shape=14)
+            expect_dns_block(server)
+            command(ctl, 0x009c, flow + trial + struct.pack("!I", 100) + guard[4:] + tlv, trial)
+            time.sleep(.15)
+            client.send(query)
+            wait_apply(ctl, plan, False, 5353, trial, shape=14)
+            expect_dns_block(server)
+            print(f"IPv{family}: DNS-зонд через NFQUEUE, отдельные APPLIED и ответ DNS, изоляция ID/сокета/марки, DEL и истечение")
 PY
 then
     nft list table inet r2o_endpoint >&2

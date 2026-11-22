@@ -1857,7 +1857,7 @@ fn decide_with_session_mode(
         return if is_tcp && plan.guards & GUARD_RST_ALIEN != 0 {
             PacketDecision::Accept
         } else {
-            decide_packet_with_segment_cap(plan, packet, tcp_segment_cap, 0)
+            decide_packet_with_segment_cap(plan, packet, tcp_segment_cap, 0, false)
         };
     };
     let key = tracked.key;
@@ -1981,6 +1981,7 @@ fn decide_with_session_mode(
             execution_state
                 .and_then(|session| session.reverse_ttl)
                 .unwrap_or(0),
+            false,
         )
     };
     let applied = matches!(
@@ -2183,7 +2184,27 @@ pub fn decide(plan: &Plan, packet: &[u8]) -> PacketDecision {
     if plan.guards & GUARD_RST_ALIEN != 0 {
         return PacketDecision::Accept;
     }
-    decide_packet_with_segment_cap(plan, packet, 0, 0)
+    decide_packet_with_segment_cap(plan, packet, 0, 0, false)
+}
+
+pub fn is_dns_udp_fragment_plan(plan: &Plan) -> bool {
+    *plan
+        == Plan {
+            schema: plan.schema,
+            minexec: plan.minexec,
+            id: plan.id,
+            transport: 17,
+            proto: r2k_core::plan::PROTO_QUIC,
+            ipfrag: 1,
+            ..Plan::default()
+        }
+}
+
+pub fn decide_owned_dns_udp_probe(plan: &Plan, packet: &[u8]) -> PacketDecision {
+    if !is_dns_udp_fragment_plan(plan) {
+        return PacketDecision::Accept;
+    }
+    decide_packet_with_segment_cap(plan, packet, 0, 0, true)
 }
 
 fn decide_packet_with_segment_cap(
@@ -2191,6 +2212,7 @@ fn decide_packet_with_segment_cap(
     packet: &[u8],
     tcp_segment_cap: usize,
     reference_ttl: u8,
+    owned_dns_probe: bool,
 ) -> PacketDecision {
     let Some(view) = PacketView::parse(packet) else {
         return PacketDecision::Accept;
@@ -2244,7 +2266,13 @@ fn decide_packet_with_segment_cap(
     // payload C исполняет на любой датаграмме выбранного плана, поэтому
     // split-план нельзя молча пропускать вне Initial: именно там
     // `payload_emits>1` и обязан дать отказ.
-    if quic_probe && (payload.len() > D2O_QUIC_MAX_DGRAM || !r2k_quic_is_initial(payload)) {
+    if owned_dns_probe && !r2k_core::dns_probe::is_dns_probe_query(payload) {
+        return PacketDecision::Accept;
+    }
+    if !owned_dns_probe
+        && quic_probe
+        && (payload.len() > D2O_QUIC_MAX_DGRAM || !r2k_quic_is_initial(payload))
+    {
         return PacketDecision::Accept;
     }
 

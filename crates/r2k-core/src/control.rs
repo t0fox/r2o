@@ -91,6 +91,7 @@ pub const COMMAND_DEL_VOICE_ADDR_PROBE: u16 = 0x0096;
 pub const COMMAND_SET_ENDPOINT: u16 = 0x00a0;
 pub const COMMAND_DEL_ENDPOINT: u16 = 0x00a1;
 pub const COMMAND_SET_ENDPOINT_BOUND: u16 = 0x00a2;
+pub const COMMAND_SET_DNS_PROBE: u16 = 0x009c;
 pub const ENDPOINT_KEY_LEN: usize = 20;
 pub const COMMAND_SET_ADDR_PROBE: u16 = 0x0089;
 pub const COMMAND_DEL_ADDR_PROBE: u16 = 0x008a;
@@ -130,6 +131,7 @@ pub const SHAPE_ECH_NO_TS: u8 = 10;
 pub const SHAPE_MODERN_TS: u8 = 11;
 pub const SHAPE_LEGACY_TS: u8 = 12;
 pub const SHAPE_ECH_TS: u8 = 13;
+pub const SHAPE_DNS_PROBE: u8 = 14;
 pub const TCP_PROFILE_UNKNOWN: u8 = 0;
 pub const TCP_PROFILE_NO_TS: u8 = 1;
 pub const TCP_PROFILE_TS: u8 = 2;
@@ -1963,6 +1965,40 @@ pub fn encode_delete_addr_probe(
     encode_frame(COMMAND_DEL_ADDR_PROBE, &body)
 }
 
+/// Временный план DNS/UDP для собственного сокета и точных байтов вопроса.
+pub fn encode_set_dns_probe(
+    source: SocketAddr,
+    destination: SocketAddr,
+    lease_ms: u32,
+    plan_records: &[u8],
+    trial_id: [u8; 16],
+    question: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let flow = udp_addr_probe_flow(source, destination)?;
+    if source.is_ipv4() != destination.is_ipv4()
+        || [source, destination].into_iter().any(|address| {
+            matches!(address, SocketAddr::V6(address) if address.scope_id() != 0
+                || address.flowinfo() != 0 || address.ip().to_ipv4_mapped().is_some())
+        })
+        || !valid_udp_addr_probe_flow(&flow)
+        || lease_ms == 0
+        || lease_ms > ADDR_PROBE_LEASE_MAX_MS
+        || trial_id == [0; 16]
+    {
+        return Err("некорректные параметры временной DNS-пробы");
+    }
+    let guard = crate::dns_probe::DnsProbeGuard::from_query(question)
+        .ok_or("DNS-проба требует одного полного вопроса класса IN")?;
+    let mut body = Vec::with_capacity(KEY_LEN + 54 + plan_records.len());
+    body.extend_from_slice(&flow);
+    body.extend_from_slice(&trial_id);
+    body.extend_from_slice(&lease_ms.to_be_bytes());
+    body.extend_from_slice(&guard.length.to_be_bytes());
+    body.extend_from_slice(&guard.sha256);
+    body.extend_from_slice(plan_records);
+    encode_frame(COMMAND_SET_DNS_PROBE, &body)
+}
+
 fn address_bytes_16(address: IpAddr) -> [u8; 16] {
     match address {
         IpAddr::V4(address) => {
@@ -2298,6 +2334,7 @@ pub fn encode_ack_with_identifiers_profile(
                 | COMMAND_SET_VOICE_ADDR_PROBE
                 | COMMAND_DEL_VOICE_ADDR_PROBE
                 | COMMAND_SET_ADDR_PROBE
+                | COMMAND_SET_DNS_PROBE
                 | COMMAND_DEL_ADDR_PROBE
         )
         && !(profile == WireProfile::V48 && command == COMMAND_DEL_NAME_PROBE)
@@ -2387,6 +2424,7 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
             | COMMAND_SET_VOICE_ADDR_PROBE
             | COMMAND_DEL_VOICE_ADDR_PROBE
             | COMMAND_SET_ADDR_PROBE
+            | COMMAND_SET_DNS_PROBE
             | COMMAND_DEL_ADDR_PROBE
     ) || profile == WireProfile::V48 && command == COMMAND_DEL_NAME_PROBE;
     let supports_area_id = matches!(
@@ -3596,7 +3634,13 @@ pub fn decode_r2o_tcp_stall(frame: &Frame) -> Result<R2oTcpStallEvent, &'static 
 }
 
 fn valid_binding(binding: &BindingContext) -> bool {
-    binding.kind <= 4 && matches!(binding.family, 0 | 4 | 6) && binding.shape <= SHAPE_ECH_TS
+    binding.kind <= 4
+        && matches!(binding.family, 0 | 4 | 6)
+        && (binding.shape <= SHAPE_ECH_TS
+            || binding.shape == SHAPE_DNS_PROBE
+                && binding.kind == 2
+                && binding.family != 0
+                && binding.temporary)
 }
 
 /// Разбирает событие HTTP-портала v22 с необязательным контекстом запроса.

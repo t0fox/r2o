@@ -2590,6 +2590,7 @@ mod app {
                     let mut http80_log_candidate = None;
                     let mut udp_quic_deny = false;
                     let mut address_stun_replan = false;
+                    let mut owned_dns_probe = false;
                     let decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
                         if options.mode == RuntimeMode::Apply {
                             if !controller_probe {
@@ -2722,17 +2723,35 @@ mod app {
                         // C на раннем выходе `saw_hello && plan_done` и в
                         // ветке `quic_deny` не доходит ни до выбора плана,
                         // ни до `shape_misses`.
-                        let selected = if quic_second_hello_skip.is_some() || quic_deny_skip {
-                            None
-                        } else {
-                            name_plans.select_with_quic_host_at_hook_probe(
-                                bytes,
-                                quic_hello.as_ref().map(|hello| hello.host.as_slice()),
-                                quic_hook,
-                                controller_probe,
-                            )
+                        use r2o_datapath::control::DnsProbeSelection;
+                        let dns_probe =
+                            name_plans.select_dns_probe(bytes, queue_hook, controller_probe);
+                        let selected = match dns_probe {
+                            DnsProbeSelection::Matched(plan) => {
+                                owned_dns_probe = true;
+                                Some(plan)
+                            }
+                            DnsProbeSelection::DifferentQuestion => None,
+                            DnsProbeSelection::Unreserved
+                                if quic_second_hello_skip.is_some() || quic_deny_skip =>
+                            {
+                                None
+                            }
+                            DnsProbeSelection::Unreserved => name_plans
+                                .select_with_quic_host_at_hook_probe(
+                                    bytes,
+                                    quic_hello.as_ref().map(|hello| hello.host.as_slice()),
+                                    quic_hook,
+                                    controller_probe,
+                                ),
                         };
-                        let selected_plan = selected.unwrap_or(&plan);
+                        let selected_plan = selected.unwrap_or(
+                            if matches!(dns_probe, DnsProbeSelection::DifferentQuestion) {
+                                &observe_plan
+                            } else {
+                                &plan
+                            },
+                        );
                         address_stun_replan = selected_plan.transport == 17
                             && selected_plan.proto == r2k_core::plan::PROTO_VOICE
                             && selected_plan.ipfrag == 1
@@ -2911,18 +2930,25 @@ mod app {
                                             quic_plan_skip_note,
                                             address_stun_replan,
                                             || {
-                                                let decision = decide_with_tcp_session_mode(
-                                                    &mut tcp_sessions,
-                                                    selected_plan,
-                                                    bytes,
-                                                    &mut control,
-                                                    &mut flow_journal,
-                                                    &journal_origin,
-                                                    controller_probe,
-                                                    raw.as_ref().map_or(0, |raw| {
-                                                        raw.tls_route_segment_cap(bytes)
-                                                    }),
-                                                );
+                                                let decision = if owned_dns_probe {
+                                                    r2o_datapath::engine::decide_owned_dns_udp_probe(
+                                                        selected_plan,
+                                                        bytes,
+                                                    )
+                                                } else {
+                                                    decide_with_tcp_session_mode(
+                                                        &mut tcp_sessions,
+                                                        selected_plan,
+                                                        bytes,
+                                                        &mut control,
+                                                        &mut flow_journal,
+                                                        &journal_origin,
+                                                        controller_probe,
+                                                        raw.as_ref().map_or(0, |raw| {
+                                                            raw.tls_route_segment_cap(bytes)
+                                                        }),
+                                                    )
+                                                };
                                                 let tcp_syn_ack_seen =
                                                     tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
                                                 guard_decision(
@@ -3377,10 +3403,15 @@ mod app {
                             });
                     let mut applied_candidate = decision_execution_id.and_then(|execution_id| {
                         tx_original.and_then(|bytes| {
-                            name_plans.applied_event_for_packet_at_hook(
+                            name_plans.applied_event_for_packet_at_hook_probe(
                                 bytes,
                                 execution_id,
-                                quic_hook,
+                                if owned_dns_probe {
+                                    queue_hook
+                                } else {
+                                    quic_hook
+                                },
+                                controller_probe,
                             )
                         })
                     });

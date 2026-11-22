@@ -126,6 +126,14 @@ struct AddrProbePlan {
     trial_id: [u8; 16],
     generation: u64,
     expires: Instant,
+    dns: Option<r2k_core::dns_probe::DnsProbeGuard>,
+}
+
+#[derive(Clone, Copy)]
+pub enum DnsProbeSelection<'a> {
+    Unreserved,
+    DifferentQuestion,
+    Matched(&'a Plan),
 }
 
 /// C `char name[254]` + `uint64_t expires` (`datapath/http80.c:23-27`):
@@ -335,7 +343,10 @@ impl NamePlans {
     }
 
     pub fn handle(&mut self, frame: &Frame) -> Ack {
-        let addr_probe = matches!(frame.kind, COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE);
+        let addr_probe = matches!(
+            frame.kind,
+            COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE | control::COMMAND_SET_DNS_PROBE
+        );
         let endpoint_bound = frame.kind == control::COMMAND_SET_ENDPOINT_BOUND;
         let area_command = matches!(
             frame.kind,
@@ -407,7 +418,9 @@ impl NamePlans {
                 COMMAND_SET_VOICE_ADDR => self.set_voice_addr(body),
                 COMMAND_SET_VOICE_ADDR_PROBE => self.set_voice_addr_probe(body, trial_id),
                 COMMAND_DEL_VOICE_ADDR_PROBE => self.delete_voice_addr_probe(body, trial_id),
-                COMMAND_SET_ADDR_PROBE => self.set_addr_probe(body),
+                COMMAND_SET_ADDR_PROBE | control::COMMAND_SET_DNS_PROBE => {
+                    self.set_addr_probe(body, frame.kind == control::COMMAND_SET_DNS_PROBE)
+                }
                 COMMAND_DEL_ADDR_PROBE => self.delete_addr_probe(body, trial_id),
                 COMMAND_DEL_NAME => self.delete_name(body),
                 COMMAND_DEL_NAME_BOUND => self.delete_name_bound(body),
@@ -1059,6 +1072,16 @@ impl NamePlans {
         execution_id: u64,
         hook: Option<u8>,
     ) -> Option<AppliedEvent> {
+        self.applied_event_for_packet_at_hook_probe(packet, execution_id, hook, false)
+    }
+
+    pub fn applied_event_for_packet_at_hook_probe(
+        &self,
+        packet: &[u8],
+        execution_id: u64,
+        hook: Option<u8>,
+        controller_probe: bool,
+    ) -> Option<AppliedEvent> {
         if execution_id == 0 {
             return None;
         }
@@ -1068,7 +1091,13 @@ impl NamePlans {
             17 => 2,
             _ => return None,
         };
-        let plan = self.select_with_quic_host_at_hook(packet, None, hook)?;
+        let plan = match self.select_dns_probe(packet, hook, controller_probe) {
+            DnsProbeSelection::Matched(plan) => plan,
+            DnsProbeSelection::DifferentQuestion => return None,
+            DnsProbeSelection::Unreserved => {
+                self.select_with_quic_host_at_hook(packet, None, hook)?
+            }
+        };
         let binding = self.binding_for_plan(plan)?;
         let key = if view.protocol == 6 {
             crate::capture::TcpFlowKey::from_packet(packet)?.wire_key()
@@ -1157,7 +1186,11 @@ impl NamePlans {
                 return Some(PlanBinding {
                     trial_id: probe.trial_id,
                     generation: probe.generation,
-                    shape: flow_probe_shape(&probe.plan),
+                    shape: if probe.dns.is_some() {
+                        control::SHAPE_DNS_PROBE
+                    } else {
+                        flow_probe_shape(&probe.plan)
+                    },
                     temporary: true,
                 });
             }
@@ -1195,6 +1228,7 @@ impl NamePlans {
         if let Some(key) = r2o_udp_addr_probe_flow_key(packet)
             && let Some(r2o_probe) = self.addr_probes.get(&key)
             && r2o_probe.expires > r2o_now
+            && r2o_probe.dns.is_none()
             && !(r2o_probe.plan.proto == PROTO_VOICE && r2o_probe.plan.ipfrag != 0)
         {
             return Some((
@@ -1237,7 +1271,7 @@ impl NamePlans {
         }
         let key = r2o_udp_addr_probe_flow_key(packet)?;
         let probe = self.addr_probes.get(&key)?;
-        if probe.expires <= Instant::now() {
+        if probe.expires <= Instant::now() || probe.dns.is_some() {
             return None;
         }
         let payload = packet.get(view.udp_payload_range(packet)?)?;
@@ -1256,6 +1290,39 @@ impl NamePlans {
             ) && r2k_core::quic::is_authenticated_initial(payload)
         };
         matches.then_some(probe)
+    }
+
+    pub fn select_dns_probe(
+        &self,
+        packet: &[u8],
+        hook: Option<u8>,
+        controller_probe: bool,
+    ) -> DnsProbeSelection<'_> {
+        use crate::netlink::{R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING};
+
+        if !controller_probe
+            || self.addr_probes.is_empty()
+            || !matches!(hook, Some(R2O_NF_INET_LOCAL_OUT | R2O_NF_INET_POST_ROUTING))
+        {
+            return DnsProbeSelection::Unreserved;
+        }
+        let Some(probe) = r2o_udp_addr_probe_flow_key(packet)
+            .and_then(|key| self.addr_probes.get(&key))
+            .filter(|probe| probe.expires > Instant::now())
+        else {
+            return DnsProbeSelection::Unreserved;
+        };
+        let Some(guard) = probe.dns else {
+            return DnsProbeSelection::Unreserved;
+        };
+        let payload = PacketView::parse(packet)
+            .and_then(|view| view.udp_payload_range(packet))
+            .and_then(|range| packet.get(range));
+        if payload.is_some_and(|payload| guard.matches(payload)) {
+            DnsProbeSelection::Matched(&probe.plan)
+        } else {
+            DnsProbeSelection::DifferentQuestion
+        }
     }
 
     fn set_name(&mut self, body: &[u8]) -> (bool, u8) {
@@ -1794,7 +1861,7 @@ impl NamePlans {
         (true, control::ACK_OK)
     }
 
-    fn set_addr_probe(&mut self, body: &[u8]) -> (bool, u8) {
+    fn set_addr_probe(&mut self, body: &[u8], is_dns: bool) -> (bool, u8) {
         let fixed = control::KEY_LEN + 20;
         if body.len() < fixed {
             return (false, control::ACK_BAD_ARGS);
@@ -1811,7 +1878,7 @@ impl NamePlans {
                 .expect("длина срока адресного опыта проверена выше"),
         );
         let source_port = u16::from_be_bytes([key[33], key[34]]);
-        let voice_wildcard = source_port == 0;
+        let voice_wildcard = source_port == 0 && !is_dns;
         if voice_wildcard {
             // C `probe_flow_valid` допускает src_port=0 как голосовой
             // wildcard (`plans.c:857-874`); R2O хранит такие опыты в
@@ -1835,10 +1902,27 @@ impl NamePlans {
         {
             return (false, control::ACK_BAD_ARGS);
         }
-        let plan = match Plan::parse_wire(&body[fixed..]) {
+        let mut records = &body[fixed..];
+        let dns = if is_dns {
+            let Some((guard, remaining)) =
+                r2k_core::dns_probe::DnsProbeGuard::decode_prefix(records)
+            else {
+                return (false, control::ACK_BAD_ARGS);
+            };
+            records = remaining;
+            Some(guard)
+        } else {
+            None
+        };
+        let plan = match Plan::parse_wire(records) {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
+        if dns.is_some()
+            && (!crate::engine::is_dns_udp_fragment_plan(&plan) || !self.r2o_plan_valid(&plan))
+        {
+            return (false, control::ACK_BAD_PLAN);
+        }
         if voice_wildcard {
             if plan.proto == PROTO_VOICE && plan.ipfrag != 0 {
                 return (false, control::ACK_BAD_PLAN);
@@ -1886,11 +1970,9 @@ impl NamePlans {
         // C не требует QUIC-плана: shape ANY допустим, прочие proto тоже.
         let now = Instant::now();
         self.addr_probes.retain(|_, probe| probe.expires > now);
-        if self
-            .addr_probes
-            .get(&key)
-            .is_some_and(|existing| existing.trial_id != trial_id)
-        {
+        if self.addr_probes.get(&key).is_some_and(|existing| {
+            existing.trial_id != trial_id || existing.dns.is_some() || dns.is_some()
+        }) {
             return (false, control::ACK_BAD_ARGS);
         }
         if !self.addr_probes.contains_key(&key) && self.flow_probe_count() >= MAX_FLOW_PROBES {
@@ -1907,6 +1989,7 @@ impl NamePlans {
                 trial_id,
                 generation,
                 expires: now + Duration::from_millis(u64::from(lease_ms)),
+                dns,
             },
         );
         (true, control::ACK_OK)
@@ -7273,6 +7356,7 @@ mod tests {
                 trial_id: [0x21; 16],
                 generation: 1,
                 expires: now - Duration::from_millis(1),
+                dns: None,
             },
         );
         plans.addr_probes.insert(
@@ -7282,6 +7366,7 @@ mod tests {
                 trial_id: [0x22; 16],
                 generation: 2,
                 expires: now + Duration::from_secs(1),
+                dns: None,
             },
         );
         plans.voice_addr_probes.insert(
@@ -7315,6 +7400,7 @@ mod tests {
                 trial_id: [0x21; 16],
                 generation: 1,
                 expires: now,
+                dns: None,
             },
         );
         plans.voice_addr_probes.insert(
