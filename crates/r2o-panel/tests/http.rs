@@ -572,11 +572,12 @@ fn installed_manager_exposes_update_state_and_drives_update_actions() {
     let temp = TempDir::new();
     let manager = temp.file("r2o-manager");
     let arguments = temp.file("manager-arguments");
+    let finish_check = temp.file("finish-check");
     fs::write(
         &manager,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            arguments.display()
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ni=0; while [ ! -e '{}' ] && [ $i -lt 150 ]; do sleep .02; i=$((i+1)); done\n",
+            arguments.display(), finish_check.display()
         ),
     )
     .unwrap();
@@ -652,6 +653,7 @@ fn installed_manager_exposes_update_state_and_drives_update_actions() {
     {
         std::thread::sleep(Duration::from_millis(10));
     }
+    fs::write(&finish_check, []).unwrap();
     let service_log = fs::read_to_string(&service_arguments).unwrap();
     assert!(service_log.contains("update-auto-on\n"));
     assert!(service_log.contains("update-auto-off\n"));

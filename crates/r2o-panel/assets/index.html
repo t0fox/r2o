@@ -303,13 +303,28 @@
                   <div class="update-notes-content"><p id="update-notes-text"></p></div>
                 </details>
               </div>
+              <div id="update-selection" class="update-selection" hidden>
+                <label for="update-target">Выпуск</label>
+                <select id="update-target"></select>
+                <p class="upd-meta" id="update-target-meta"></p>
+                <label for="update-source">Источник загрузки</label>
+                <select id="update-source"></select>
+                <button type="button" class="btn" id="update-selected">Установить выбранную версию</button>
+              </div>
               <div class="update-transfer">
                 <progress id="update-progress" max="100" value="0" aria-label="Загрузка выпуска" hidden></progress>
                 <p class="upd-meta" id="update-progress-text" hidden></p>
               </div>
+              <button type="button" class="btn" id="update-cancel" hidden>Отменить обновление</button>
               <p class="upd-meta" id="update-warning" hidden></p>
+              <p class="upd-meta" id="update-previous" hidden></p>
+              <button type="button" class="btn" id="update-rollback" hidden>Вернуться к предыдущей версии</button>
               <p class="update-action" id="update-action" role="status" aria-live="polite" hidden></p>
               <p class="upd-meta update-result" id="update-result" hidden></p>
+              <details class="update-notes" id="update-history" hidden>
+                <summary>История обновлений</summary>
+                <ul id="update-history-list"></ul>
+              </details>
             </section>
 
             <aside class="card auto-card" aria-label="Автообновление">

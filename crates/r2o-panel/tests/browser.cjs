@@ -286,7 +286,6 @@ async function main() {
     }],
   });
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  const updateTimeout = path.join(work, "update-timeout");
   fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\nif [ "$1" = update-install ] && [ -f '${updateTimeout}' ]; then exit 124; fi
 if [ "$1" = meta-protection-product ]; then
   case "$3" in
@@ -902,13 +901,31 @@ esac
   }
   assert.equal(await evaluate("document.querySelector('#updates-body').dataset.install"), "done");
   assert.equal(await evaluate("document.querySelector('#install-steps [aria-current=step]')"), null);
-  fs.writeFileSync(updateTimeout, "");
-  writeUpdate({ busy: "", install_stage: 2, last_utc: Math.floor(Date.now() / 1000), last_ok: true });
-  assert.equal(await evaluate("fetch('/api/control/update-install', {method:'POST'}).then(r => r.status)"), 202);
+  const failedAt = Math.floor(Date.now() / 1000);
+  writeUpdate({ busy: "", install_stage: 2, last_utc: failedAt, last_ok: false,
+    last_message: "Активация прервана, рабочая версия восстановлена" });
   await call("Page.reload");
-  await waitFor(() => evaluate("document.querySelector('#updates-body').dataset.install === 'error'"), "таймаут активации показан как ошибка");
+  await waitFor(() => evaluate("document.querySelector('#updates-body').dataset.install === 'error'"), "ошибка установки сохранена после перезапуска");
   assert.equal(await evaluate("document.querySelector('#update-install').disabled"), false);
-  assert.match(await evaluate("document.querySelector('#update-reason').textContent"), /Активация не завершилась вовремя/);
+  assert.match(await evaluate("document.querySelector('#update-reason').textContent"), /рабочая версия восстановлена/);
+
+  const latest = { release_id: "r2o-test-2", version: "R2O 2", title: "Последний выпуск", created_utc: failedAt,
+    sequence: 2, notes: "Новый выпуск", commit: "2".repeat(40), architecture: "mipsel", size: 8192,
+    sources: ["github", "r2", "gh-proxy"] };
+  const older = { ...latest, release_id: "r2o-test-1", version: "R2O 1", title: "Базовый выпуск",
+    sequence: 1, notes: "Изменения базы", commit: "1".repeat(40) };
+  fs.writeFileSync(path.join(managerRoot, "state/update-catalog.json"), JSON.stringify({ releases: [latest, older] }));
+  writeUpdate({ latest, current: "r2o-test-2", previous: "r2o-test-1",
+    history: [{ utc: failedAt, message: "Проверка пройдена", release_id: "r2o-test-2" }] });
+  await call("Page.reload");
+  await waitFor(() => evaluate("document.querySelector('#update-target').options.length === 2"), "каталог подписанных выпусков");
+  await evaluate("document.querySelector('#update-target').value = 'r2o-test-1'; document.querySelector('#update-target').dispatchEvent(new Event('change'))");
+  assert.equal(await evaluate("document.querySelector('#update-notes-text').textContent"), "Изменения базы");
+  assert.equal(await evaluate("document.querySelector('#update-rollback').hidden"), false);
+  assert.match(await evaluate("document.querySelector('#update-history-list').textContent"), /Проверка пройдена/);
+  await evaluate("document.querySelector('#update-source').value = 'r2'; document.querySelector('#update-selected').click(); document.querySelector('[data-ask=yes]').click()");
+  await waitFor(() => fs.readFileSync(serviceLog, "utf8").includes("update-install --release r2o-test-1 --source r2"),
+    "выбранный downgrade и зеркало переданы обновлятору");
   assert.deepEqual(runtimeErrors, [], `ошибки JavaScript в браузере: ${runtimeErrors.join("; ")}`);
   console.log("Проверка Chrome-панели R2O: ПРОЙДЕНА");
 }

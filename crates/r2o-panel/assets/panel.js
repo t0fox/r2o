@@ -906,6 +906,21 @@
       if (self.$("update-install").disabled) return;
       self.ask({ title: "Установить обновление R2O?", text: "Роутер загрузит и проверит выпуск. Службы R2O кратковременно перезапустятся.", yes: "Установить" }, function () { self.updateCommand("install"); });
     });
+    this.$("update-target").addEventListener("change", function () { self.renderUpdates(self.updateStatus); });
+    this.$("update-selected").addEventListener("click", function () {
+      var target = self.$("update-target").value, source = self.$("update-source").value;
+      self.ask({ title: "Установить выбранный выпуск?", text: target + ". Службы R2O перезапустятся.", yes: "Установить" },
+        function () { self.updateCommand("install", "select/" + encodeURIComponent(target) + "/" + encodeURIComponent(source)); });
+    });
+    this.$("update-rollback").addEventListener("click", function () {
+      self.ask({ title: "Вернуться к предыдущей версии?", text: "Службы R2O перезапустятся.", yes: "Откатить" },
+        function () { self.updateCommand("install", "rollback"); });
+    });
+    this.$("update-cancel").addEventListener("click", function () {
+      return self.updateRequest("/api/control/update-cancel", true).then(function (reply) {
+        self.updateMessage(reply.ok ? "Запрошена отмена" : "Отмена недоступна");
+      }).catch(function () { self.updateMessage("Нет связи с панелью"); });
+    });
     this.$("update-auto").addEventListener("change", function () {
       return self.updateCommand(self.$("update-auto").checked ? "auto-on" : "auto-off");
     });
@@ -934,13 +949,13 @@
     "auto-on": "Включаем автообновление…", "auto-off": "Выключаем автообновление…"
   };
 
-  App.prototype.updateCommand = function (action) {
+  App.prototype.updateCommand = function (action, route) {
     var self = this;
     if (!this.$("updates-body") || this.updatePending) return Promise.resolve();
     this.updatePending = { action: action, at: Date.now() };
     this.updateMessage("");
     this.renderUpdates(this.updateStatus);
-    return this.updateRequest("/api/control/update-" + action, true).then(function (reply) {
+    return this.updateRequest("/api/control/update-" + (route || action), true).then(function (reply) {
       if (!reply.ok) {
         self.updatePending = null;
         self.updateMessage(reply.code === 409 ? "Служба выполняет другую команду. Повторите через минуту." :
@@ -976,6 +991,15 @@
       var s = reply.data, pending = self.updatePending;
       self.updateFailed = false;
       self.updateStatus = s;
+      var catalogKey = String(s.checked_utc || "initial");
+      if (s.latest && num(s.latest.sequence) > 0 && catalogKey !== self.updateCatalogKey) {
+        self.updateRequest("/api/update/catalog").then(function (reply) {
+          if (!reply.ok) return;
+          self.updateCatalogKey = catalogKey;
+          self.updateCatalog = Array.isArray(reply.data.releases) ? reply.data.releases : [];
+          self.renderUpdates(self.updateStatus);
+        }).catch(function () {});
+      }
       /* Команда завершена, когда служба снова свободна и состояние новее нажатия
          (установка — когда записан её итог). Тумблер завершается сразу. */
       if (pending && !s.busy && !updateApplying(s, controlState)) {
@@ -997,7 +1021,7 @@
   }
 
   function updateApplying(s, controlState) {
-    return s.busy === "installing" || s.busy === "staging" ||
+    return ["installing", "staging", "activating", "health"].indexOf(s.busy) !== -1 ||
       ((s.install_stage === 2 || s.install_stage === 3) && s.last_ok === true &&
         !activationTimedOut(s, controlState) && Math.abs(Date.now() / 1000 - num(s.last_utc)) < 900);
   }
@@ -1093,7 +1117,27 @@
     var stepText = !showStage ? "" : stage === stages.length ? "4 из 4 · Службы запущены" :
       (stage + 1) + " из 4 · " + stages[stage] +
         (this.updateFailed && action === "install" ? " · ждём связи с роутером" : !action ? " · не завершён" : "");
+    var phaseLabel = {
+      check: "Проверка подписанного каталога", download: "Загрузка архива",
+      verify: "Проверка подписи, SHA-256 и ABI", stage: "Подготовка выпуска",
+      migrate: "Проверка форматов данных", activate: "Переключение версии",
+      health: "Проверка готовности служб", commit: "Фиксация установленной версии"
+    }[s.phase];
+    if (action === "install" && phaseLabel) stepText = phaseLabel;
+    var transfer = s.transfer;
+    if (action === "install" && busy === "staging" && transfer && num(transfer.total) > 0) {
+      var percent = Math.min(100, Math.floor(100 * num(transfer.bytes) / num(transfer.total)));
+      progress.max = 100;
+      progress.value = percent;
+      progress.setAttribute("aria-label", "Загружено процентов");
+      stepText = "Загрузка · " + percent + "% · " + str(transfer.source)
+        + (num(transfer.speed) > 0 ? " · " + telegramBytes(transfer.speed) + "/с" : "")
+        + (num(transfer.eta) > 0 ? " · осталось " + duration(transfer.eta * 1000) : "");
+    }
     write("update-progress-text", stepText).hidden = !showStage;
+    this.$("update-cancel").hidden = busy !== "staging";
+    this.renderUpdateSelection(s, action, write);
+
     var auto = this.$("update-auto");
     if (!(pending && /^auto-/.test(pending.action))) auto.checked = !absent && s.auto !== false;
     auto.disabled = absent || !!action || !!pending;
@@ -1118,6 +1162,65 @@
       }
     }
     if (this.m) this.renderOverview(this.m);
+  };
+
+  App.prototype.renderUpdateSelection = function (s, action, write) {
+    var releases = this.updateCatalog || [], target = this.$("update-target"), source = this.$("update-source");
+    var previous = str(s.previous), history = Array.isArray(s.history) ? s.history : [];
+    var current = releases.find(function (release) { return release.release_id === s.current; });
+    var latest = s.latest || {};
+    var available = releases.find(function (release) { return release.release_id === latest.release_id; });
+    if (current) write("update-current", current.title || current.version);
+    if (available || latest.release_id) {
+      write("update-checked", "Последняя: " + (latest.title || latest.version || latest.release_id)
+        + (num(s.checked_utc) ? " · проверено " + localTime(num(s.checked_utc) * 1000) : ""));
+    }
+    var previousRelease = releases.find(function (release) { return release.release_id === previous; });
+    write("update-previous", previous ? "Предыдущая: " + (previousRelease ? previousRelease.title || previous : previous) : "").hidden = !previous;
+    var rollback = this.$("update-rollback");
+    rollback.hidden = !previous;
+    rollback.disabled = !!action;
+    this.$("update-selection").hidden = !releases.length;
+    if (releases.length) {
+      var options = releases.map(function (release) {
+        return [release.release_id, (release.title || release.version || release.release_id)
+          + (release.release_id === s.current ? " · текущий" : "")];
+      });
+      this.updateOptions(target, options);
+      var chosen = releases.find(function (release) { return release.release_id === target.value; }) || releases[0];
+      var labels = { github: "GitHub", r2: "Зеркало R2O", "gh-proxy": "gh-proxy.com", ghproxy: "ghproxy.net", ghfast: "ghfast.top" };
+      var sources = (chosen.sources || []).filter(function (name) { return Object.hasOwn(labels, name); });
+      this.updateOptions(source, [["auto", "Автоматически"]].concat(sources.map(function (name) { return [name, labels[name]]; })));
+      write("update-target-meta", [chosen.version, chosen.created_utc && localTime(chosen.created_utc * 1000),
+        chosen.commit && chosen.commit, chosen.size && telegramBytes(chosen.size), chosen.architecture].filter(Boolean).join(" · "));
+      this.$("update-selected").disabled = !!action || chosen.release_id === s.current;
+      target.disabled = !!action;
+      source.disabled = !!action;
+      this.$("update-release").hidden = false;
+      write("update-version", "Изменения в " + (chosen.title || chosen.version || chosen.release_id));
+      write("update-notes-text", str(chosen.notes) || "Описание изменений не опубликовано.");
+    }
+    this.$("update-history").hidden = !history.length;
+    var list = this.$("update-history-list"), key = JSON.stringify(history);
+    if (list.__r2oKey !== key) {
+      list.__r2oKey = key;
+      var doc = this.doc;
+      list.replaceChildren.apply(list, history.slice().reverse().map(function (item) {
+        return el(doc, "li", "upd-meta", localTime(item.utc * 1000) + " · " + item.release_id + " · " + item.message);
+      }));
+    }
+  };
+
+  App.prototype.updateOptions = function (select, options) {
+    var key = JSON.stringify(options), value = select.value, doc = this.doc;
+    if (select.__r2oKey === key) return;
+    select.__r2oKey = key;
+    select.replaceChildren.apply(select, options.map(function (item) {
+      var option = el(doc, "option", "", item[1]);
+      option.value = item[0];
+      return option;
+    }));
+    if (options.some(function (item) { return item[0] === value; })) select.value = value;
   };
 
   App.prototype.telegramState = function (m) {

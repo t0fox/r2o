@@ -1749,6 +1749,17 @@ main { min-width: 0; }
 .upd-meta .mono { color: var(--ink-2); }
 .upd-sep { color: var(--ink-4); }
 #update-reason { margin-top: 5px; color: var(--warn); font-size: .7rem; }
+.update-selection { display: grid; gap: 8px; margin: 12px 0; }
+.update-selection[hidden] { display: none; }
+.update-selection label { color: var(--ink-2); font-size: .85rem; }
+.update-selection select {
+  min-height: 44px; width: 100%; min-width: 0; padding: 6px 10px;
+  background: var(--surface, #222329); color: var(--ink); border: 1px solid var(--bronze-line);
+  border-radius: 6px; font: inherit;
+}
+#update-target-meta, #update-history-list { overflow-wrap: anywhere; }
+#update-history-list { padding: 0 12px 10px 27px; }
+#update-history-list li + li { margin-top: 5px; }
 .update-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .release-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(240px, .55fr); gap: 10px; align-items: start; }
 .release-card, .auto-card { padding: 15px; }

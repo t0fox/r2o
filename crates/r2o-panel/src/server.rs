@@ -22,7 +22,6 @@ const TELEGRAM_DIAGNOSTICS_MAX: usize = 256 * 1024;
 const TELEGRAM_STATS_MAX: usize = 131_071;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
-const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UPDATE_INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static LAST_HEARTBEAT: Mutex<u64> = Mutex::new(0);
@@ -77,6 +76,7 @@ pub struct Config {
     pub started_epoch: i64,
     pub unknown_keys: Vec<String>,
     telegram_check_running: Arc<AtomicBool>,
+    update_worker_running: Arc<AtomicBool>,
     action: Arc<Mutex<String>>,
 }
 
@@ -131,6 +131,7 @@ impl Default for Config {
             started_epoch: 0,
             unknown_keys: Vec::new(),
             telegram_check_running: Arc::new(AtomicBool::new(false)),
+            update_worker_running: Arc::new(AtomicBool::new(false)),
             action: Arc::new(Mutex::new("idle".into())),
         }
     }
@@ -317,9 +318,19 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
         }
         return api_workers(config, &request);
     }
-    if request.path == "/api/update" {
+    if matches!(request.path, "/api/update" | "/api/update/catalog") {
         if request.method != "GET" {
             return text_response(405, "method not allowed\n");
+        }
+        if request.path == "/api/update/catalog" {
+            return match read_regular_file(
+                &config.manager_root.join("state/update-catalog.json"),
+                1024 * 1024,
+            ) {
+                Ok(bytes) => Response::new(200, "application/json; charset=utf-8", bytes)
+                    .header("Cache-Control", "no-store"),
+                Err(_) => json_response(200, &json!({"releases":[]})),
+            };
         }
         return api_update(config);
     }
@@ -1380,7 +1391,19 @@ fn api_update(config: &Config) -> Response {
         return json_response(200, &json!({"absent":true}));
     }
     match read_update_state_body(&config.update_state_path) {
-        Some(body) => Response::new(200, "application/json; charset=utf-8", body),
+        Some(body) => {
+            if let Some(progress) = read_json_object(
+                &config.manager_root.join("state/update-transfer.json"),
+                2048,
+            ) && let Ok(mut state) = serde_json::from_slice::<Value>(&body)
+                && state["busy"] == "staging"
+                && state["install_stage"] == 0
+            {
+                state["transfer"] = progress;
+                return json_response(200, &state);
+            }
+            Response::new(200, "application/json; charset=utf-8", body)
+        }
         None => json_response(200, &json!({"never":true})),
     }
 }
@@ -1440,6 +1463,16 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
             "Установка обновления",
         ),
         (
+            "/api/control/update-rollback",
+            "update-rollback",
+            "Откат обновления",
+        ),
+        (
+            "/api/control/update-cancel",
+            "update-cancel",
+            "Отмена обновления",
+        ),
+        (
             "/api/control/update-auto-on",
             "update-auto-on",
             "Включение автообновления",
@@ -1456,9 +1489,25 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
         .filter(|(product, state)| {
             r2k_core::meta::PRODUCTS.contains(product) && matches!(*state, "on" | "off")
         });
+    let selection = path
+        .strip_prefix("/api/control/update-select/")
+        .and_then(|rest| rest.split_once('/'))
+        .filter(|(tag, source)| {
+            tag.starts_with("r2o-")
+                && tag.len() <= 128
+                && tag
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+                && matches!(
+                    *source,
+                    "auto" | "github" | "r2" | "gh-proxy" | "ghproxy" | "ghfast"
+                )
+        });
     let action = actions.iter().copied().find(|(route, _, _)| *route == path);
     let (command, label) = if let Some((_, command, label)) = action {
         (command, label)
+    } else if selection.is_some() {
+        ("update-install", "Установка выбранного выпуска")
     } else if let Some((_, state)) = meta_product {
         let label = if state == "on" {
             "Включение защиты сервиса Meta"
@@ -1499,17 +1548,26 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
         start_service_action(config, command, &[product, state])
     } else if command == "telegram-check" {
         start_telegram_check(config)
-    } else if manager_present && command == "update-check" {
-        start_manager_update(config, command)
-    } else if manager_present && command == "update-install" {
-        if is_executable_file(&config.service_path) {
-            start_service_action(config, command, &[])
-        } else {
+    } else if manager_present
+        && matches!(
+            command,
+            "update-check" | "update-install" | "update-rollback" | "update-cancel"
+        )
+    {
+        if matches!(command, "update-install" | "update-rollback")
+            && !is_executable_file(&config.service_path)
+        {
             return json_response(
                 409,
-                &json!({"ok":false,"message":"Для установки обновления требуется запущенный router adapter"}),
+                &json!({"ok":false,"message":"Недоступен адаптер роутера"}),
             );
         }
+        start_update_worker(config, command, selection)
+    } else if selection.is_some() || matches!(command, "update-rollback" | "update-cancel") {
+        return json_response(
+            409,
+            &json!({"ok":false,"message":"Менеджер обновлений недоступен"}),
+        );
     } else {
         start_service_action(config, command, &[])
     };
@@ -1607,21 +1665,56 @@ fn start_telegram_check(config: &Config) -> Result<(), ActionError> {
     result
 }
 
-fn start_manager_update(config: &Config, command: &str) -> Result<(), ActionError> {
-    if !is_executable_file(&config.manager_path) {
-        return Err(ActionError::Start);
+fn start_update_worker(
+    config: &Config,
+    action: &str,
+    selection: Option<(&str, &str)>,
+) -> Result<(), ActionError> {
+    let running = (action != "update-cancel").then(|| Arc::clone(&config.update_worker_running));
+    if let Some(flag) = &running {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ActionError::Busy)?;
     }
-    let mut child_command = Command::new(config.manager_path.clone());
-    child_command
-        .arg(command)
-        .arg("--root")
-        .arg(config.manager_root.as_os_str());
-    let timeout = if command == "update-install" {
-        UPDATE_INSTALL_TIMEOUT
+
+    let mut command = if matches!(action, "update-install" | "update-rollback") {
+        let mut command = Command::new(&config.service_path);
+        command.arg(action);
+        if let Some((tag, source)) = selection {
+            command.args(["--release", tag, "--source", source]);
+        }
+        command
     } else {
-        UPDATE_CHECK_TIMEOUT
+        let mut command = Command::new(&config.manager_path);
+        command.arg(action).arg("--root").arg(&config.manager_root);
+        command
     };
-    start_action_command(config, child_command, timeout)
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let worker_running = running.clone();
+    std::thread::Builder::new()
+        .name("r2o-update-reaper".into())
+        .spawn(move || {
+            if let Ok(mut child) = command.spawn() {
+                let _ = child.wait();
+            }
+            if let Some(flag) = worker_running {
+                flag.store(false, Ordering::Release);
+            }
+        })
+        .map_err(|_| {
+            if let Some(flag) = running {
+                flag.store(false, Ordering::Release);
+            }
+            ActionError::Start
+        })?;
+    Ok(())
 }
 
 fn start_action_command(
