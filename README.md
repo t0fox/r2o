@@ -395,7 +395,7 @@ cargo build --workspace --release --locked
 
 | 🇷🇺 Россия | 🌍 Зарубежные переводы и криптовалюта |
 | :---: | :---: |
-| **[CloudTips](https://pay.cloudtips.ru/p/34db013d)** | **[Streamiverse](https://donation.streamiverse.io/t0fox)** |
+| [![CloudTips QR](docs/cloudtips-qr.svg)](https://pay.cloudtips.ru/p/5e6571c5)<br>**[Открыть CloudTips](https://pay.cloudtips.ru/p/5e6571c5)** | **[Streamiverse](https://donation.streamiverse.io/t0fox)** |
 
 Донаты не открывают платные функции, доступ к внешнему серверу или приоритетную обработку трафика.
 
