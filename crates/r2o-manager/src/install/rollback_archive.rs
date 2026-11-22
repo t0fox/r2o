@@ -1,6 +1,7 @@
 use super::{
-    ARCHIVE_MAX_BYTES, ARCHIVE_MAX_EXPANDED_BYTES, InstallError, create_staging_dir,
-    extract_bundle, read_release_architecture, sync_directory, validate_bundle,
+    ARCHIVE_MAX_BYTES, ARCHIVE_MAX_ENTRIES, ARCHIVE_MAX_ENTRY_BYTES, ARCHIVE_MAX_EXPANDED_BYTES,
+    InstallError, create_staging_dir, extract_bundle, read_release_architecture, sync_directory,
+    validate_archive_path, validate_bundle,
 };
 use lzma_rust2::{XzOptions, XzReader, XzWriter};
 use std::fs::{self, File, Metadata};
@@ -31,14 +32,19 @@ pub(super) fn compact(root: &Path, id: &str) -> Result<(), InstallError> {
         let encoder = XzWriter::new(BufWriter::new(File::create(&temporary)?), options)?;
         let mut tar = tar::Builder::new(encoder);
         let mut raw_bytes = 0u64;
-        for entry in fs::read_dir(&builds)? {
+        for (index, entry) in fs::read_dir(&builds)?.enumerate() {
             let entry = entry?;
             let meta = entry.metadata()?;
-            if !meta.is_file() || meta.len() == 0 {
-                return Ok(());
-            }
             let name = entry.file_name();
             let path = Path::new("builds").join(&name);
+            if index >= ARCHIVE_MAX_ENTRIES
+                || !meta.is_file()
+                || meta.len() == 0
+                || meta.len() > ARCHIVE_MAX_ENTRY_BYTES
+                || validate_archive_path(&path).is_err()
+            {
+                return Ok(());
+            }
             if is_applet(&name, &architecture) && same_file(&meta, &controller) {
                 // Пустая запись сохраняет имя ссылки без второй копии ELF.
                 let mut header = tar::Header::new_gnu();
@@ -47,6 +53,9 @@ pub(super) fn compact(root: &Path, id: &str) -> Result<(), InstallError> {
                 tar.append_data(&mut header, path, io::empty())?;
             } else {
                 raw_bytes = raw_bytes.saturating_add(meta.len());
+                if raw_bytes > ARCHIVE_MAX_EXPANDED_BYTES {
+                    return Ok(());
+                }
                 tar.append_path_with_name(entry.path(), path)?;
             }
         }

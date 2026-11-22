@@ -242,6 +242,7 @@ fn prepare_archive_inner(
             abi::validate_bundle_abi(&bundle, architecture)?;
         }
         if !copy {
+            link_controller_applets(&bundle, architecture)?;
             write_synced(&bundle.join("release-id"), manifest.release_id.as_bytes())?;
             write_synced(
                 &bundle.join("release-architecture"),
@@ -1330,6 +1331,43 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&tar_bytes).unwrap();
         encoder.finish().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn downloaded_release_shares_controller_applets_after_activation() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TestDir::new();
+        let root = temp.0.join("install");
+        let legacy = bundle(&temp.0, "legacy", "mipsel");
+        activate_bundle(&root, &legacy, "r2o-legacy", "mipsel").unwrap();
+        let incoming = bundle(&temp.0, "incoming", "mipsel");
+        fs::create_dir(incoming.join("router")).unwrap();
+        fs::write(
+            incoming.join("router/controller-applets"),
+            "R2O-CONTROLLER-APPLETS-1\n",
+        )
+        .unwrap();
+        let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+        tar.append_dir_all("builds", incoming.join("builds"))
+            .unwrap();
+        tar.append_dir_all("router", incoming.join("router"))
+            .unwrap();
+        let (archive, manifest, signature, key) =
+            sign_archive(tar.into_inner().unwrap().finish().unwrap());
+        let download = temp.0.join("download.tar.gz");
+        fs::write(&download, archive).unwrap();
+        let prepared =
+            prepare_download(&root, &download, &manifest, &signature, &key, "mipsel").unwrap();
+        activate_download(&root, &prepared).unwrap();
+        let controller =
+            fs::metadata(active_component_path(&root, "r2o-controller").unwrap()).unwrap();
+        let fetch = fs::metadata(active_component_path(&root, "r2o-fetch").unwrap()).unwrap();
+        assert_eq!(
+            (fetch.dev(), fetch.ino()),
+            (controller.dev(), controller.ino())
+        );
     }
 
     #[cfg(unix)]
