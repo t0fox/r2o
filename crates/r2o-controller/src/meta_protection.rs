@@ -1,7 +1,7 @@
 //! Наблюдения Discovery для очереди проверки Meta. В файлах нет данных клиентов.
 
 use r2k_core::control::{HelloEvent, SHAPE_HTTP, SHAPE_MODERN};
-use r2k_core::meta::product;
+use r2k_core::meta::{disabled_products, product, product_marker};
 use r2o_controller::discovery::DiscoveryTarget;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
@@ -14,13 +14,14 @@ const STALE: u64 = 300;
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 pub(crate) struct MetaTraffic {
-    disabled: PathBuf,
+    state: PathBuf,
     observations: PathBuf,
     requests: PathBuf,
     family: Option<u8>,
     names: BTreeMap<String, (&'static str, u64)>,
     updated: bool,
     enabled: bool,
+    disabled_products: Vec<&'static str>,
     poll_at: Instant,
     request_stamp: u64,
     pub pending: HashMap<DiscoveryTarget, Instant>,
@@ -37,10 +38,10 @@ impl MetaTraffic {
             Some(6) => "v6",
             _ => "dual",
         };
-        let disabled = state.join("meta-protection.disabled");
         Some(Self {
-            enabled: !disabled.exists(),
-            disabled,
+            enabled: !state.join("meta-protection.disabled").exists(),
+            disabled_products: disabled_products(&state),
+            state,
             observations: runtime.join(format!("meta-observed-{suffix}.json")),
             requests: runtime.join("meta-discovery-requests.json"),
             family,
@@ -53,7 +54,7 @@ impl MetaTraffic {
     }
 
     pub fn observe(&mut self, hello: &HelloEvent, name: &str, timestamp: u64) {
-        if !self.enabled || product(name).is_none() {
+        if !self.accepts(name) {
             return;
         }
         let kind = match hello.key[37] {
@@ -76,9 +77,13 @@ impl MetaTraffic {
     }
 
     pub fn observe_dns(&mut self, name: &str, timestamp: u64) {
-        if self.enabled && product(name).is_some() {
+        if self.accepts(name) {
             self.note(name, "dns", timestamp);
         }
+    }
+
+    fn accepts(&self, host: &str) -> bool {
+        self.enabled && product(host).is_some_and(|name| !self.disabled_products.contains(&name))
     }
 
     fn note(&mut self, name: &str, kind: &'static str, timestamp: u64) {
@@ -98,8 +103,15 @@ impl MetaTraffic {
         self.updated = true;
     }
 
-    pub fn enabled(&self) -> bool {
-        !self.disabled.exists()
+    fn enabled(&self) -> bool {
+        !self.state.join("meta-protection.disabled").exists()
+    }
+
+    pub fn enabled_for(&self, host: &str) -> bool {
+        self.enabled()
+            && product(host)
+                .and_then(|name| product_marker(&self.state, name))
+                .is_some_and(|path| !path.exists())
     }
 
     pub fn poll(&mut self, now: Instant, wall: u64) -> Vec<DiscoveryTarget> {
@@ -113,6 +125,12 @@ impl MetaTraffic {
             let _ = std::fs::remove_file(&self.observations);
             return Vec::new();
         }
+        self.disabled_products = disabled_products(&self.state);
+        let before = self.names.len();
+        self.names.retain(|host, _| {
+            product(host).is_some_and(|name| !self.disabled_products.contains(&name))
+        });
+        self.updated |= self.names.len() != before;
         if self.updated {
             let rows: Vec<_> = self
                 .names
@@ -143,7 +161,7 @@ impl MetaTraffic {
             .filter_map(|(host, ip)| {
                 let family = if ip.is_ipv4() { 4 } else { 6 };
                 if self.family.is_some_and(|wanted| wanted != family)
-                    || product(&host).is_none()
+                    || !self.accepts(&host)
                     || !self
                         .names
                         .get(&host)
@@ -174,13 +192,14 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         let now = Instant::now();
         let mut meta = MetaTraffic {
-            disabled: path.join("disabled"),
+            state: path.clone(),
             observations: path.join("observations.json"),
             requests: path.join("requests.json"),
             family: Some(6),
             names: BTreeMap::new(),
             updated: false,
             enabled: true,
+            disabled_products: Vec::new(),
             poll_at: now,
             request_stamp: 0,
             pending: HashMap::new(),
@@ -201,8 +220,15 @@ mod tests {
         assert_eq!(targets[0].host, "media-new.whatsapp.net");
         assert_eq!(targets[0].endpoint, "[2a03:2880::2]:443");
         assert!(meta.poll(now + POLL_INTERVAL, 1020).is_empty());
-        std::fs::write(&meta.disabled, b"0").unwrap();
-        assert!(meta.poll(now + 2 * POLL_INTERVAL, 1040).is_empty());
+        std::fs::write(product_marker(&path, "whatsapp").unwrap(), b"0").unwrap();
+        assert!(!meta.enabled_for("media-new.whatsapp.net"));
+        assert!(meta.enabled_for("www.facebook.com"));
+        meta.poll(now + 2 * POLL_INTERVAL, 1030);
+        meta.observe_dns("media-new.whatsapp.net", 1031);
+        assert!(!meta.names.contains_key("media-new.whatsapp.net"));
+
+        std::fs::write(path.join("meta-protection.disabled"), b"0").unwrap();
+        assert!(meta.poll(now + 3 * POLL_INTERVAL, 1045).is_empty());
         assert!(!meta.enabled());
         std::fs::remove_dir_all(path).unwrap();
     }

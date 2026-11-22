@@ -11,10 +11,10 @@
     ".search", ".family-card:not([open])", ".box-card:not([open])",
     ".tg-hero", ".tg-flow-card", ".tg-route", ".tg-stat", ".tg-check-dc",
     ".release-hero", ".release-card", ".auto-card", ".diag-collector",
-    ".diag-card", ".diag-stat-strip > div", ".stages li"
+    ".diag-card", ".diag-stat-strip > div", ".stages li", ".meta-family-head"
   ].join(", ");
   var controls = "button, input, select, textarea, [role=slider], dialog, .table-scroll, canvas";
-  var interactiveText = "#update-check, #diagnostic-refresh, [data-action=telegram-check], .service-card, .brand, .mast-brand";
+  var interactiveText = "#update-check, #diagnostic-refresh, [data-action=telegram-check], .service-card, .meta-family-head, .brand, .mast-brand";
   var decodeQueue = new Map(), decoding = new Map(), decoded = new WeakMap();
   var alphabet = "АБВГДЕЖЗКЛМНОПРСТУФХ░▒0123456789";
   var measure = doc.createElement("canvas").getContext("2d");
@@ -247,7 +247,7 @@
     next.style.setProperty("--tilt", (0.5 - v) + " " + (u - 0.5) + " 0 " +
       (Math.hypot(u - 0.5, v - 0.5) * 4).toFixed(2) + "deg");
     next.classList.add("r2o-motion-surface");
-    next.setAttribute("data-r2o-spot", sample.target.closest(controls) || next.matches(".diag-card, .diag-collector, .tg-flow-card, .stages li") ? "light" : "tilt");
+    next.setAttribute("data-r2o-spot", sample.target.closest(controls) || next.matches(".diag-card, .diag-collector, .tg-flow-card, .stages li, .meta-family-head") ? "light" : "tilt");
     surface = next;
     if (next !== hero || sample.target.closest(controls)) { lastPixel = null; return; }
     if (!painter) painter = makePainter();

@@ -389,6 +389,7 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
     }
     for (route, file, content_type) in [
         ("/assets/favicon.svg", "favicon.svg", "image/svg+xml"),
+        ("/assets/meta-marks.png", "meta-marks.png", "image/png"),
         (
             "/assets/refresh-mask.svg",
             "refresh-mask.svg",
@@ -1346,6 +1347,7 @@ fn snapshot(
         .unwrap_or_else(|| json!({}));
     meta["enabled"] = json!(meta_enabled);
     meta["running"] = json!(meta_running);
+    meta["disabled_products"] = json!(r2k_core::meta::disabled_products(&config.state_dir));
     json!({
         "taken":taken,"version":config.version,"commit":config.commit,"built":config.built,"dirty":config.dirty,
         "config_path":config.config_path,"config_exists":config.config_exists,"mode":config.mode,"panel_listen":config.panel_listen,
@@ -1448,10 +1450,23 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
             "Выключение автообновления",
         ),
     ];
-    let Some((_, command, label)) = actions
-        .iter()
-        .find(|(action_path, _, _)| *action_path == path)
-    else {
+    let meta_product = path
+        .strip_prefix("/api/control/meta-product/")
+        .and_then(|rest| rest.split_once('/'))
+        .filter(|(product, state)| {
+            r2k_core::meta::PRODUCTS.contains(product) && matches!(*state, "on" | "off")
+        });
+    let action = actions.iter().copied().find(|(route, _, _)| *route == path);
+    let (command, label) = if let Some((_, command, label)) = action {
+        (command, label)
+    } else if let Some((_, state)) = meta_product {
+        let label = if state == "on" {
+            "Включение защиты сервиса Meta"
+        } else {
+            "Отключение защиты сервиса Meta"
+        };
+        ("meta-protection-product", label)
+    } else {
         return json_response(404, &json!({"ok":false,"message":"Неизвестная операция"}));
     };
     if !config.control_enabled || !same_origin(request) {
@@ -1460,13 +1475,13 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
             &json!({"ok":false,"message":"Управление разрешено только с этой панели"}),
         );
     }
-    if matches!(*command, "engine-start" | "engine-restart") && config.mode == "off" {
+    if matches!(command, "engine-start" | "engine-restart") && config.mode == "off" {
         return json_response(
             409,
             &json!({"ok":false,"message":"В config задан MODE=off; сначала измените режим движка"}),
         );
     }
-    if matches!(*command, "telegram-enable" | "telegram-check")
+    if matches!(command, "telegram-enable" | "telegram-check")
         && !telegram_config_flags(&config.config_path).1
     {
         return json_response(
@@ -1480,13 +1495,15 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
         return json_response(400, &json!({"ok":false,"message":"Тело запроса запрещено"}));
     }
     let manager_present = is_executable_file(&config.manager_path);
-    let result = if *command == "telegram-check" {
+    let result = if let Some((product, state)) = meta_product {
+        start_service_action(config, command, &[product, state])
+    } else if command == "telegram-check" {
         start_telegram_check(config)
-    } else if manager_present && *command == "update-check" {
+    } else if manager_present && command == "update-check" {
         start_manager_update(config, command)
-    } else if manager_present && *command == "update-install" {
+    } else if manager_present && command == "update-install" {
         if is_executable_file(&config.service_path) {
-            start_service_action(config, command)
+            start_service_action(config, command, &[])
         } else {
             return json_response(
                 409,
@@ -1494,7 +1511,7 @@ fn api_control_path(config: &Config, request: &Request<'_>, path: &str) -> Respo
             );
         }
     } else {
-        start_service_action(config, command)
+        start_service_action(config, command, &[])
     };
     match result {
         Ok(()) => json_response(
@@ -1550,12 +1567,12 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-fn start_service_action(config: &Config, command: &str) -> Result<(), ActionError> {
+fn start_service_action(config: &Config, command: &str, args: &[&str]) -> Result<(), ActionError> {
     if config.service_path.as_os_str().is_empty() {
         return Err(ActionError::Start);
     }
     let mut child_command = Command::new(config.service_path.clone());
-    child_command.arg(command);
+    child_command.arg(command).args(args);
     let timeout = if command == "update-install" {
         UPDATE_INSTALL_TIMEOUT
     } else {
@@ -2187,6 +2204,7 @@ fn embedded_asset(name: &str) -> Option<&'static [u8]> {
     Some(match name {
         "index.html" => include_bytes!("../assets/index.html"),
         "favicon.svg" => include_bytes!("../assets/favicon.svg"),
+        "meta-marks.png" => include_bytes!("../assets/meta-marks.png"),
         "refresh-mask.svg" => include_bytes!("../assets/refresh-mask.svg"),
         "panel.css" => include_bytes!("../assets/panel.css"),
         "panel.js" => include_bytes!("../assets/panel.js"),

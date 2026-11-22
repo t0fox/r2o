@@ -580,17 +580,128 @@ main { min-width: 0; }
 
 .overview-dns { margin-block: 16px; container-type: inline-size; scroll-margin-top: 110px; }
 .overview-dns-head { align-items: baseline; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 10px; }
-/* Состояние Meta читается даже без цвета и без раскрытия карточек. */
-.meta-switch { min-width: 4rem; min-height: 44px; font-variant-numeric: tabular-nums; }
-.meta-switch[aria-checked="true"] { border-color: var(--acc); }
-.meta-families { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr)); gap: .5rem; margin: .8rem 0; align-items: start; }
-.meta-details { overflow-wrap: anywhere; color: var(--ink-2); }
-.meta-family { border: 1px solid var(--line); border-radius: .5rem; padding: .5rem .65rem; }
-.meta-family-head { min-height: 44px; cursor: pointer; color: var(--ink); }
-.meta-family-head .mono { margin-inline-start: .5rem; }
-.meta-family p, .meta-sources { margin-block: .35rem; }
-.meta-sources { padding-inline-start: 1.25rem; font-size: .82rem; }
-.meta-failure { font-size: .82rem; overflow-wrap: anywhere; }
+.meta-protection {
+  container-type: inline-size;
+  margin-block: 16px; padding: clamp(12px, 2vw, 20px);
+  scroll-margin-top: calc(var(--mast-offset) + 68px);
+}
+.meta-protection-head, .meta-identity { display: flex; align-items: center; gap: 12px; }
+.meta-protection-head { justify-content: space-between; margin-bottom: 16px; }
+.meta-identity { min-width: 0; }
+.meta-identity > div { min-width: 0; }
+.meta-identity h2 {
+  margin: 0; font: 600 clamp(.9rem, 2.3vw, 1.17rem)/1.35 var(--display);
+  text-wrap: balance;
+}
+.meta-state {
+  display: flex; align-items: center; gap: 8px; margin: 5px 0 0;
+  color: var(--ink-2); font-size: .75rem;
+}
+.meta-state .lamp { flex: none; }
+.meta-switch {
+  --meta-track-width: 60px; --meta-track-height: 32px;
+  --meta-thumb-size: 22px; --meta-inset: 4px;
+  display: grid; place-items: center; flex: none; min-width: max(44px, var(--meta-track-width)); min-height: 44px;
+  padding: 0; border: 0; background: transparent; cursor: pointer;
+  touch-action: pan-y; user-select: none; -webkit-tap-highlight-color: transparent;
+}
+.meta-switch-track {
+  --meta-travel: calc(var(--meta-track-width) - var(--meta-thumb-size) - 2 * var(--meta-inset) - 2px);
+  position: relative; width: var(--meta-track-width); height: var(--meta-track-height); border-radius: 99px;
+  border: 1px solid var(--ink-3); background: var(--surface-deep); pointer-events: none;
+  box-shadow: inset 0 2px 5px rgb(0 0 0 / .45);
+}
+.meta-switch-thumb {
+  position: absolute; inset: var(--meta-inset) auto auto var(--meta-inset);
+  width: var(--meta-thumb-size); height: var(--meta-thumb-size); border-radius: 50%;
+  background: var(--ink-2); box-shadow: 0 2px 5px rgb(0 0 0 / .55);
+  translate: calc(var(--meta-progress, var(--meta-target, 0)) * var(--meta-travel)) 0;
+  transition: translate .31s cubic-bezier(.2, .95, .3, 1.15), scale .18s var(--ease);
+}
+.meta-switch:not(:is(:disabled, [aria-disabled="true"])):hover .meta-switch-track { border-color: var(--focus); }
+.meta-switch:not(:is(:disabled, [aria-disabled="true"])):hover .meta-switch-thumb { scale: 1.06; }
+.meta-switch[aria-checked="true"] .meta-switch-track {
+  --meta-target: 1;
+  border-color: var(--acc-3);
+  background: linear-gradient(180deg, var(--acc-wash), color-mix(in srgb, var(--acc) 24%, var(--surface-deep)));
+}
+.meta-switch[aria-checked="true"] .meta-switch-thumb { background: var(--acc); }
+.meta-switch[data-held] { cursor: grabbing; }
+.meta-switch[data-held] .meta-switch-thumb { scale: 1.15 .87; transition: none; }
+.meta-switch:is(:disabled, [aria-disabled="true"]) { cursor: default; opacity: .6; }
+.meta-families, .meta-infrastructure { display: grid; gap: 8px; align-items: start; }
+.meta-families { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.meta-infrastructure {
+  grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 12px;
+  padding-top: 12px; border-top: 1px solid var(--line-soft);
+}
+.meta-details { min-width: 0; background: var(--surface-deep); }
+.meta-unit { position: relative; min-width: 0; }
+.meta-switch-small {
+  --meta-track-width: 36px; --meta-track-height: 22px;
+  --meta-thumb-size: 14px; --meta-inset: 3px;
+  position: absolute; z-index: 1; inset-block-start: 9px; inset-inline-end: 5px;
+}
+.meta-unit summary { padding-inline-end: 52px; }
+.meta-family-head {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  min-height: 62px; padding: 9px 11px; border-radius: inherit; list-style: none;
+  color: var(--ink); cursor: pointer; touch-action: manipulation;
+  scroll-margin-block-start: calc(var(--mast-offset) + 68px);
+}
+.meta-family-head::-webkit-details-marker { display: none; }
+.meta-family-head:hover, .meta-unit:focus-within .meta-family-head, .meta-details[open] > .meta-family-head { background: var(--surface-2); }
+.meta-details[open] > .meta-family-head { border-end-start-radius: 0; border-end-end-radius: 0; }
+.meta-icon {
+  display: grid; place-items: center; flex: none; width: 36px; height: 36px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2);
+}
+.meta-identity .meta-icon { width: 44px; height: 44px; }
+.meta-icon svg, .meta-chevron { fill: none; stroke: var(--ink-2); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.meta-icon svg { width: 18px; height: 18px; }
+/* Знаки из Meta Brand Resource Center (meta.com/brand/resources/meta/our-trademarks/).
+   Meta Quest использует знак Meta из своего логотипа. */
+.meta-mark {
+  width: 25px; height: 25px;
+  background: url("/assets/meta-marks.png") 0 center / 600% 100% no-repeat;
+}
+.meta-mark-instagram { background-position-x: 20%; }
+.meta-mark-whatsapp { background-position-x: 40%; }
+.meta-mark-messenger { background-position-x: 60%; }
+.meta-mark-threads { background-position-x: 80%; }
+.meta-mark-quest { background-position-x: 100%; }
+.meta-identity .meta-mark { width: 31px; height: 31px; }
+.meta-copy { display: grid; min-width: 0; gap: 2px; overflow-wrap: anywhere; }
+.meta-copy strong { font-size: .88rem; }
+.meta-subtitle { color: var(--ink-2); font-size: .72rem; }
+.meta-score, .meta-detail-body dd { font-variant-numeric: tabular-nums; }
+.meta-score { font: 600 .64rem/1 var(--mono); margin-inline-start: .35em; white-space: nowrap; }
+.meta-family[data-tone="ok"] .meta-subtitle { color: var(--ok); }
+.meta-family[data-tone="warn"] .meta-subtitle { color: var(--warn); }
+.meta-family[data-tone="bad"] .meta-subtitle { color: color-mix(in srgb, var(--bad) 76%, var(--ink)); }
+.meta-chevron { width: 16px; height: 16px; transition: transform .25s var(--ease); }
+.meta-details[open]:not([data-open-motion="closing"]) > summary .meta-chevron { transform: rotate(180deg); stroke: var(--bronze); }
+.meta-detail-body {
+  padding: 10px 12px 12px; margin: 0; border-top: 1px solid var(--line-soft);
+  color: var(--ink-2); font-size: .75rem; overflow-wrap: anywhere;
+}
+.meta-detail-body dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 9px; margin: 0; }
+.meta-detail-body dd { margin: 0; text-align: end; color: var(--ink); }
+.meta-records { display: grid; gap: 6px; padding-inline-start: 12px; list-style: none; }
+.meta-detail-body .meta-records { margin: 10px 0 0; padding: 8px 0 0; border-top: 1px solid var(--line-soft); }
+.meta-detail-body p { margin: 8px 0 0; }
+.meta-detail-body strong, .meta-records strong { color: var(--ink); }
+@container (max-width: 700px) {
+  .meta-families { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container (max-width: 420px) {
+  .meta-families, .meta-infrastructure { grid-template-columns: 1fr; }
+  .meta-family-head { min-height: 54px; }
+  .meta-switch-small { inset-block-start: 5px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .meta-switch-thumb, .meta-chevron { transition: none; }
+}
 .overview-dns-head h2, .dns-summary { margin: 0; }
 .dns-summary { color: var(--ink-2); font-size: .83rem; }
 .dns-list {

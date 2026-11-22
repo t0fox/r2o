@@ -26684,7 +26684,9 @@ impl ControlClient {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .get(&target)
                             .copied();
-                        if !meta.enabled() || (outcome.plan_text.is_some() && proof.is_none()) {
+                        if !meta.enabled_for(&target.host)
+                            || (outcome.plan_text.is_some() && proof.is_none())
+                        {
                             let _ = r2o_confirmed_proof_take(&target);
                             let _ = r2o_budget_cut_pending_take(&target);
                             continue;

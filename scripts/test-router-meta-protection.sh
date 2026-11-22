@@ -17,7 +17,7 @@ cat > "$MANAGER" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$TRACE"
 case " $* " in
-    *" --remove-meta-dns "*) exit 0 ;;
+    *" --remove-meta-dns "*|*" --meta-protection-product instagram off "*) exit 0 ;;
     *) exit 2 ;;
 esac
 EOF
@@ -28,7 +28,7 @@ meta_dns_scheduler_start() { printf 'meta start\n' >> "$TRACE"; }
 meta_dns_scheduler_stop() { printf 'meta stop\n' >> "$TRACE"; }
 
 # Вызываем штатные обработчики команд, используя имитации запуска и backend.
-eval "$(awk '/^meta_protection_(enable|disable)\(\) \{/ { print_block=1 }
+eval "$(awk '/^meta_protection_(enable|disable|product)\(\) \{/ { print_block=1 }
     print_block { print }
     /^\}/ { print_block=0 }' "$REPO/router/S99r2o")"
 
@@ -42,4 +42,9 @@ meta_protection_enable
 test ! -e "$META_DISABLED"
 test "$(tail -n 1 "$TRACE")" = 'meta start'
 test "$(wc -l < "$TRACE")" -eq 3
+if meta_protection_product malformed off; then exit 1; fi
+meta_protection_product instagram off
+test "$(awk 'NR == 4' "$TRACE")" = 'meta stop'
+test "$(awk 'NR == 5' "$TRACE")" = "exec --root $ROOT --component r2o-telegram -- --meta-protection-product instagram off"
+test "$(awk 'NR == 6' "$TRACE")" = 'meta start'
 printf '%s\n' 'Meta Protection ON/OFF и сохранение состояния: OK'

@@ -627,6 +627,7 @@ fn installed_manager_exposes_update_state_and_drives_update_actions() {
         "update-auto-off",
         "meta-protection-on",
         "meta-protection-off",
+        "meta-product/whatsapp/off",
     ] {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -646,7 +647,7 @@ fn installed_manager_exposes_update_state_and_drives_update_actions() {
     }
     let deadline = Instant::now() + Duration::from_secs(2);
     while !fs::read_to_string(&service_arguments)
-        .is_ok_and(|args| args.contains("meta-protection-off\n"))
+        .is_ok_and(|args| args.contains("meta-protection-product\nwhatsapp\noff\n"))
         && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(10));
@@ -656,6 +657,12 @@ fn installed_manager_exposes_update_state_and_drives_update_actions() {
     assert!(service_log.contains("update-auto-off\n"));
     assert!(service_log.contains("meta-protection-on\n"));
     assert!(service_log.contains("meta-protection-off\n"));
+    assert!(service_log.contains("meta-protection-product\nwhatsapp\noff\n"));
+    let (status, _, _) = request(
+        &config,
+        "POST /api/control/meta-product/whatsapp/bad HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nContent-Length: 0\r\n\r\n",
+    );
+    assert_eq!(status, 404);
 
     let mut install_config = Config::default();
     install_config.manager_path = config.manager_path.clone();

@@ -1,5 +1,7 @@
 //! Классификация наблюдений Meta. Суффиксы служат только для отбора кандидатов.
 
+use std::path::{Path, PathBuf};
+
 pub const PRODUCTS: &[&str] = &[
     "facebook",
     "instagram",
@@ -9,6 +11,20 @@ pub const PRODUCTS: &[&str] = &[
     "quest",
     "fbcdn",
 ];
+
+pub fn product_marker(state: &Path, product: &str) -> Option<PathBuf> {
+    PRODUCTS
+        .contains(&product)
+        .then(|| state.join(format!("meta-protection.{product}.disabled")))
+}
+
+pub fn disabled_products(state: &Path) -> Vec<&'static str> {
+    PRODUCTS
+        .iter()
+        .copied()
+        .filter(|name| product_marker(state, name).is_some_and(|path| path.exists()))
+        .collect()
+}
 
 pub fn product(host: &str) -> Option<&'static str> {
     if host.len() > 253

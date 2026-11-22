@@ -837,6 +837,10 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
     }
 
     pub fn remove_owned(&mut self) -> Result<(), String> {
+        self.remove_owned_where(|_| true)
+    }
+
+    fn remove_owned_where(&mut self, remove_host: impl Fn(&str) -> bool) -> Result<(), String> {
         let manifest = read_manifest(&self.paths.manifest)?;
         if manifest.is_empty() {
             let _ = std::fs::remove_file(&self.paths.manifest);
@@ -844,27 +848,36 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             return Ok(());
         }
         let mut view = NdmView::new(&mut self.ndm);
-        for (host, address) in &manifest {
-            if !is_managed_host(host) {
+        let mut remaining = BTreeSet::new();
+        let mut matched = false;
+        for (host, address) in manifest {
+            if !is_managed_host(&host) || !remove_host(&host) {
+                remaining.insert((host, address.to_string()));
                 continue;
             }
-            if !view.exists(host, *address)? {
-                continue;
+            matched = true;
+            if view.exists(&host, address)? {
+                view.remove(&host, address)?;
+                append_log(
+                    &self.paths.log,
+                    &format!("удалена R2O-запись {host} {address}"),
+                );
             }
-            view.remove(host, *address)?;
-            append_log(
-                &self.paths.log,
-                &format!("удалена R2O-запись {host} {address}"),
-            );
+        }
+        if !matched {
+            return Ok(());
         }
         view.ndm.save()?;
-        std::fs::remove_file(&self.paths.manifest).map_err(|error| {
-            format!(
-                "не удалось удалить журнал принадлежащих записей {}: {error}",
-                self.paths.manifest.display()
-            )
-        })?;
-        Ok(())
+        if remaining.is_empty() {
+            std::fs::remove_file(&self.paths.manifest).map_err(|error| {
+                format!(
+                    "не удалось удалить журнал принадлежащих записей {}: {error}",
+                    self.paths.manifest.display()
+                )
+            })
+        } else {
+            write_manifest(&self.paths.manifest, &remaining)
+        }
     }
 }
 
@@ -1169,10 +1182,23 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .as_secs();
     let mut knowledge = Knowledge::load(&state);
+    let disabled = r2k_core::meta::disabled_products(&state);
+    if !disabled.is_empty() {
+        let mut cleanup = MetaDnsManager::new(
+            DirectMetaNetwork::new(None),
+            SystemNdm::default(),
+            paths.clone(),
+        );
+        let inactive = |host: &str| is_disabled_host(&disabled, host);
+        match cleanup.remove_owned_where(inactive) {
+            Ok(()) => clear_pin_status(&mut knowledge, inactive),
+            Err(error) => append_log(&paths.log, &error),
+        }
+    }
     knowledge.refresh_sources(&crate::list_update::ListPaths::from_env(), &runtime, now);
     let mut network =
         DirectMetaNetwork::new(std::env::var_os("R2O_IP_CA_BUNDLE").map(PathBuf::from));
-    network.hosts = knowledge.due(now, force);
+    network.hosts = knowledge.due(now, force, |host| !is_disabled_host(&disabled, host));
     if network.hosts.is_empty() {
         return knowledge.persist(&state);
     }
@@ -1334,11 +1360,7 @@ pub fn remove_from_env() -> Result<(), String> {
         MetaDnsManager::new(DirectMetaNetwork::new(None), SystemNdm::default(), paths);
     manager.remove_owned()?;
     let mut knowledge = Knowledge::load(&state);
-    for host in knowledge.hosts.values_mut() {
-        for address in &mut host.addresses {
-            address.pinned = false;
-        }
-    }
+    clear_pin_status(&mut knowledge, |_| true);
     let _ = std::fs::remove_file(runtime.join("meta-discovery-requests.json"));
     for name in [
         "meta-observed-v4.json",
@@ -1348,6 +1370,53 @@ pub fn remove_from_env() -> Result<(), String> {
         let _ = std::fs::remove_file(runtime.join(name));
     }
     knowledge.persist(&state)
+}
+
+fn is_disabled_host(disabled: &[&str], host: &str) -> bool {
+    r2k_core::meta::product(host).is_some_and(|name| disabled.contains(&name))
+}
+
+fn clear_pin_status(knowledge: &mut Knowledge, matches: impl Fn(&str) -> bool) {
+    for (name, host) in &mut knowledge.hosts {
+        if matches(name) {
+            for address in &mut host.addresses {
+                address.pinned = false;
+            }
+        }
+    }
+}
+
+pub fn set_product_from_env(product: &str, mode: &str) -> Result<(), String> {
+    let paths = MetaDnsPaths::from_env();
+    let (state, _) = state_dirs(&paths);
+    let marker =
+        r2k_core::meta::product_marker(&state, product).ok_or("неизвестный сервис Meta")?;
+    let _lock = state_lock(&state)?;
+    let mut knowledge = Knowledge::load(&state);
+    let matches = |host: &str| r2k_core::meta::product(host) == Some(product);
+    match mode {
+        "on" => {
+            if marker.exists() {
+                for (host, entry) in &mut knowledge.hosts {
+                    if matches(host) {
+                        entry.checked_at = 0;
+                    }
+                }
+                knowledge.persist(&state)?;
+                std::fs::remove_file(marker).map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        }
+        "off" => {
+            atomic_write(&marker, b"0\n")?;
+            let mut manager =
+                MetaDnsManager::new(DirectMetaNetwork::new(None), SystemNdm::default(), paths);
+            manager.remove_owned_where(matches)?;
+            clear_pin_status(&mut knowledge, matches);
+            knowledge.persist(&state)
+        }
+        _ => Err("ожидается on или off".into()),
+    }
 }
 
 pub async fn run_scheduler() -> Result<(), String> {
@@ -2452,6 +2521,52 @@ esac
         assert!(!paths.manifest.exists());
         assert_eq!(manager.ndm.saves, 1);
         let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
+    #[test]
+    fn disabling_one_product_preserves_other_owned_and_user_dns_records() {
+        let paths = paths("remove-product");
+        let ip = "157.240.9.174".parse::<IpAddr>().unwrap();
+        let user = "157.240.9.175".parse::<IpAddr>().unwrap();
+        std::fs::write(
+            &paths.manifest,
+            format!("instagram.com {ip}\nwww.facebook.com {ip}\n"),
+        )
+        .unwrap();
+        let mut ndm = FakeNdm::default();
+        ndm.records.extend([
+            ("instagram.com".into(), ip),
+            ("instagram.com".into(), user),
+            ("www.facebook.com".into(), ip),
+        ]);
+        let mut manager = manager(
+            FakeNetwork::with_answers(BTreeMap::new()),
+            ndm,
+            paths.clone(),
+        );
+
+        let inactive = |host: &str| is_disabled_host(&["instagram"], host);
+        manager.remove_owned_where(inactive).unwrap();
+        manager.remove_owned_where(inactive).unwrap();
+        assert_eq!(
+            read_manifest(&paths.manifest).unwrap(),
+            [("www.facebook.com".into(), ip)]
+        );
+        assert_eq!(manager.ndm.records.len(), 2);
+        assert!(
+            manager
+                .ndm
+                .records
+                .contains(&("instagram.com".into(), user))
+        );
+        assert!(
+            manager
+                .ndm
+                .records
+                .contains(&("www.facebook.com".into(), ip))
+        );
+        assert_eq!(manager.ndm.saves, 1);
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
     }
 
     #[tokio::test]

@@ -186,6 +186,13 @@ pub struct Config {
     #[arg(long, conflicts_with_all = ["refresh_meta_dns", "meta_dns_scheduler", "initialize_identity", "resolve_meta"])]
     pub remove_meta_dns: bool,
 
+    /// Включить или выключить защиту одного сервиса Meta.
+    #[arg(long, num_args = 2, value_names = ["PRODUCT", "ON_OR_OFF"], conflicts_with_all = [
+        "refresh_meta_dns", "remove_meta_dns", "meta_dns_scheduler", "refresh_lists",
+        "initialize_identity", "resolve_meta", "rt_proxy", "check", "stats"
+    ])]
+    pub meta_protection_product: Option<Vec<String>>,
+
     /// Запустить Meta Protection и ежедневное обновление источников.
     #[arg(long, conflicts_with_all = ["refresh_meta_dns", "remove_meta_dns", "initialize_identity", "resolve_meta"])]
     pub meta_dns_scheduler: bool,

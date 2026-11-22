@@ -374,7 +374,9 @@
     check: "M5 12.5l4.5 4.5L19 7.5",
     cross: "M6.5 6.5l11 11M17.5 6.5l-11 11",
     dash: "M6 12h12",
-    send: "M21 3 3 10.5l7 2.5 2.5 7zM10 13l5-5"
+    send: "M21 3 3 10.5l7 2.5 2.5 7zM10 13l5-5",
+    chevron: "m7 10 5 5 5-5",
+    boxes: "m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3ZM4.4 7.7l7.6 4.4 7.6-4.4M12 12v9"
   };
 
   function el(doc, tag, cls, text) {
@@ -500,7 +502,7 @@
     this.screens.forEach(function (screen) { valid[screen.id] = screen; });
     this.validScreens = valid;
     doc.addEventListener("click", function (event) {
-      var summary = event.target.closest(".family-card > summary, .box-card > summary");
+      var summary = event.target.closest(".family-card > summary, .box-card > summary, .meta-details > summary");
       if (!summary || !Motion.on() || event.defaultPrevented || event.target.closest("a,button,input")) return;
       event.preventDefault();
       var card = summary.parentElement;
@@ -509,7 +511,7 @@
       if (card.__foldMotion) card.__foldMotion.kill();
       card.__opening = opening;
       card.style.removeProperty("height");
-      card.setAttribute("data-open-motion", "");
+      card.setAttribute("data-open-motion", opening ? "opening" : "closing");
       card.open = true;
       var end = opening ? card.getBoundingClientRect().height : summary.offsetHeight + card.offsetHeight - card.clientHeight;
       card.__foldMotion = Motion.track(Motion.g.fromTo(card, { height: start, overflow: "hidden" }, {
@@ -884,6 +886,7 @@
         self.failed = true;
         self.renderEngineStatus(self.m);
         self.renderDnsProtection(self.m);
+        self.renderMetaProtection(self.m);
         var staleBefore = bodyAttribute(self.doc, "data-stale");
         self.renderNotice();
         var staleAfter = bodyAttribute(self.doc, "data-stale");
@@ -1431,72 +1434,181 @@
     return b;
   };
 
+  var META_PRODUCTS = {
+    facebook: "Facebook", instagram: "Instagram", whatsapp: "WhatsApp", messenger: "Messenger",
+    threads: "Threads", quest: "Meta Quest", fbcdn: "Meta CDN"
+  };
+
+  function bindMetaSwitch(button, app) {
+    var track = button.querySelector(".meta-switch-track"), grip, skipClick = false;
+    function usable() { return !button.disabled && button.getAttribute("aria-disabled") !== "true"; }
+    function toggle() { if (usable()) app.act(button.dataset.control); }
+    function finish() {
+      grip = null;
+      track.style.removeProperty("--meta-progress");
+      button.removeAttribute("data-held");
+    }
+    button.addEventListener("pointerdown", function (event) {
+      if (!usable() || grip || event.button !== 0) return;
+      skipClick = false;
+      grip = { id: event.pointerId, start: event.clientX, rect: track.getBoundingClientRect() };
+      button.setPointerCapture(event.pointerId);
+    });
+    button.addEventListener("pointermove", function (event) {
+      if (!grip || event.pointerId !== grip.id) return;
+      if (!grip.moved && Math.abs(event.clientX - grip.start) < (event.pointerType === "touch" ? 8 : 4)) return;
+      grip.moved = true;
+      grip.position = Math.max(0, Math.min(1, (event.clientX - grip.rect.left) / grip.rect.width));
+      button.setAttribute("data-held", "");
+      track.style.setProperty("--meta-progress", grip.position);
+    });
+    button.addEventListener("pointerup", function (event) {
+      if (!grip || event.pointerId !== grip.id) return;
+      var checked = button.getAttribute("aria-checked") === "true";
+      var changed = grip.moved && (grip.position > .5) !== checked;
+      skipClick = grip.moved;
+      finish();
+      if (changed) toggle();
+    });
+    button.addEventListener("lostpointercapture", finish);
+    button.addEventListener("keydown", function (event) {
+      if (!grip || event.key !== "Escape") return;
+      button.releasePointerCapture(grip.id);
+      skipClick = true;
+      finish();
+    });
+    button.addEventListener("click", function (event) {
+      if (!skipClick || event.detail === 0) toggle();
+      skipClick = false;
+    });
+  }
+
+  function showMetaSwitch(button, value, available, busy, action) {
+    var checked = String(value), previous = button.getAttribute("aria-checked");
+    button.setAttribute("aria-checked", checked);
+    button.setAttribute("aria-disabled", String(busy));
+    button.disabled = !available;
+    button.dataset.control = action;
+    if (previous !== checked && Motion.on()) {
+      Motion.g.fromTo(button.querySelector(".meta-switch-thumb"), { scaleX: 1.23, scaleY: .82 }, {
+        scaleX: 1, scaleY: 1, duration: .34, ease: "back.out(2)", overwrite: true, clearProps: "transform"
+      });
+    }
+  }
+
+  function metaFamilyCard(doc, app, key) {
+    var card = el(doc, "div", "meta-unit");
+    var details = el(doc, "details", "meta-details meta-family card");
+    var head = el(doc, "summary", "meta-family-head");
+    var brand = el(doc, "span", "meta-icon"), copy = el(doc, "span", "meta-copy");
+    var title = el(doc, "strong", "", META_PRODUCTS[key]);
+    var subtitle = el(doc, "span", "meta-subtitle");
+    var score = el(doc, "span", "meta-score");
+    var chevron = icon(doc, "chevron"), body = el(doc, "div", "meta-detail-body");
+    var button = el(doc, "button", "meta-switch meta-switch-small");
+    button.type = "button";
+    button.setAttribute("role", "switch");
+    button.setAttribute("aria-label", "Защита " + META_PRODUCTS[key]);
+    add(button, add(el(doc, "span", "meta-switch-track"), el(doc, "span", "meta-switch-thumb")));
+    button.firstElementChild.setAttribute("aria-hidden", "true");
+    bindMetaSwitch(button, app);
+    card.dataset.family = key;
+    brand.setAttribute("aria-hidden", "true");
+    add(brand, key === "fbcdn" ? icon(doc, "boxes") : el(doc, "span", "meta-mark meta-mark-" + key));
+    title.setAttribute("translate", "no");
+    chevron.setAttribute("class", "meta-chevron");
+    add(head, brand, add(copy, title, subtitle), chevron);
+    add(card, add(details, head, body), button);
+    return { card: card, details: details, subtitle: subtitle, score: score, body: body, button: button };
+  }
+
   App.prototype.renderMetaProtection = function (m) {
     var doc = this.doc, self = this, button = this.$("meta-protection-switch");
-    if (!button || !m) return;
-    var status = m.snap.meta_protection || {};
-    var busy = !!this.pending || m.snap.control_state === "running";
-    var enabled = status.enabled === true;
-    button.setAttribute("aria-checked", String(enabled));
-    button.disabled = busy || !m.snap.controls_enabled || typeof status.enabled !== "boolean";
-    button.textContent = enabled ? "ON" : "OFF";
-    button.onclick = function () { self.act(enabled ? "meta-protection-off" : "meta-protection-on"); };
-    var summary = typeof status.enabled !== "boolean" ? "Нет данных"
-      : !enabled ? "Выключена" : !status.running ? "Планировщик остановлен"
-      : status.error ? "Работает с ошибкой проверки"
-      : status.checked_at ? "Планировщик работает" : "Первая проверка";
-    var state = this.$("meta-protection-state");
+    if (!button) return;
+    var snapshot = m ? m.snap : {}, status = snapshot.meta_protection || {}, enabled = status.enabled === true;
+    var known = typeof status.enabled === "boolean", available = known && snapshot.controls_enabled && !this.failed;
+    var busy = !!this.pending || snapshot.control_state === "running";
+    var saving = this.pending && /^meta[-/]/.test(this.pending);
+    var disabled = list(status.disabled_products);
+    if (!this.metaCards) {
+      this.metaCards = {};
+      bindMetaSwitch(button, this);
+      Object.keys(META_PRODUCTS).forEach(function (key) {
+        var view = metaFamilyCard(doc, self, key);
+        self.metaCards[key] = view;
+        self.$(key === "fbcdn" ? "meta-protection-cdn" : "meta-protection-families").append(view.card);
+      });
+    }
+    showMetaSwitch(button, enabled, available, busy, enabled ? "meta-protection-off" : "meta-protection-on");
+    var summary = this.failed ? "Нет связи с панелью" : !known ? "Нет данных контроллера"
+      : saving ? "Сохраняем настройку…"
+      : !enabled ? "Защита выключена" : !status.running ? "Планировщик остановлен"
+      : status.error ? "Проверка завершилась с ошибкой"
+      : status.checked_at ? "Защита включена" : "Первая проверка…";
+    var state = this.$("meta-protection-state"), lamp = this.$("meta-protection-lamp");
     if (state.textContent !== summary) state.textContent = summary;
-    var signature = JSON.stringify([status.families, status.sources, status.searches, enabled, Math.floor(Date.now() / 3600000)]);
-    if (this.metaSignature === signature) return;
-    this.metaSignature = signature;
-    var names = {
-      facebook: "Facebook", instagram: "Instagram", whatsapp: "WhatsApp", messenger: "Messenger",
-      threads: "Threads", quest: "Meta Quest", fbcdn: "Meta CDN"
-    };
-    var checked = function (epoch) { return epoch ? new Date(epoch * 1000).toLocaleString() : "ещё не проверено"; };
-    var families = this.$("meta-protection-families");
-    var open = Array.from(families.querySelectorAll("details[open]")).map(function (row) { return row.dataset.family; });
-    var rows = list(status.families);
-    families.replaceChildren.apply(families, Object.keys(names).map(function (key) {
+    lamp.dataset.tone = saving ? "live" : !enabled ? "" : this.failed || !status.running || status.error ? "warn" : status.checked_at ? "ok" : "live";
+    var rows = list(status.families), searches = list(status.searches);
+    var checked = function (epoch) { return epoch ? new Date(epoch * 1000).toLocaleString() : "Ещё не проверено"; };
+    var metric = function (stats, label, value) { stats.append(el(doc, "dt", "", label), el(doc, "dd", "", value)); };
+    Object.keys(this.metaCards).forEach(function (key) {
+      var view = self.metaCards[key];
+      var active = disabled.indexOf(key) === -1;
+      showMetaSwitch(view.button, active && known, available, busy, "meta-product/" + key + "/" + (active ? "off" : "on"));
       var row = rows.find(function (family) { return family.product === key; }) || {};
-      var card = el(doc, "details", "meta-details meta-family");
-      card.dataset.family = key;
-      card.open = open.indexOf(key) !== -1;
-      var title = el(doc, "summary", "meta-family-head");
-      title.append(el(doc, "strong", "", names[key]), el(doc, "span", "mono",
-        row.checked ? "TLS " + row.verified_domains + "/" + row.checked : "Нет проверок"));
-      card.append(title);
-      card.append(el(doc, "p", "dns-summary", (row.domains || 0) + " доменов · " +
-        (row.observed || 0) + " в трафике · DNS " + (row.dns_ok || 0) + "/" + (row.checked || 0)));
-      card.append(el(doc, "p", "dns-summary", "Подтверждены IPv4 " + (row.ipv4 || 0) +
-        " · IPv6 " + (row.ipv6 || 0) + " · без подтверждения " + (row.unverified || 0) +
-        (enabled ? " · DNS-записей R2O " + (row.pinned || 0) : "")));
-      card.append(el(doc, "p", "dns-summary", "Проверка · " + checked(row.checked_at)));
-      if (row.local_dns) card.append(el(doc, "p", "dns-summary",
-        "Локальный DNS · " + row.local_dns.host + " · " + row.local_dns.status));
-      if (row.last_failure) card.append(el(doc, "p", "meta-failure",
-        row.last_failure.host + " · " + row.last_failure.detail + " · " + checked(row.last_failure.at)));
-      var details = el(doc, "ul", "meta-sources");
+      var jobs = searches.filter(function (search) { return search.product === key; });
+      var signature = JSON.stringify([row, jobs, known, enabled, active]);
+      if (view.signature === signature) return;
+      view.signature = signature;
+      var total = row.checked || 0, verified = row.verified_domains || 0;
+      var tone = !active || !enabled || !total ? "" : verified === total ? "ok" : verified ? "warn" : "bad";
+      view.details.dataset.tone = tone;
+      view.subtitle.textContent = !known ? "Нет данных" : !active ? "Защита выключена"
+        : !enabled ? "Общая защита выключена"
+        : tone === "ok" ? "TLS подтверждён" : tone === "warn" ? "TLS частично"
+        : tone === "bad" ? "TLS не подтверждён" : "Нет проверок";
+      if (tone) {
+        view.score.textContent = verified + "/" + total;
+        view.subtitle.append(" ", view.score);
+      }
+      var stats = el(doc, "dl");
+      metric(stats, "Домены / в трафике", (row.domains || 0) + " / " + (row.observed || 0));
+      metric(stats, "Защищённый DNS", (row.dns_ok || 0) + " / " + total);
+      metric(stats, "Подтверждены IPv4 / IPv6", (row.ipv4 || 0) + " / " + (row.ipv6 || 0));
+      metric(stats, "IP без подтверждения", row.unverified || 0);
+      if (enabled && active) metric(stats, "DNS-записи R2O", row.pinned || 0);
+      var records = el(doc, "ul", "meta-records");
       list(row.sample).forEach(function (item) {
         var address = item.address || {};
-        details.append(el(doc, "li", "", item.host + " · " + address.ip +
-          (address.asn ? " · AS" + address.asn : "") + " · " + address.result));
+        add(records, add(el(doc, "li"), el(doc, "strong", "", item.host),
+          " · " + [address.ip, address.asn && "AS" + address.asn, address.result].filter(Boolean).join(" · ")));
       });
-      list(status.searches).filter(function (search) { return search.product === key; }).forEach(function (search) {
-        details.append(el(doc, "li", "", search.host + " · Discovery · " +
-          [search.phase, search.plan, search.application, search.last_result].filter(Boolean).join(" · ")));
+      jobs.forEach(function (job) {
+        add(records, add(el(doc, "li"), el(doc, "strong", "", job.host),
+          " · " + ["Discovery", job.phase, job.plan, job.application, job.last_result].filter(Boolean).join(" · ")));
       });
-      if (details.childElementCount) card.append(details);
-      return card;
-    }));
-    var sources = this.$("meta-protection-sources");
-    sources.replaceChildren.apply(sources, list(status.sources).map(function (source) {
+      if (view.details.__foldMotion) view.details.__foldMotion.progress(1);
+      view.body.replaceChildren(stats, el(doc, "p", "", "Последняя проверка · " + checked(row.checked_at)));
+      if (row.local_dns) add(view.body, el(doc, "p", "", "Локальный DNS · " + row.local_dns.host + " · " + row.local_dns.status));
+      if (row.last_failure) add(view.body, el(doc, "p", "", "Последний сбой · " +
+        row.last_failure.host + " · " + row.last_failure.detail + " · " + checked(row.last_failure.at)));
+      if (records.childElementCount) add(view.body, records);
+    });
+    var sources = this.$("meta-protection-sources"), feed = list(status.sources);
+    var sourcesKey = JSON.stringify([feed, Math.floor(Date.now() / 3600000)]);
+    if (sourcesKey === this.metaSourcesKey) return;
+    this.metaSourcesKey = sourcesKey;
+    this.$("meta-protection-source-count").textContent = feed.length
+      ? count(feed.length, "источник", "источника", "источников") : "Списки ещё не загружены";
+    var sourceDetails = sources.parentElement;
+    if (sourceDetails.__foldMotion) sourceDetails.__foldMotion.progress(1);
+    sources.replaceChildren.apply(sources, feed.map(function (source) {
       var stale = source.synced_at && Date.now() / 1000 - source.synced_at > 86400;
-      var when = source.synced_at ? checked(source.synced_at) : "синхронизации ещё не было";
-      return el(doc, "li", "", [source.id, when, source.entries + " записей",
-        stale && "устарел", source.error, source.sha256 && "SHA-256 " + source.sha256.slice(0, 12)]
-        .filter(Boolean).join(" · "));
+      return add(el(doc, "li"), el(doc, "strong", "", source.id), el(doc, "div", "", [
+        source.synced_at ? checked(source.synced_at) : "Синхронизации ещё не было",
+        count(source.entries || 0, "запись", "записи", "записей"),
+        stale && "Данные устарели", source.error, source.sha256 && "SHA-256 " + source.sha256.slice(0, 12)
+      ].filter(Boolean).join(" · ")));
     }));
     if (!sources.childElementCount) sources.append(el(doc, "li", "", "Списки ещё не загружены."));
   };
@@ -1726,12 +1838,13 @@
       return;
     }
     this.armed = null;
-    if (!ENDPOINTS[action] || this.pending) return;
+    var endpoint = ENDPOINTS[action] || (/^meta-product\/(facebook|instagram|whatsapp|messenger|threads|quest|fbcdn)\/(on|off)$/.test(action) ? action : null);
+    if (!endpoint || this.pending) return;
     this.pending = action;
     this.renderActions();
     this.renderMetaProtection(this.m);
     this.renderTelegram(this.m, true);
-    this.win.fetch("/api/control/" + ENDPOINTS[action], { method: "POST", cache: "no-store" })
+    this.win.fetch("/api/control/" + endpoint, { method: "POST", cache: "no-store" })
       .then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (body) {
           if (body.action) self.lastAction = str(body.action);
@@ -1752,6 +1865,7 @@
       .then(function () {
         self.pending = null;
         self.renderActions();
+        self.renderMetaProtection(self.m);
         self.renderNotice();
         self.poll();
         self.win.setTimeout(function () { self.poll(); }, 800);

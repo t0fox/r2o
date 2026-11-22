@@ -287,9 +287,35 @@ async function main() {
   });
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   const updateTimeout = path.join(work, "update-timeout");
-  fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\nif [ "$1" = update-install ] && [ -f '${updateTimeout}' ]; then exit 124; fi\n`);
+  fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\nif [ "$1" = update-install ] && [ -f '${updateTimeout}' ]; then exit 124; fi
+if [ "$1" = meta-protection-product ]; then
+  case "$3" in
+    off) touch '${work}/meta-protection.'"$2"'.disabled' ;;
+    on) rm -f '${work}/meta-protection.'"$2"'.disabled' ;;
+  esac
+fi
+case "$1" in
+  meta-protection-off) touch '${work}/meta-protection.disabled' ;;
+  meta-protection-on) rm -f '${work}/meta-protection.disabled' ;;
+esac
+`);
   fs.chmodSync(servicePath, 0o700);
   const managerRoot = path.join(work, "manager");
+  fs.mkdirSync(path.join(managerRoot, "run"), { recursive: true });
+  fs.writeFileSync(path.join(managerRoot, "run/meta-dns-scheduler.pid"), String(process.pid));
+  const metaTime = Math.floor(Date.now() / 1000);
+  fs.writeFileSync(path.join(work, "meta-status.json"), JSON.stringify({
+    checked_at: metaTime,
+    families: [
+      { product: "facebook", checked: 2, verified_domains: 2, dns_ok: 2, domains: 24, ipv4: 2 },
+      { product: "instagram", checked: 6, verified_domains: 5, domains: 12, dns_ok: 5, ipv4: 3, ipv6: 2, pinned: 1,
+        checked_at: metaTime, sample: [{ host: "i.instagram.com", address: { ip: "2a03:2880::1", asn: 32934, result: "TLS подтверждён" } }] },
+      { product: "whatsapp", checked: 5, verified_domains: 5 },
+      { product: "messenger", checked: 1, verified_domains: 0, last_failure: { host: "edge-chat.facebook.com", at: metaTime, detail: "Тайм-аут TCP" } },
+      { product: "quest", checked: 3, verified_domains: 3 },
+    ],
+    sources: [{ id: "geosite-meta", synced_at: metaTime, entries: 43, sha256: "82fe2d56672eabc3" }],
+  }));
   const updateFile = path.join(managerRoot, "state/update.json");
   const updateState = { current: "test-1", latest: { release_id: "test-2", version: "R2O 2" }, check_ok: true };
   fs.mkdirSync(path.dirname(updateFile), { recursive: true });
@@ -463,6 +489,69 @@ async function main() {
     const screenshot = await call("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(captureDir, "dns-overview-desktop.png"), Buffer.from(screenshot.data, "base64"));
   }
+  const metaSwitch = "[data-family=instagram] [role=switch]";
+  const metaLabel = "[data-family=instagram] .meta-family-head";
+  assert.equal(await evaluate("document.querySelectorAll('#meta-protection [role=switch]').length"), 8);
+  assert.equal(await evaluate("document.querySelectorAll('#meta-protection-families .meta-mark').length"), 6);
+  assert.equal(await evaluate("fetch('/assets/meta-marks.png').then(r => r.ok && r.headers.get('Content-Type') === 'image/png')"), true);
+  assert.match(await evaluate(`document.querySelector('${metaLabel}').textContent`), /TLS частично 5\/6/);
+  await call("Page.bringToFront");
+  await evaluate(`document.querySelector('${metaLabel}').focus()`);
+  assert.equal(await evaluate(`document.activeElement.matches('${metaLabel}')`), true);
+  await call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", text: "\r", windowsVirtualKeyCode: 13 });
+  await call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await waitFor(() => evaluate("document.querySelector('[data-family=instagram] details').open"), "раскрытие Instagram с клавиатуры");
+  assert.match(await evaluate("document.querySelector('[data-family=instagram] .meta-detail-body').textContent"), /2a03:2880::1/);
+  await evaluate("document.querySelector('.meta-infrastructure > details summary').click()");
+  assert.match(await evaluate("document.querySelector('#meta-protection-sources').textContent"), /geosite-meta/);
+  await evaluate(`document.querySelector('${metaSwitch}').focus()`);
+  await call("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", text: " ", windowsVirtualKeyCode: 32 });
+  await call("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+  await waitFor(() => evaluate(`document.querySelector('${metaSwitch}').getAttribute('aria-checked') === 'false'`), "выключение защиты Instagram с клавиатуры");
+  assert.equal(await evaluate(`document.activeElement.matches('${metaSwitch}') && document.querySelector('[data-family=instagram] details').open`), true);
+  assert.equal(await evaluate("document.querySelector('[data-family=facebook] [role=switch]').getAttribute('aria-checked')"), "true");
+  const beforeReload = await evaluate("performance.timeOrigin");
+  await call("Page.reload");
+  await waitFor(() => evaluate(`performance.timeOrigin > ${beforeReload} && document.querySelector('${metaSwitch}')?.getAttribute('aria-checked') === 'false'`), "настройка Instagram переживает перезагрузку панели");
+  await evaluate(`document.querySelector('${metaSwitch}').scrollIntoView({block:'center'})`);
+  const thumb = await evaluate(`(() => {
+    const {left, right, top, height} = document.querySelector('${metaSwitch} .meta-switch-track').getBoundingClientRect();
+    return { left: left + 6, right: right - 6, y: top + height / 2 };
+  })()`);
+  await call("Input.dispatchMouseEvent", { type: "mousePressed", x: thumb.left, y: thumb.y, button: "left", clickCount: 1 });
+  await call("Input.dispatchMouseEvent", { type: "mouseMoved", x: thumb.right, y: thumb.y, button: "left", buttons: 1 });
+  await call("Input.dispatchMouseEvent", { type: "mouseReleased", x: thumb.right, y: thumb.y, button: "left", clickCount: 1 });
+  await waitFor(() => evaluate(`document.querySelector('${metaSwitch}').getAttribute('aria-checked') === 'true'`), "включение защиты Instagram перетаскиванием");
+  assert.deepEqual(fs.readFileSync(serviceLog, "utf8").split("\n").filter(line => line.startsWith("meta-protection-product")), [
+    "meta-protection-product instagram off", "meta-protection-product instagram on",
+  ]);
+  const masterSwitch = "document.getElementById('meta-protection-switch')";
+  await evaluate(masterSwitch + ".click()");
+  await waitFor(() => evaluate(masterSwitch + ".getAttribute('aria-checked') === 'false'"), "общий переключатель останавливает Meta Protection");
+  assert.equal(await evaluate("document.querySelector('[data-family=facebook] .meta-subtitle').textContent"), "Общая защита выключена");
+  assert.equal(await evaluate("document.querySelector('[data-family=facebook] [role=switch]').getAttribute('aria-checked')"), "true");
+  await evaluate(masterSwitch + ".click()");
+  await waitFor(() => evaluate(masterSwitch + ".getAttribute('aria-checked') === 'true'"), "общий переключатель восстанавливает Meta Protection");
+  for (const width of [1440, 390, 320]) {
+    await call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+    await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+    await evaluate("document.querySelector('#meta-protection').scrollIntoView()");
+    const frame = await evaluate(`(() => {
+      const card = document.getElementById('meta-protection');
+      const { left, top, width, height } = card.getBoundingClientRect();
+      return { x: left + scrollX, y: top + scrollY, width, height, scale: 1,
+        overflow: card.scrollWidth > card.clientWidth,
+        motion: getComputedStyle(card.querySelector('.meta-switch-thumb')).transitionProperty };
+    })()`);
+    assert.equal(frame.overflow, false, `карточка Meta помещается при ${width} px`);
+    assert.equal(frame.motion, "none");
+    if (captureDir && width !== 320) {
+      const {overflow, motion, ...clip} = frame;
+      const screenshot = await call("Page.captureScreenshot", { format: "png", clip, captureBeyondViewport: true });
+      fs.writeFileSync(path.join(captureDir, `meta-protection-${width}.png`), Buffer.from(screenshot.data, "base64"));
+    }
+  }
+  await call("Emulation.setEmulatedMedia", { features: [] });
   for (const width of [320, 390, 768, 1024]) {
     await call("Emulation.setDeviceMetricsOverride", { width, height: 844, deviceScaleFactor: 1, mobile: false });
     assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('.index a')].every(el => { const rect = el.getBoundingClientRect(); return rect.width >= 44 && rect.right <= innerWidth && rect.bottom <= innerHeight; })"), true, `обзор и навигация помещаются на экране ${width} px`);

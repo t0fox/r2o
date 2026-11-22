@@ -173,20 +173,37 @@
           </details>
         </section>
 
-        <section class="overview-dns meta-protection" id="meta-protection" aria-labelledby="meta-protection-title">
-          <header class="card-head overview-dns-head">
-            <div>
-              <h2 id="meta-protection-title">Meta Protection</h2>
-              <p id="meta-protection-state" class="dns-summary" role="status">Ожидаем состояние.</p>
+        <section class="card meta-protection" id="meta-protection" aria-labelledby="meta-protection-title">
+          <header class="meta-protection-head">
+            <div class="meta-identity">
+              <span class="meta-icon" aria-hidden="true"><span class="meta-mark meta-mark-quest"></span></span>
+              <div>
+                <h2 id="meta-protection-title" translate="no">Meta Protection</h2>
+                <p class="meta-state"><span class="lamp" id="meta-protection-lamp" aria-hidden="true"></span>
+                  <span id="meta-protection-state" role="status">Ожидаем данные…</span>
+                </p>
+              </div>
             </div>
-            <button type="button" class="btn meta-switch" id="meta-protection-switch" role="switch"
-              aria-label="Meta Protection" aria-checked="false" disabled>OFF</button>
+            <button type="button" class="meta-switch" id="meta-protection-switch" role="switch"
+              aria-labelledby="meta-protection-title" aria-checked="false" disabled>
+              <span class="meta-switch-track" aria-hidden="true"><span class="meta-switch-thumb"></span></span>
+            </button>
           </header>
           <div id="meta-protection-families" class="meta-families"></div>
-          <details class="meta-details">
-            <summary>Источники базы</summary>
-            <ul id="meta-protection-sources" class="meta-sources"></ul>
-          </details>
+          <div class="meta-infrastructure">
+            <div id="meta-protection-cdn"></div>
+            <details class="meta-details card">
+              <summary class="meta-family-head">
+                <span class="meta-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14a8 3 0 0 0 16 0V5M4 12a8 3 0 0 0 16 0"/></svg></span>
+                <span class="meta-copy">
+                  <strong>Источники базы</strong>
+                  <span class="meta-subtitle" id="meta-protection-source-count">Ожидаем данные…</span>
+                </span>
+                <svg class="meta-chevron" aria-hidden="true" viewBox="0 0 24 24"><use href="#i-chevron"/></svg>
+              </summary>
+              <ul id="meta-protection-sources" class="meta-detail-body meta-records"></ul>
+            </details>
+          </div>
         </section>
 
         <div class="overview-grid">

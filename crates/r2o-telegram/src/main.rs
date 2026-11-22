@@ -155,6 +155,14 @@ async fn main() {
         return;
     }
 
+    if let Some(args) = &config.meta_protection_product {
+        if let Err(error) = r2o_telegram::meta_dns::set_product_from_env(&args[0], &args[1]) {
+            eprintln!("ошибка переключения сервиса Meta: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if config.meta_dns_scheduler {
         tokio::select! {
             _ = shutdown_signal() => {},

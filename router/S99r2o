@@ -334,7 +334,7 @@ component_running() {
 telegram_auxiliary_process() {
     aux_cmdline=$(tr '\000' ' ' < "$PROC/$1/cmdline" 2>/dev/null) || return 1
     case " $aux_cmdline " in
-        *" --meta-dns-scheduler "*|*" --rt-proxy "*) return 0 ;;
+        *" --meta-dns-scheduler "*|*" --meta-protection-product "*|*" --rt-proxy "*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -797,6 +797,19 @@ meta_protection_disable() {
     fi
     meta_dns_scheduler_stop || return 1
     "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --remove-meta-dns
+}
+
+meta_protection_product() {
+    [ "$#" -eq 2 ] || return 2
+    case "$1" in facebook|instagram|whatsapp|messenger|threads|quest|fbcdn) ;; *) return 2 ;; esac
+    case "$2" in on|off) ;; *) return 2 ;; esac
+    prepare_dirs || return 1
+    meta_dns_scheduler_stop || return 1
+    meta_result=0
+    "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --meta-protection-product "$1" "$2" ||
+        meta_result=$?
+    meta_dns_scheduler_start || return 1
+    return "$meta_result"
 }
 
 
@@ -1743,6 +1756,7 @@ case "${1:-}" in
     telegram-reapply) telegram_reapply ;;
     meta-protection-on) meta_protection_enable ;;
     meta-protection-off) meta_protection_disable ;;
+    meta-protection-product) shift; meta_protection_product "$@" ;;
     meta-dns-refresh) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --refresh-meta-dns ;;
     lists-refresh) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --refresh-lists ;;
     meta-dns-remove) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --remove-meta-dns ;;

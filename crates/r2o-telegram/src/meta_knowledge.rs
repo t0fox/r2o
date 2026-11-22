@@ -290,10 +290,11 @@ impl Knowledge {
         }
     }
 
-    pub fn due(&self, now: u64, force: bool) -> Vec<String> {
+    pub fn due(&self, now: u64, force: bool, allowed: impl Fn(&str) -> bool) -> Vec<String> {
         let mut due: Vec<_> = self
             .hosts
             .iter()
+            .filter(|(name, _)| allowed(name))
             .filter(|(_, host)| {
                 force
                     || host.checked_at == 0
@@ -382,7 +383,8 @@ mod tests {
         let mut kb = Knowledge::default();
         kb.add_host("new-cdn.WhatsApp.net", "tls-sni", 42);
         kb.add_host("a.whatsapp.net.attacker.test", "tls-sni", 43);
-        assert_eq!(kb.due(43, false), ["new-cdn.whatsapp.net"]);
+        assert_eq!(kb.due(43, false, |_| true), ["new-cdn.whatsapp.net"]);
+        assert!(kb.due(43, true, |_| false).is_empty());
         assert!(kb.hosts["new-cdn.whatsapp.net"].addresses.is_empty());
         kb.persist(&path).unwrap();
         let mut second = Knowledge::load(&path);
