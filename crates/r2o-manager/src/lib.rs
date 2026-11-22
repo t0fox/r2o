@@ -2,8 +2,8 @@
 
 pub mod config;
 pub use update::{
-    cancel_router_update, recover_router_update, run_router_update, run_update_schedule,
-    watch_router_update,
+    cancel_router_update, compact_install_rollback, recover_router_update, run_router_update,
+    run_update_schedule, watch_router_update,
 };
 
 use base64::Engine as _;

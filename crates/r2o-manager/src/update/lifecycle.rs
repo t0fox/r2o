@@ -207,6 +207,14 @@ pub fn recover_router_update(root: &Path) -> Result<(), UpdateError> {
     }
 }
 
+pub fn compact_install_rollback(root: &Path) -> Result<(), UpdateError> {
+    let _guard = UpdateLock::named(root, "update-router.lock", true)?;
+    if pending(root)?.is_some() {
+        return Err(crate::InstallError::Busy.into());
+    }
+    Ok(crate::install::cleanup_releases(root)?)
+}
+
 pub fn watch_router_update(root: &Path, adapter: &Path) -> Result<(), UpdateError> {
     let _guard = UpdateLock::named(root, "update-router.lock", false)?;
     let Some(tx) = pending(root)? else {

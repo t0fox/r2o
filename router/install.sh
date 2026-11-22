@@ -237,4 +237,9 @@ if [ "$INSTALL_MODE" = off ]; then
     "$INIT_SHIM" start || true
 else
     "$INIT_SHIM" start
+    INSTALL_PREVIOUS=$(sed -n '3p' "$SLOTS")
+    if [ -n "$INSTALL_PREVIOUS" ] && [ "$INSTALL_PREVIOUS" != - ] \
+        && "$INIT_SHIM" update-health >/dev/null 2>&1; then
+        "$MANAGER" compact-rollback --root "$ROOT" || echo 'r2o: резервный слот сохранён в исходном виде' >&2
+    fi
 fi

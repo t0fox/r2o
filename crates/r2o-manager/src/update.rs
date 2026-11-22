@@ -2,7 +2,9 @@ mod catalog;
 mod lifecycle;
 mod mirrors;
 mod scheduler;
-pub use lifecycle::{recover_router_update, run_router_update, watch_router_update};
+pub use lifecycle::{
+    compact_install_rollback, recover_router_update, run_router_update, watch_router_update,
+};
 pub use scheduler::run_update_schedule;
 
 use crate::install::activate_previous_release;

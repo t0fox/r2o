@@ -1441,7 +1441,7 @@ mod tests {
         let router = root.join("releases/r2o-current/router");
         fs::create_dir(&router).unwrap();
         fs::write(router.join("rollback-xz"), rollback_archive::FORMAT).unwrap();
-        cleanup_releases(&root).unwrap();
+        crate::compact_install_rollback(&root).unwrap();
         assert!(!old.join("builds").exists());
         assert!(old.join("router/controller-applets").is_file());
         let packed = fs::read(&archive).unwrap();

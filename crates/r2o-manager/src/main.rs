@@ -1,8 +1,8 @@
 use r2o_manager::{
     activate_bundle, active_component_path, cancel_router_update, check_update,
-    config::initialize_config, decode_public_key, finish_router_update, install_archive,
-    mark_bad_previous_release, read_install_architecture, recover_router_update, rollback,
-    run_router_update, set_auto_update, verify_release_archive,
+    compact_install_rollback, config::initialize_config, decode_public_key, finish_router_update,
+    install_archive, mark_bad_previous_release, read_install_architecture, recover_router_update,
+    rollback, run_router_update, set_auto_update, verify_release_archive,
 };
 use r2o_manager::{run_update_schedule, watch_router_update};
 use serde_json::json;
@@ -50,6 +50,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("update-install-auto") => update_command(args, true, true, false),
         Some("update-rollback") => update_command(args, true, false, true),
         Some("update-recover") => recover_router_update(&root_only(args)?).map_err(Into::into),
+        Some("compact-rollback") => compact_install_rollback(&root_only(args)?).map_err(Into::into),
         Some("update-cancel") => cancel_router_update(&root_only(args)?).map_err(Into::into),
         Some("update-ping-panel") => ping_panel(args),
         Some("update-runtime-ok") => finish_command(args, true),
@@ -565,6 +566,7 @@ fn usage() {
     println!("  update-install --root DIR [--service PATH] [--release TAG] [--source SOURCE]");
     println!("  update-rollback --root DIR [--service PATH]");
     println!("  update-recover --root DIR");
+    println!("  compact-rollback --root DIR");
     println!("  update-cancel --root DIR");
     println!("  update-install-auto --root DIR [--architecture ARCH]");
     println!("  update-mark-bad-previous --root DIR");
