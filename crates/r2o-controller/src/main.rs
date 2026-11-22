@@ -3132,6 +3132,7 @@ impl R2oDnsServices {
         name: &str,
         transport: u8,
         mono_ms: i64,
+        wall_now: i64,
     ) {
         if self.services.is_empty() || name.is_empty() || !r2o_client_is_router_address(key) {
             return;
@@ -3169,9 +3170,8 @@ impl R2oDnsServices {
             live.verified_recovery = None;
             live.next_check_ms = mono_ms;
             live.reason.clear();
-            live.router_seen = false;
         }
-        live.router_seen = true;
+        live.router_seen_at = Some(wall_now.max(1));
     }
 
     /// C `task_free_slot`.
@@ -3290,6 +3290,7 @@ impl R2oDnsServices {
             if accepted {
                 if !task_ip.is_empty() && (bootstrap || live.ip.is_empty()) && live.ip != task_ip {
                     live.ip = task_ip;
+                    live.router_seen_at = None;
                     live.consecutive_network_failures = 0;
                     live.recovery_retry_at = None;
                     live.recovery_phase = None;
@@ -3368,10 +3369,9 @@ impl R2oDnsServices {
         for index in 0..self.services.len() {
             let service = self.services[index].clone();
             if service.verification_limitation().is_some()
-                || !self
-                    .live
-                    .get(index)
-                    .is_some_and(|live| live.router_seen || live.recovery_phase.is_some())
+                || !self.live.get(index).is_some_and(|live| {
+                    live.router_seen_at.is_some() || live.recovery_phase.is_some()
+                })
             {
                 if let Some(slot) = self.task_of_service(&service)
                     && self.tasks[slot].state != r2o_controller::live::DnsTaskState::DnsHealth
@@ -3530,7 +3530,7 @@ impl R2oDnsServices {
                 continue;
             }
             let live = self.live.get(index).cloned().unwrap_or_default();
-            if !live.router_seen && live.recovery_phase.is_none() {
+            if live.router_seen_at.is_none() && live.recovery_phase.is_none() {
                 if let Some(slot) = self.task_of_service(&service)
                     && self.tasks[slot].state != r2o_controller::live::DnsTaskState::DnsHealth
                 {
@@ -3655,7 +3655,13 @@ impl R2oDnsServices {
             return;
         }
         if self.live[index].ip != ip {
-            self.observe(key, name, transport, r2o_controller::now_ms::d2k_now_ms());
+            self.observe(
+                key,
+                name,
+                transport,
+                r2o_controller::now_ms::d2k_now_ms(),
+                wall_now,
+            );
         }
         let live = &mut self.live[index];
         live.applied_plan_id = plan_id.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -29764,6 +29770,7 @@ impl ControlClient {
                         name,
                         hello.key[37],
                         r2o_controller::now_ms::d2k_now_ms(),
+                        dns_wall_now,
                     );
                 }
                 if r2o_late_rx.is_some() {
@@ -36746,19 +36753,21 @@ mod tests {
 
         let current = key([127, 0, 0, 1], [198, 51, 100, 80], 40_000, 443, 6);
         let now_ms = r2o_controller::now_ms::d2k_now_ms();
-        state.observe(&current, "dns.example", 6, now_ms);
+        state.observe(&current, "dns.example", 6, now_ms, 2000);
         assert_eq!(state.live[0].ip, "198.51.100.80");
         // IP-литерал уже записан set_services; наблюдение того же IP не
         // создаёт новую generation (C сравнивает live->ip).
         assert_eq!(state.live[0].generation, 1);
         // Тот же IP не создаёт новую generation.
-        state.observe(&current, "dns.example", 6, now_ms);
+        state.observe(&current, "dns.example", 6, now_ms, 2001);
         assert_eq!(state.live[0].generation, 1);
+        assert_eq!(state.live[0].router_seen_at, Some(2001));
 
         // Поток не с адреса роутера игнорируется.
         let foreign = key([203, 0, 113, 5], [198, 51, 100, 80], 40_001, 443, 6);
-        state.observe(&foreign, "dns.example", 6, now_ms);
+        state.observe(&foreign, "dns.example", 6, now_ms, 2002);
         assert_eq!(state.live[0].ip, "198.51.100.80");
+        assert_eq!(state.live[0].router_seen_at, Some(2001));
 
         state.note_applied(
             &current,
@@ -36794,12 +36803,13 @@ mod tests {
 
         let changed = key([127, 0, 0, 1], [198, 51, 100, 81], 40_000, 8443, 6);
         // Наблюдение не может заменить IP, закреплённый в настройках.
-        state.observe(&changed, "dns.example", 6, now_ms);
+        state.observe(&changed, "dns.example", 6, now_ms, 2003);
         assert_eq!(state.live[0].ip, "198.51.100.80");
         assert_eq!(state.live[0].generation, 2);
+        assert_eq!(state.live[0].router_seen_at, None);
 
         state.set_services(vec![service("dns.example", 8443)]);
-        state.observe(&changed, "dns.example", 6, now_ms);
+        state.observe(&changed, "dns.example", 6, now_ms, 2004);
         assert_eq!(state.live[0].ip, "198.51.100.81");
         assert_eq!(state.live[0].generation, 4);
         assert!(!state.live[0].plan_applied);
@@ -36983,7 +36993,7 @@ mod tests {
 
         let now_ms = r2o_controller::now_ms::d2k_now_ms();
         let current = key([198, 51, 100, 80], 443);
-        state.observe(&current, "dns.example", 6, now_ms);
+        state.observe(&current, "dns.example", 6, now_ms, 2000);
         snapshot(&state, "observed");
         state.note_applied(
             &current,
@@ -36999,7 +37009,7 @@ mod tests {
         );
         snapshot(&state, "applied");
         let changed = key([198, 51, 100, 81], 443);
-        state.observe(&changed, "dns.example", 6, now_ms);
+        state.observe(&changed, "dns.example", 6, now_ms, 2001);
         snapshot(&state, "ip_changed");
 
         state.live[0].checked_at = Some(2005);
@@ -37876,7 +37886,7 @@ mod tests {
             live: vec![r2o_controller::live::DnsServiceLive {
                 generation: 1,
                 ip: "2001:db8::1".into(),
-                router_seen: true,
+                router_seen_at: Some(2000),
                 ..Default::default()
             }],
             tasks: dns_tasks(),
@@ -40471,7 +40481,7 @@ mod tests {
             live: vec![r2o_controller::live::DnsServiceLive {
                 generation: 9,
                 ip: "2001:db8::1".into(),
-                router_seen: true,
+                router_seen_at: Some(2000),
                 ..Default::default()
             }],
             tasks: dns_tasks(),
@@ -40593,7 +40603,7 @@ mod tests {
             live: vec![r2o_controller::live::DnsServiceLive {
                 generation: 1,
                 ip: "198.51.100.80".into(),
-                router_seen: true,
+                router_seen_at: Some(2000),
                 ..Default::default()
             }],
             tasks: dns_tasks(),
@@ -40735,7 +40745,7 @@ mod tests {
             live: vec![r2o_controller::live::DnsServiceLive {
                 generation: 1,
                 ip: "198.51.100.80".into(),
-                router_seen: true,
+                router_seen_at: Some(2000),
                 ..Default::default()
             }],
             tasks: dns_tasks(),
@@ -40887,6 +40897,8 @@ mod tests {
             services: vec![service.clone()],
             live: vec![r2o_controller::live::DnsServiceLive {
                 generation: 7,
+                ip: "2001:db8::8".into(),
+                router_seen_at: Some(2000),
                 plan_applied: true,
                 applied_plan_id: "ab".repeat(16),
                 plan_applied_at: Some(1000),
@@ -40906,6 +40918,7 @@ mod tests {
                     dns_protocol: "doh".into(),
                     dns_host: "dns.example".into(),
                     doh_path: "/dns-query".into(),
+                    dns_bootstrap: "192.0.2.53".into(),
                     dns_service_generation: 7,
                     ..Default::default()
                 };
@@ -40935,6 +40948,7 @@ mod tests {
         assert!(state.tasks[0].is_free());
         let live = &state.live[0];
         assert_eq!(live.ip, "198.51.100.80");
+        assert_eq!(live.router_seen_at, None);
         assert_eq!(live.state, DnsServiceState::DirectOk);
         assert!(live.dns_answer);
         assert!(live.tcp_reachable && live.tls_handshake);

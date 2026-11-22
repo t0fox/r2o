@@ -3428,9 +3428,14 @@
     var more = this.$("dns-protection-more");
     var extra = this.$("dns-protection-extra");
     if (!root || !summary || !more || !extra) return;
-    var rows = list(m && m.k.dns_services);
+    var configured = list(m && m.k.dns_services);
     var fresh = !this.failed && m && m.engine && m.linked && m.snap.live_fresh === true;
     var now = this.serverNow();
+    var rows = configured.filter(function (row) {
+      if (str(row.resolved_ip || row.host).indexOf(":") < 0) return true;
+      var seen = parseTime(row.router_seen_at);
+      return row.state !== "no_route" && seen !== null && seen <= now && now - seen <= 10 * 60 * 1000;
+    });
     var time = rows.map(function (row) {
       var checked = parseTime(row.checked_at);
       return { checked: checked, stale: !fresh || (checked && now - checked > 360000) };
@@ -3440,6 +3445,7 @@
     root.__r2oKey = key;
     var message = !fresh ? "Данные контроллера устарели или ещё недоступны."
       : rows.length ? "Точки подключения: " + rows.length
+        : configured.length ? "Нет активных точек подключения."
         : "В поддерживаемых настройках роутера зашифрованные DNS-серверы не найдены.";
     if (summary.textContent !== message) summary.textContent = message;
     var doc = this.doc;

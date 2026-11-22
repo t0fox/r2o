@@ -173,10 +173,8 @@ pub struct DnsServiceLive {
     pub next_check_ms: i64,
     pub plan_applied_at: Option<i64>,
     pub reason: String,
-    /// Внутренний признак: поток с адреса роутера уже наблюдался. C держит
-    /// это неявно — dns_protocol задачи выставляется только в
-    /// `dns_service_observe` под `client_is_router_address`.
-    pub router_seen: bool,
+    /// Стенные секунды последнего DNS-потока с адреса роутера.
+    pub router_seen_at: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -217,7 +215,7 @@ impl Default for DnsServiceLive {
             next_check_ms: 0,
             plan_applied_at: None,
             reason: String::new(),
-            router_seen: false,
+            router_seen_at: None,
         }
     }
 }
@@ -875,6 +873,9 @@ fn r2o_live_dns_services(
             });
             if let Some(profile_id) = &state.profile_id {
                 row["profile_id"] = json!(profile_id);
+            }
+            if family == 6 && state.router_seen_at.is_some() {
+                row["router_seen_at"] = r2o_live_optional_time(state.router_seen_at);
             }
             if let Some(elapsed) = state.check_elapsed_ms {
                 row["check_elapsed_ms"] = json!(elapsed);
@@ -2120,6 +2121,13 @@ mod tests {
         assert_eq!(section[1]["known_plan_id"], "");
         assert_eq!(section[2]["resolved_ip"], "2001:db8::1");
         assert_eq!(section[2]["port"], 853);
+        assert!(section[2].get("router_seen_at").is_none());
+        let live_v6 = DnsServiceLive {
+            router_seen_at: Some(2000),
+            ..DnsServiceLive::default()
+        };
+        let observed = super::r2o_live_dns_services(&catalog, &services[2..], &[live_v6], &[]);
+        assert_eq!(observed[0]["router_seen_at"], "1970-01-01T00:33:20Z");
         // Плоский пустой набор — пустой массив, а не пропущенное поле.
         let empty = snapshot_with_areas_and_dns(
             &Catalog::default(),

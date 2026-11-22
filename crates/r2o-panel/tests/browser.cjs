@@ -164,7 +164,7 @@ async function main() {
     groups: [],
     dns_services: [
       { protocol: "dot", host: "dns.example", port: 853, resolved_ip: "192.0.2.8", state: "direct_ok", checked_at: new Date().toISOString(), answer_rtt_ms: 17, status_reason: "DoT: получен корректный DNS-ответ" },
-      { protocol: "doq", host: "quic-with-a-long-resolver-name.example", port: 853, resolved_ip: "2001:db8::9", state: "plan_applied", plan_applied: true, applied_plan_id: "8d3c8fc1b32c52c2013cb04f82891245", dns_answer_via_plan: false, status_reason: "DNS-ответ через план ещё проверяется" },
+      { protocol: "doq", host: "quic-with-a-long-resolver-name.example", port: 853, resolved_ip: "2001:db8::9", router_seen_at: new Date(Date.now() - 1000).toISOString(), state: "plan_applied", plan_applied: true, applied_plan_id: "8d3c8fc1b32c52c2013cb04f82891245", dns_answer_via_plan: false, status_reason: "DNS-ответ через план ещё проверяется" },
       { protocol: "doh", host: "old.example", port: 443, path: "/dns-query", state: "direct_ok", checked_at: new Date(Date.now() - 720000).toISOString() },
       { protocol: "doh", host: "refused.example", port: 443, path: "/dns-query", state: "failed", failure: "server", checked_at: new Date().toISOString(), status_reason: "HTTP 403: сервер отклонил запрос" },
     ],
@@ -485,19 +485,36 @@ esac
   await evaluate("document.querySelector('#dns-protection-more summary').click()");
   assert.equal(await evaluate("document.querySelector('#dns-protection-more').open && document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Ошибка'"), true);
   const refusedResolver = liveState.dns_services[3];
+  const ipv6Resolver = {
+    ...liveState.dns_services[0], resolved_ip: "2001:db8::53",
+    dns_answer_confirmed: true, router_seen_at: new Date(Date.now() - 1000).toISOString(),
+  };
   liveState.dns_services[3] = {
     ...liveState.dns_services[0], resolved_ip: "2001:db8::53", state: "no_route",
-    failure: "no_route", answer_rtt_ms: null, status_reason: "У роутера нет маршрута к этому адресу.",
+    router_seen_at: ipv6Resolver.router_seen_at, failure: "no_route", answer_rtt_ms: null,
+    status_reason: "У роутера нет маршрута к этому адресу.",
   };
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Нет маршрута'"), "IPv6 без маршрута отображается отдельным статусом");
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-more').hidden"), "IPv6 без маршрута не показывается");
+  liveState.dns_services[3] = { ...ipv6Resolver, router_seen_at: undefined };
+  liveState.dns_services[0].answer_rtt_ms = 18;
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-list').textContent.includes('18 мс')"), "панель обновилась после фоновой пробы");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-more').hidden"), true, "успешная фоновая проба сама не показывает IPv6");
+  liveState.dns_services[3] = ipv6Resolver;
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("!document.querySelector('#dns-protection-more').hidden"), "наблюдаемое соединение показывает IPv6");
   assert.equal(await evaluate("document.querySelector('#dns-protection-more summary').textContent"), "Ещё 1 точка подключения");
   assert.deepEqual(await evaluate(`["#dns-protection-list", "#dns-protection-extra"].map(selector =>
     [...document.querySelector(selector).querySelector("li").querySelectorAll(".dns-service-protocol, .meta-chip")].map(e => e.textContent))`),
-  [["DoT · IPv4", "Доступен напрямую"], ["DoT · IPv6", "Нет маршрута"]]);
-  liveState.dns_services[3] = refusedResolver;
+  [["DoT · IPv4", "Доступен напрямую"], ["DoT · IPv6", "Доступен напрямую"]]);
+  liveState.dns_services[3] = { ...ipv6Resolver, router_seen_at: new Date(Date.now() - 11 * 60 * 1000).toISOString() };
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Ошибка'"), "отказ DNS-сервера остаётся ошибкой");
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-more').hidden"), "давно не используемый IPv6 скрывается");
+  liveState.dns_services[3] = refusedResolver;
+  liveState.dns_services[0].answer_rtt_ms = 17;
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip')?.textContent === 'Ошибка'"), "отказ DNS-сервера остаётся ошибкой");
   await evaluate("document.querySelector('#dns-protection-more summary').click()");
   await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   assert.equal(await evaluate(`(() => {
