@@ -106,6 +106,9 @@ set -eu
 command_name=$1
 shift
 case "$command_name" in
+    update-install)
+        printf 'update-install %s\n' "$*" >> "$R2O_TEST_MANAGER_LOG"
+        ;;
     install-local)
         root= bundle= release= architecture=
         while [ "$#" -gt 0 ]; do
@@ -169,6 +172,7 @@ printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/001-r2o.sh"
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/r2o-ppe-deoffload.sh"
 printf '#!/bin/sh\n[ -z "${R2O_TEST_SERVICE_LOG:-}" ] || printf "%%s\\n" "$*" >> "$R2O_TEST_SERVICE_LOG"\n' > "$FIXTURE/router/openwrt-init"
 printf 'MODE=apply\nTG_ENABLED=1\n' > "$FIXTURE/router/config.default"
+printf 'R2O-STATE-1\n' > "$FIXTURE/router/update-schema"
 chmod 0755 "$FIXTURE/router/"*.sh "$FIXTURE/router/S99r2o" "$FIXTURE/router/S99r2o.shim" "$FIXTURE/router/openwrt-init"
 
 tar -czf "$FIXTURE/r2o-mipsel-openwrt-musl.tar.gz" -C "$FIXTURE" builds router
@@ -332,18 +336,19 @@ grep -q 'чужой файл' "$CASE/out" || fail 'foreign OpenWrt service confl
 grep -qx 'echo another service' "$CASE/etc/init.d/r2o" || fail 'foreign OpenWrt service was modified'
 [ ! -s "$CASE/manager.log" ] || fail 'foreign OpenWrt service conflict was checked after manager activation'
 
-new_case rollback
+new_case legacy-refused
 mkdir -p "$CASE/opt/r2o/releases/r2o-old/router" "$CASE/opt/etc/init.d"
-cp -R "$FIXTURE/router/." "$CASE/opt/r2o/releases/r2o-old/router/"
+cp "$FIXTURE/router/config.default" "$CASE/opt/r2o/releases/r2o-old/router/"
 printf '%s\n' mipsel-openwrt-musl > "$CASE/opt/r2o/releases/r2o-old/release-architecture"
 cp "$FIXTURE/builds/r2o-manager-linux-mipsel-openwrt-musl" "$CASE/opt/r2o/r2o-manager"
 printf 'R2O-RELEASE-SLOTS-1\nr2o-old\n' > "$CASE/opt/r2o/release-slots"
 printf 'owner=kept\n' > "$CASE/opt/r2o/config"
 cp "$FIXTURE/router/S99r2o.shim" "$CASE/opt/etc/init.d/S99r2o"
-TEST_FREE_KB=200000 R2O_TEST_START_FAIL=1 run_install > "$CASE/out" 2>&1 && fail 'failed service start was accepted'
-[ "$(sed -n '2p' "$CASE/opt/r2o/release-slots")" = r2o-old ] || fail 'failed activation did not restore the previous release'
-grep -q '^rollback r2o-bootstrap-test -> r2o-old$' "$CASE/manager.log" || fail 'manager rollback was not used'
-grep -qx 'owner=kept' "$CASE/opt/r2o/config" || fail 'rollback damaged the existing configuration'
+run_install > "$CASE/out" 2>&1 && fail 'legacy install was accepted'
+grep -q 'legacy-установка' "$CASE/out" || fail 'legacy rejection was not explained'
+[ ! -s "$CASE/manager.log" ] && [ ! -s "$CASE/fetch.log" ] || fail 'legacy update was attempted'
+[ "$(sed -n '2p' "$CASE/opt/r2o/release-slots")" = r2o-old ] || fail 'legacy slot was modified'
+grep -qx 'owner=kept' "$CASE/opt/r2o/config" || fail 'legacy configuration was modified'
 
 new_case failed-first-install
 if R2O_TEST_FAIL_DURING_INSTALL=1 run_install > "$CASE/out" 2>&1; then
@@ -356,13 +361,6 @@ grep -q 'kmod-nft-queue' "$CASE/packages.log" || fail 'failed install removed or
 grep -q 'kmod-nfnetlink-queue' "$CASE/packages.log" || fail 'failed install removed or skipped its NFQUEUE core package'
 
 new_case interrupted-install
-mkdir -p "$CASE/opt/r2o/releases/r2o-old/router" "$CASE/opt/etc/init.d"
-cp -R "$FIXTURE/router/." "$CASE/opt/r2o/releases/r2o-old/router/"
-printf '%s\n' mipsel-openwrt-musl > "$CASE/opt/r2o/releases/r2o-old/release-architecture"
-cp "$FIXTURE/builds/r2o-manager-linux-mipsel-openwrt-musl" "$CASE/opt/r2o/r2o-manager"
-printf 'R2O-RELEASE-SLOTS-1\nr2o-old\n' > "$CASE/opt/r2o/release-slots"
-printf 'owner=kept\n' > "$CASE/opt/r2o/config"
-cp "$FIXTURE/router/S99r2o.shim" "$CASE/opt/etc/init.d/S99r2o"
 R2O_OPENWRT_RELEASE="$CASE/openwrt_release" \
 R2O_MEMINFO_FILE="$CASE/meminfo" \
 R2O_DIR="$CASE/opt/r2o" \
@@ -397,9 +395,8 @@ manager_pid=$(cat "$CASE/manager.pid")
 kill -TERM "$manager_pid" 2>/dev/null || true
 : > "$CASE/manager.release"
 if wait "$installer_pid"; then fail 'terminated install unexpectedly succeeded'; fi
-[ "$(sed -n '2p' "$CASE/opt/r2o/release-slots")" = r2o-old ] || fail 'interrupted activation did not roll back'
-grep -q '^rollback r2o-bootstrap-test -> r2o-old$' "$CASE/manager.log" || fail 'interruption did not invoke manager rollback'
-grep -qx 'owner=kept' "$CASE/opt/r2o/config" || fail 'interrupted rollback damaged existing configuration'
+[ ! -e "$CASE/opt/r2o/release-slots" ] || fail 'interrupted bootstrap left an active slot'
+[ ! -e "$CASE/opt/etc/init.d/S99r2o" ] || fail 'interrupted bootstrap left an init shim'
 
 new_case local-signed-install
 # Локальный подписанный манифест/архив: установка не должна обращаться к сети.
@@ -433,13 +430,14 @@ printf '%s\n' '{"schema":1,"boxes":[{"id":"kept"}]}' > "$CASE/opt/r2o/state/cata
 install_count=$(grep -c '^install-local ' "$CASE/manager.log")
 printf '#!/bin/sh\nexit 31\n' > "$CASE/opt/r2o/releases/r2o-bootstrap-test/router/install.sh"
 chmod 0755 "$CASE/opt/r2o/releases/r2o-bootstrap-test/router/install.sh"
+fetch_count=$(wc -l < "$CASE/fetch.log")
 run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'repeat install did not complete'; }
+[ "$(wc -l < "$CASE/fetch.log")" -eq "$fetch_count" ] || fail 'bootstrap downloaded before calling the Rust updater'
+grep -q '^update-install --root .* --service ' "$CASE/manager.log" || fail 'Rust updater was not invoked'
 [ "$(grep -c '^install-local ' "$CASE/manager.log")" -eq "$install_count" ] || fail 'repeat install reactivated an already current release'
 printf '%s\n' '{"schema":1,"boxes":[{"id":"kept"}]}' > "$CASE/expected-catalog.json"
 cmp -s "$CASE/opt/r2o/state/catalog.json" "$CASE/expected-catalog.json" ||
     fail 'repeat install changed the state catalog'
-tail -n 2 "$CASE/services.log" | grep -qx enable || fail 'repeat install did not enable the current OpenWrt service'
-tail -n 1 "$CASE/services.log" | grep -qx start || fail 'repeat install did not start the current OpenWrt service'
 R2O_OPENWRT_RELEASE="$CASE/openwrt_release" \
 R2O_DIR="$CASE/opt/r2o" \
 R2O_INIT_DIR="$CASE/opt/etc/init.d" \

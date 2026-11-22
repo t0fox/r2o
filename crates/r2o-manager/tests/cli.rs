@@ -646,3 +646,214 @@ fn update_auto_cli_changes_only_the_auto_setting() {
     assert_eq!(state["auto"], true);
     assert_eq!(state["current"], "r2o-1");
 }
+
+#[cfg(unix)]
+#[test]
+fn router_update_recovers_after_kill_and_preserves_operator_data() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let temp = TestDir::new();
+    let root = temp.0.join("install");
+    fs::create_dir_all(root.join("state")).unwrap();
+    fs::write(root.join("config"), "MODE=observe\n").unwrap();
+    fs::write(
+        root.join("state/catalog.json"),
+        r#"{"schema":1,"boxes":[],"note":"данные пользователя"}"#,
+    )
+    .unwrap();
+    for (id, name) in [("r2o-base", "base"), ("r2o-next", "next")] {
+        let bundle = make_bundle(&temp.0, name);
+        fs::create_dir(bundle.join("router")).unwrap();
+        fs::write(bundle.join("router/update-schema"), "R2O-STATE-1\n").unwrap();
+        json_output(invoke(&[
+            "install-local",
+            "--root",
+            root.to_str().unwrap(),
+            "--bundle",
+            bundle.to_str().unwrap(),
+            "--release-id",
+            id,
+            "--architecture",
+            "mipsel",
+        ]));
+    }
+
+    let service = temp.0.join("service");
+    fs::write(
+        &service,
+        format!(
+            r#"#!/bin/sh
+printf '%s %s\n' "$1" "$(sed -n '2p' '{root}/release-slots')" >> '{dir}/events'
+case "$1" in
+    update-start)
+        if [ -e '{dir}/hold' ]; then
+            : > '{dir}/started'
+            exec sleep 90
+        fi
+        if [ -e '{dir}/fail-base' ] && [ "$(sed -n '2p' '{root}/release-slots')" = r2o-base ]; then
+            exit 1
+        fi
+        ;;
+    update-stop|update-health) ;;
+    *) exit 2 ;;
+esac
+"#,
+            dir = temp.0.display(),
+            root = root.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&service, fs::Permissions::from_mode(0o700)).unwrap();
+    let args = [
+        "update-rollback",
+        "--root",
+        root.to_str().unwrap(),
+        "--service",
+        service.to_str().unwrap(),
+    ];
+
+    fs::write(temp.0.join("hold"), []).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-manager"))
+        .args(args)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !temp.0.join("started").exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "обновлятор завершился до запуска службы"
+        );
+        assert!(Instant::now() < deadline, "служба не начала запуск");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        r2o_manager::read_install_slots(&root)
+            .unwrap()
+            .unwrap()
+            .current,
+        "r2o-base"
+    );
+    assert!(!invoke(&args).status.success());
+    assert!(
+        !invoke(&["update-cancel", "--root", root.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(temp.0.join("events")).unwrap(),
+        "update-stop r2o-next\nupdate-start r2o-base\n"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    fs::remove_file(temp.0.join("hold")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while root.join("state/update-pending.json").exists()
+        || !fs::read_to_string(temp.0.join("events"))
+            .unwrap()
+            .contains("update-start r2o-next")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "независимая служба восстановления не завершилась"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if invoke(&["update-recover", "--root", root.to_str().unwrap()])
+            .status
+            .success()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "не снята блокировка восстановления"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        r2o_manager::read_install_slots(&root)
+            .unwrap()
+            .unwrap()
+            .current,
+        "r2o-next"
+    );
+    assert!(!root.join("state/update-pending.json").exists());
+
+    fs::write(temp.0.join("fail-base"), []).unwrap();
+    assert!(!invoke(&args).status.success());
+    assert_eq!(
+        r2o_manager::read_install_slots(&root)
+            .unwrap()
+            .unwrap()
+            .current,
+        "r2o-next"
+    );
+    fs::remove_file(temp.0.join("fail-base")).unwrap();
+
+    json_output(invoke(&args));
+    assert_eq!(
+        r2o_manager::read_install_slots(&root)
+            .unwrap()
+            .unwrap()
+            .current,
+        "r2o-base"
+    );
+    json_output(invoke(&args));
+    assert_eq!(
+        r2o_manager::read_install_slots(&root)
+            .unwrap()
+            .unwrap()
+            .current,
+        "r2o-next"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("config")).unwrap(),
+        "MODE=observe\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("state/catalog.json")).unwrap(),
+        r#"{"schema":1,"boxes":[],"note":"данные пользователя"}"#
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn router_update_refuses_incompatible_state_before_service_changes() {
+    let temp = TestDir::new();
+    let root = temp.0.join("root");
+    let bundle = make_bundle(&temp.0, "base");
+    fs::create_dir_all(bundle.join("router")).unwrap();
+    fs::write(bundle.join("router/update-schema"), "R2O-STATE-1\n").unwrap();
+    json_output(invoke(&[
+        "install-local",
+        "--root",
+        root.to_str().unwrap(),
+        "--bundle",
+        bundle.to_str().unwrap(),
+        "--release-id",
+        "r2o-base",
+        "--architecture",
+        "mipsel",
+    ]));
+    fs::create_dir_all(root.join("state")).unwrap();
+    let catalog = root.join("state/catalog.json");
+    fs::write(&catalog, r#"{"schema":2,"boxes":[]}"#).unwrap();
+    let result = invoke(&[
+        "update-install",
+        "--root",
+        root.to_str().unwrap(),
+        "--service",
+        "/no-adapter",
+    ]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("версия обученного каталога"));
+    assert_eq!(
+        fs::read_to_string(catalog).unwrap(),
+        r#"{"schema":2,"boxes":[]}"#
+    );
+    assert!(!root.join("state/update-pending.json").exists());
+}

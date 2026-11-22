@@ -32,7 +32,6 @@ ARCH=
 CURRENT_RELEASE=
 PREVIOUS_RELEASE=
 TARGET_RELEASE=
-OLD_RELEASE=
 INSTALL_STARTED=0
 ROOT_PREEXISTED=0
 TMP=
@@ -422,29 +421,18 @@ rollback_failed_install() {
         cleanup_incomplete_first_install
         return 0
     fi
-    if [ -n "$OLD_RELEASE" ]; then
-        if "$ROOT/r2o-manager" rollback --root "$ROOT" >/dev/null 2>&1; then
-            old_bundle=$ROOT/releases/$OLD_RELEASE
-            if [ -d "$old_bundle" ] && [ ! -L "$old_bundle" ]; then
-                run_router_install "$old_bundle" "$OLD_RELEASE" ||
-                    say "откат к $OLD_RELEASE выполнен, но восстановить службу автоматически не удалось"
-            fi
-        else
-            say "не удалось выполнить автоматический откат к $OLD_RELEASE; сохраните данные и проверьте $ROOT/release-slots"
-        fi
-    else
-        new_uninstall=$ROOT/releases/$TARGET_RELEASE/router/uninstall.sh
-        if [ -f "$new_uninstall" ] && [ ! -L "$new_uninstall" ]; then
-            R2O_DIR=$ROOT R2O_INIT_DIR=$INIT_DIR R2O_OPENWRT_INIT_DIR=$OPENWRT_INIT_DIR \
-                R2O_OPENWRT_RELEASE=$OPENWRT_RELEASE R2O_RUNTIME_DIR=$RUNTIME_DIR R2O_NDM_DIR=$NDM_DIR \
-                R2O_PLATFORM=$PLATFORM sh "$new_uninstall" --yes >/dev/null 2>&1 ||
-                say 'не удалось автоматически очистить неудачную первую установку'
-        fi
+    [ "$ROOT_PREEXISTED" -eq 0 ] || return 0
+    new_uninstall=$ROOT/releases/$TARGET_RELEASE/router/uninstall.sh
+    if [ -f "$new_uninstall" ] && [ ! -L "$new_uninstall" ]; then
+        R2O_DIR=$ROOT R2O_INIT_DIR=$INIT_DIR R2O_OPENWRT_INIT_DIR=$OPENWRT_INIT_DIR \
+            R2O_OPENWRT_RELEASE=$OPENWRT_RELEASE R2O_RUNTIME_DIR=$RUNTIME_DIR R2O_NDM_DIR=$NDM_DIR \
+            R2O_PLATFORM=$PLATFORM sh "$new_uninstall" --yes >/dev/null 2>&1 ||
+            say 'не удалось автоматически очистить неудачную первую установку'
     fi
 }
 
 cleanup_incomplete_first_install() {
-    [ -z "$OLD_RELEASE" ] && [ "$ROOT_PREEXISTED" -eq 0 ] || return 0
+    [ "$ROOT_PREEXISTED" -eq 0 ] || return 0
     [ -d "$ROOT" ] && [ ! -L "$ROOT" ] || return 0
     [ ! -e "$ROOT/release-slots" ] && [ ! -L "$ROOT/release-slots" ] || return 0
 
@@ -498,9 +486,18 @@ find "$STORAGE_PATH" -maxdepth 1 -type d -name '.r2o-install.*' -mmin +60 \
     -exec rm -rf {} + 2>/dev/null || true
 detect_platform_and_arch
 release_from_slots
+if [ -n "$CURRENT_RELEASE" ]; then
+    [ -z "$LOCAL_MANIFEST" ] || die 'локальный пакет предназначен для чистой установки'
+    [ "$(cat "$ROOT/releases/$CURRENT_RELEASE/router/update-schema" 2>/dev/null)" = R2O-STATE-1 ] ||
+        die 'обнаружена legacy-установка; для новой схемы нужна чистая установка базового выпуска'
+    [ -x "$ROOT/r2o-manager" ] && [ ! -L "$ROOT/r2o-manager" ] ||
+        die 'менеджер установленного выпуска недоступен'
+    cleanup
+    trap - EXIT HUP INT TERM
+    R2O_DIR=$ROOT exec "$ROOT/r2o-manager" update-install --root "$ROOT" --service "$INIT_DIR/S99r2o"
+fi
 if [ -e "$ROOT" ] || [ -L "$ROOT" ]; then ROOT_PREEXISTED=1; fi
 check_runtime_dependencies
-OLD_RELEASE=$CURRENT_RELEASE
 
 # The package staging area can need a second copy while the existing manager
 # commits it. Check that lower bound before installing any missing dependency.
@@ -549,30 +546,7 @@ expected_sha=$(awk -v architecture="$ARCH" '
 case "$expected_sha" in ''|*[!0-9a-f]*) die "в манифесте нет SHA-256 для ABI $ARCH" ;; esac
 [ "${#expected_sha}" -eq 64 ] || die "неверная длина SHA-256 для ABI $ARCH"
 ASSET=r2o-$ARCH.tar.gz
-
-if [ "$CURRENT_RELEASE" = "$TARGET_RELEASE" ]; then
-    active_bundle=$ROOT/releases/$CURRENT_RELEASE
-    [ -d "$active_bundle" ] && [ ! -L "$active_bundle" ] || die "активный выпуск $CURRENT_RELEASE отсутствует"
-    [ -f "$active_bundle/release-architecture" ] && [ ! -L "$active_bundle/release-architecture" ] ||
-        die "нет безопасного описания ABI у активного выпуска $CURRENT_RELEASE"
-    [ -f "$active_bundle/router/install.sh" ] && [ ! -L "$active_bundle/router/install.sh" ] ||
-        die "нет безопасного установщика у активного выпуска $CURRENT_RELEASE"
-    active_arch=$(cat "$active_bundle/release-architecture")
-    [ "$active_arch" = "$ARCH" ] || die "установлен ABI $active_arch, а устройство определено как $ARCH"
-    say "уже установлен актуальный выпуск $TARGET_RELEASE; проверяю службы и интеграцию через router/install.sh"
-    active_openwrt_service=$OPENWRT_INIT_DIR/r2o
-    active_openwrt_service_source=$active_bundle/router/openwrt-init
-    if [ "$PLATFORM" = openwrt ] \
-        && [ -f "$active_openwrt_service" ] && [ ! -L "$active_openwrt_service" ] \
-        && [ -f "$active_openwrt_service_source" ] && [ ! -L "$active_openwrt_service_source" ] \
-        && cmp -s "$active_openwrt_service" "$active_openwrt_service_source"; then
-        "$active_openwrt_service" enable || die 'не удалось включить службу текущего выпуска'
-        "$active_openwrt_service" start || die 'не удалось запустить службу текущего выпуска'
-    else
-        run_router_install "$active_bundle" "$TARGET_RELEASE" || die 'не удалось восстановить текущую установку'
-    fi
-    exit 0
-fi
+LATEST=https://github.com/$REPO/releases/download/$TARGET_RELEASE
 
 archive_bytes=
 if [ -n "$LOCAL_ARCHIVE" ]; then
@@ -681,13 +655,14 @@ tar -xzf "$ARCHIVE" -C "$BUNDLE" || die 'не удалось распакова�
 for required_file in \
     "$BUNDLE/builds/r2o-manager-linux-$ARCH" "$BUNDLE/router/install.sh" \
     "$BUNDLE/router/uninstall.sh" "$BUNDLE/router/config.default" \
-    "$BUNDLE/router/S99r2o.shim" "$BUNDLE/router/001-r2o.sh" \
+    "$BUNDLE/router/S99r2o.shim" "$BUNDLE/router/001-r2o.sh" "$BUNDLE/router/update-schema" \
     "$BUNDLE/router/r2o-ppe-deoffload.sh" "$BUNDLE/router/select-panel-ip.sh"; do
     [ -f "$required_file" ] && [ ! -L "$required_file" ] || die "в подписанном выпуске отсутствует обычный файл $required_file"
 done
+[ "$(cat "$BUNDLE/router/update-schema")" = R2O-STATE-1 ] ||
+    die "нужен базовый выпуск универсального обновлятора"
 [ -x "$BUNDLE/builds/r2o-manager-linux-$ARCH" ] || die "менеджер выпуска $ARCH не исполняемый"
 
-OLD_RELEASE=$CURRENT_RELEASE
 INSTALL_STARTED=1
 say "устанавливаю подписанный выпуск $TARGET_RELEASE"
 run_router_install "$BUNDLE" "$TARGET_RELEASE" || die 'установщик выпуска завершился ошибкой'

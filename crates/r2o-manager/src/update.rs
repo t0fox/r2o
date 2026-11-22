@@ -1,8 +1,14 @@
+mod catalog;
+mod lifecycle;
+mod mirrors;
+mod scheduler;
+pub use lifecycle::{recover_router_update, run_router_update, watch_router_update};
+pub use scheduler::run_update_schedule;
+
 use crate::install::activate_previous_release;
 use crate::{
     InstallSlots, PreparedRelease, VerifyError, activate_prepared, decode_public_key,
-    install_archive, prepare_archive, read_install_architecture, read_install_slots,
-    verify_manifest,
+    read_install_architecture, read_install_slots, verify_manifest,
 };
 use r2k_core::dns::{DNS_RESOLVERS, build_a_query, parse_a_reply};
 use rustls::pki_types::ServerName;
@@ -21,12 +27,9 @@ use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PUBLIC_KEY: &[u8] = include_bytes!("../release-public.pem");
-const LATEST_URL: &str = "https://github.com/t0fox/r2o/releases/latest/download/latest.json";
 const DOWNLOAD_URL: &str = "https://github.com/t0fox/r2o/releases/download";
 const SIGNATURE_MAX_BYTES: u64 = 64;
-const ARCHIVE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const MANIFEST_MAX_BYTES: u64 = 64 * 1024;
-const DOWNLOAD_TIMEOUT_SECONDS: &str = "600";
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 static NEXT_DNS_ID: AtomicU16 = AtomicU16::new(1);
 
@@ -103,9 +106,10 @@ impl From<crate::InstallError> for UpdateError {
 /// Загрузить и проверить подписанные метаданные последнего выпуска проекта.
 pub fn check_update(root: &Path, architecture: &str) -> Result<Value, UpdateError> {
     validate_architecture(architecture)?;
+    let _router = UpdateLock::named(root, "update-router.lock", true)?;
     let _lock = UpdateLock::acquire(root)?;
     fs::create_dir_all(root)?;
-    let mut state = read_state(root);
+    let mut state = read_state(root)?;
     state["auto"] = json!(auto_update_enabled(&state));
     state["busy"] = json!("checking");
     write_state(root, &state)?;
@@ -125,11 +129,8 @@ pub fn check_update(root: &Path, architecture: &str) -> Result<Value, UpdateErro
                 .unwrap_or("");
             let available = manifest.release_id != current;
             let auto_retry_blocked = bad_release_matches(&state, &manifest.release_id);
-            let latest = json!({
-                "release_id": manifest.release_id,
-                "version": manifest.version,
-                "notes": manifest.notes,
-            });
+            let latest = catalog::describe(&manifest, architecture);
+            state["previous"] = json!(slots.as_ref().and_then(|slots| slots.previous.as_deref()));
             let now = now_epoch();
             state["busy"] = json!("");
             state["current"] = json!(current);
@@ -155,78 +156,7 @@ pub fn check_update(root: &Path, architecture: &str) -> Result<Value, UpdateErro
             state["busy"] = json!("");
             state["checked_utc"] = json!(now_epoch());
             state["check_ok"] = json!(false);
-            state["check_error"] = json!(error.to_string());
-            if let Some(object) = state.as_object_mut() {
-                object.remove("never");
-            }
-            write_state(root, &state)?;
-            Err(error)
-        }
-    }
-}
-
-/// Скачать проверенный выпуск и активировать его транзакционно.
-pub fn install_update(root: &Path, architecture: &str) -> Result<Value, UpdateError> {
-    install_update_with_policy(root, architecture, false)
-}
-
-/// Ночная установка не должна повторно активировать релиз, не прошедший health-check.
-pub fn install_update_auto(root: &Path, architecture: &str) -> Result<Value, UpdateError> {
-    install_update_with_policy(root, architecture, true)
-}
-
-fn install_update_with_policy(
-    root: &Path,
-    architecture: &str,
-    automatic: bool,
-) -> Result<Value, UpdateError> {
-    validate_architecture(architecture)?;
-    let _lock = UpdateLock::acquire(root)?;
-    fs::create_dir_all(root)?;
-    let mut state = read_state(root);
-    state["auto"] = json!(auto_update_enabled(&state));
-    state["busy"] = json!("installing");
-    write_state(root, &state)?;
-
-    let result = (|| {
-        let work = create_work_dir(root)?;
-        let result = install_update_in(&work, root, architecture, automatic);
-        let _ = fs::remove_dir_all(work);
-        result
-    })();
-
-    match result {
-        Ok((manifest, slots, changed)) => {
-            let now = now_epoch();
-            state["busy"] = json!("");
-            state["current"] = json!(slots.current);
-            state["arch"] = json!(architecture);
-            state["checked_utc"] = json!(now);
-            state["check_ok"] = json!(true);
-            state["check_error"] = json!("");
-            state["latest"] = json!({"release_id":manifest.release_id,"version":manifest.version,"notes":manifest.notes});
-            state["last_utc"] = json!(now);
-            state["last_ok"] = json!(true);
-            state["last_release"] = json!(manifest.release_id);
-            state["last_message"] = json!(if changed {
-                "Релиз активирован; для проверки и перезапуска вызовите адаптер роутера"
-            } else {
-                "Уже установлен последний релиз"
-            });
-            state["bad_release"] = json!("");
-            if let Some(object) = state.as_object_mut() {
-                object.remove("never");
-            }
-            write_state(root, &state)?;
-            Ok(
-                json!({"activated":changed,"already_current":!changed,"current":slots.current,"previous":slots.previous,"architecture":architecture}),
-            )
-        }
-        Err(error) => {
-            state["busy"] = json!("");
-            state["last_utc"] = json!(now_epoch());
-            state["last_ok"] = json!(false);
-            state["last_message"] = json!(error.to_string());
+            state["check_error"] = json!(short_error(&error.to_string()));
             if let Some(object) = state.as_object_mut() {
                 object.remove("never");
             }
@@ -246,34 +176,26 @@ fn read_staged(root: &Path) -> Option<Value> {
 }
 
 fn write_staged(root: &Path, value: &Value) -> Result<(), UpdateError> {
-    let path = staged_file(root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let text =
-        serde_json::to_vec(value).map_err(|error| UpdateError::Io(io::Error::other(error)))?;
-    let temporary = path.with_extension("json.new");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temporary)?;
-    file.write_all(&text)?;
-    file.sync_all()?;
-    fs::rename(&temporary, &path)?;
-    Ok(())
+    write_json(root, "update-stage.json", value)
 }
 
 /// Удалить маркер подготовки и приватный распакованный каталог, если он был.
 fn clear_staged(root: &Path) {
     if let Some(staged) = read_staged(root) {
-        if staged.get("kind").and_then(Value::as_str) == Some("archive")
-            && let Some(work) = staged.get("work").and_then(Value::as_str)
-        {
-            let _ = fs::remove_dir_all(root.join(work));
+        if let Some(work) = staged_work(root, &staged) {
+            let _ = fs::remove_dir_all(work);
         }
     }
     let _ = fs::remove_file(staged_file(root));
+}
+
+fn staged_work(root: &Path, staged: &Value) -> Option<PathBuf> {
+    let name = staged["work"].as_str()?;
+    let (pid, sequence) = name.strip_prefix(".install-")?.split_once('-')?;
+    pid.parse::<u32>().ok()?;
+    sequence.parse::<usize>().ok()?;
+    let path = root.join(name);
+    fs::symlink_metadata(&path).ok()?.is_dir().then_some(path)
 }
 
 enum StagedOutcome {
@@ -281,40 +203,42 @@ enum StagedOutcome {
     Staged(crate::ReleaseManifest),
 }
 
-/// Скачать и проверить выпуск, распаковав его в приватный каталог, но не
-/// переключать слоты. Адаптер останавливает runtime только после успешной
-/// подготовки, как D2O `install.sh`, и затем вызывает `update-activate`.
-pub fn stage_update(root: &Path, architecture: &str) -> Result<Value, UpdateError> {
-    stage_update_with_policy(root, architecture, false)
-}
-
-/// Ночная подготовка сохраняет запрет повторной активации bad_release.
-pub fn stage_update_auto(root: &Path, architecture: &str) -> Result<Value, UpdateError> {
-    stage_update_with_policy(root, architecture, true)
-}
-
 fn stage_update_with_policy(
     root: &Path,
     architecture: &str,
     automatic: bool,
+    release: Option<&str>,
+    source: Option<&str>,
 ) -> Result<Value, UpdateError> {
     validate_architecture(architecture)?;
     let _lock = UpdateLock::acquire(root)?;
     fs::create_dir_all(root)?;
     clear_staged(root);
-    let mut state = read_state(root);
+    let mut state = read_state(root)?;
     state["auto"] = json!(auto_update_enabled(&state));
     state["busy"] = json!("staging");
+    state["phase"] = json!("check");
+    state["last_release"] = json!("");
+    state["transfer"] = Value::Null;
     state["install_stage"] = json!(0);
     write_state(root, &state)?;
 
     let result = (|| {
         let work = create_work_dir(root)?;
-        let result = stage_update_in(&work, root, architecture, automatic, &mut state);
+        let result = stage_update_in(
+            &work,
+            root,
+            architecture,
+            automatic,
+            &mut state,
+            release,
+            source,
+        );
         let _ = fs::remove_dir_all(work);
         result
     })();
 
+    let _ = fs::remove_file(root.join("state/update-transfer.json"));
     match result {
         Ok(StagedOutcome::AlreadyCurrent(manifest, slots)) => {
             state["busy"] = json!("");
@@ -323,11 +247,11 @@ fn stage_update_with_policy(
             state["checked_utc"] = json!(now_epoch());
             state["check_ok"] = json!(true);
             state["check_error"] = json!("");
-            state["latest"] = json!({"release_id":manifest.release_id,"version":manifest.version,"notes":manifest.notes});
+
             state["last_utc"] = json!(now_epoch());
             state["last_ok"] = json!(true);
             state["last_release"] = json!(manifest.release_id);
-            state["last_message"] = json!("Уже установлен последний релиз");
+            state["last_message"] = json!("Выбранный выпуск уже установлен");
             if let Some(object) = state.as_object_mut() {
                 object.remove("install_stage");
             }
@@ -350,11 +274,12 @@ fn stage_update_with_policy(
             state["checked_utc"] = json!(now_epoch());
             state["check_ok"] = json!(true);
             state["check_error"] = json!("");
-            state["latest"] = json!({"release_id":manifest.release_id,"version":manifest.version,"notes":manifest.notes});
+
             state["last_utc"] = json!(now_epoch());
             state["last_ok"] = json!(true);
             state["last_release"] = json!(manifest.release_id);
             state["last_message"] = json!("Релиз подготовлен; runtime ещё не изменён");
+            state["phase"] = json!("migrate");
             state["install_stage"] = json!(2);
             if let Some(object) = state.as_object_mut() {
                 object.remove("never");
@@ -369,9 +294,14 @@ fn stage_update_with_policy(
         }
         Err(error) => {
             state["busy"] = json!("");
+            state["transfer"] = Value::Null;
             state["last_utc"] = json!(now_epoch());
             state["last_ok"] = json!(false);
-            state["last_message"] = json!(error.to_string());
+            state["last_message"] = json!(short_error(&error.to_string()));
+            let release = state["last_release"].as_str().unwrap_or("").to_owned();
+            if !release.is_empty() && !matches!(error, UpdateError::PreviouslyFailedRelease(_)) {
+                lifecycle::record(&mut state, &release, false, &error.to_string());
+            }
             if let Some(object) = state.as_object_mut() {
                 object.remove("never");
             }
@@ -387,24 +317,42 @@ fn stage_update_in(
     architecture: &str,
     automatic: bool,
     state: &mut Value,
+    release: Option<&str>,
+    source: Option<&str>,
 ) -> Result<StagedOutcome, UpdateError> {
+    let slots = read_install_slots(root)?;
+    if let Some(slots) = &slots {
+        check_compatible_slot(root, &slots.current)?;
+        state["current"] = json!(slots.current);
+        state["previous"] = json!(slots.previous);
+    }
+    let catalog = catalog::fetch(work, root, architecture)?;
+    state["latest"] = catalog::describe(&catalog.releases[0], architecture);
+    let target = match release {
+        Some(id) => catalog
+            .releases
+            .iter()
+            .find(|manifest| manifest.release_id == id)
+            .ok_or_else(|| catalog::invalid("версия отсутствует в опубликованном каталоге"))?,
+        None => &catalog.releases[0],
+    };
+    if read_cancel(root)? {
+        return Err(cancelled());
+    }
+    let url = format!("{DOWNLOAD_URL}/{}/latest.json", target.release_id);
     let manifest_path = work.join("latest.json");
     let signature_path = work.join("latest.json.sig");
-    download(LATEST_URL, &manifest_path, MANIFEST_MAX_BYTES, "60")?;
-    download(
-        &format!("{LATEST_URL}.sig"),
-        &signature_path,
-        SIGNATURE_MAX_BYTES,
-        "60",
-    )?;
-    let manifest_bytes = read_bounded(&manifest_path, MANIFEST_MAX_BYTES)?;
-    let signature = read_bounded(&signature_path, SIGNATURE_MAX_BYTES)?;
+    state["last_release"] = json!(target.release_id);
+    let routes = mirrors::routes(target, source)?;
+    let (manifest_bytes, signature) =
+        mirrors::metadata(&routes, &url, &manifest_path, &signature_path, target)?;
     let public_key = decode_public_key(PUBLIC_KEY)?;
     let manifest = verify_manifest(&manifest_bytes, &signature, &public_key)?;
-    if !manifest.assets.contains_key(architecture) {
-        return Err(VerifyError::UnknownArchitecture(architecture.to_owned()).into());
+    if &manifest != target {
+        return Err(catalog::invalid(
+            "манифест отличается от подписанного каталога",
+        ));
     }
-    let slots = read_install_slots(root)?;
     if slots
         .as_ref()
         .is_some_and(|installed| installed.current == manifest.release_id)
@@ -414,12 +362,13 @@ fn stage_update_in(
             slots.expect("current release was checked"),
         ));
     }
-    if should_skip_failed_release(automatic, &read_state(root), &manifest.release_id) {
+    if should_skip_failed_release(automatic, &read_state(root)?, &manifest.release_id) {
         return Err(UpdateError::PreviouslyFailedRelease(manifest.release_id).into());
     }
     if slots.as_ref().is_some_and(|installed| {
         installed.previous.as_deref() == Some(manifest.release_id.as_str())
     }) {
+        check_compatible_slot(root, &manifest.release_id)?;
         write_staged(
             root,
             &json!({
@@ -434,16 +383,23 @@ fn stage_update_in(
         "{DOWNLOAD_URL}/{}/r2o-{architecture}.tar.gz",
         manifest.release_id
     );
-    let archive_path = work.join("release.tar.gz");
-    download(
+    let archive_path = mirrors::cache_path(root, &target.assets[architecture].sha256)?;
+    state["phase"] = json!("download");
+    write_state(root, state)?;
+    mirrors::archive(
+        &routes,
         &url,
         &archive_path,
-        ARCHIVE_MAX_BYTES,
-        DOWNLOAD_TIMEOUT_SECONDS,
+        &target.assets[architecture],
+        root,
+        state,
+        source,
     )?;
+    let _ = fs::remove_file(root.join("state/update-transfer.json"));
+    state["phase"] = json!("verify");
     state["install_stage"] = json!(1);
     write_state(root, state)?;
-    let prepared = prepare_archive(
+    let prepared = crate::install::prepare_download(
         root,
         &archive_path,
         &manifest_bytes,
@@ -451,6 +407,24 @@ fn stage_update_in(
         &public_key,
         architecture,
     )?;
+    let _ = fs::remove_file(&archive_path);
+    state["phase"] = json!("stage");
+    write_state(root, state)?;
+    let layout = (|| {
+        check_compatible_bundle(&prepared.bundle)?;
+        let path = prepared.bundle.join("router/update-sequence");
+        let sequence = read_bounded(&path, 32)?;
+        if sequence.strip_suffix(b"\n") != Some(manifest.sequence().to_string().as_bytes()) {
+            return Err(catalog::invalid(
+                "порядковый номер пакета отличается от манифеста",
+            ));
+        }
+        Ok::<(), UpdateError>(())
+    })();
+    if let Err(error) = layout {
+        prepared.discard();
+        return Err(error);
+    }
     let relative_work = prepared
         .work
         .strip_prefix(root)
@@ -460,7 +434,7 @@ fn stage_update_in(
         &json!({
             "release_id": prepared.release_id,
             "architecture": architecture,
-            "kind": "archive",
+            "kind": "download",
             "work": relative_work
         }),
     ) {
@@ -471,7 +445,7 @@ fn stage_update_in(
 }
 
 /// Активировать подготовленный выпуск после остановки runtime.
-pub fn activate_staged_update(root: &Path) -> Result<Value, UpdateError> {
+fn activate_staged_update(root: &Path) -> Result<Value, UpdateError> {
     let _lock = UpdateLock::acquire(root)?;
     let staged = read_staged(root).ok_or(UpdateError::NoStagedRelease)?;
     let release_id = staged
@@ -493,18 +467,20 @@ pub fn activate_staged_update(root: &Path) -> Result<Value, UpdateError> {
         if kind == "previous" {
             activate_previous_release(root, &release_id, &architecture)?
                 .ok_or(UpdateError::NoStagedRelease)
-        } else if kind == "archive" {
-            let work = staged
-                .get("work")
-                .and_then(Value::as_str)
-                .ok_or(UpdateError::NoStagedRelease)?;
+        } else if kind == "archive" || kind == "download" {
+            let work = staged_work(root, &staged).ok_or(UpdateError::NoStagedRelease)?;
             let prepared = PreparedRelease {
                 release_id: release_id.clone(),
                 architecture: architecture.clone(),
-                bundle: root.join(work).join("bundle"),
-                work: root.join(work),
+                bundle: work.join("bundle"),
+                work,
             };
-            let slots = match activate_prepared(root, &prepared) {
+            let activation = if kind == "download" {
+                crate::install::activate_download(root, &prepared)
+            } else {
+                activate_prepared(root, &prepared)
+            };
+            let slots = match activation {
                 Ok(slots) => slots,
                 Err(error) => {
                     prepared.discard();
@@ -520,8 +496,12 @@ pub fn activate_staged_update(root: &Path) -> Result<Value, UpdateError> {
     let _ = fs::remove_file(staged_file(root));
     let slots = result?;
 
-    let mut state = read_state(root);
-    state["busy"] = json!("");
+    let mut state = read_state(root)?;
+    state["busy"] = if root.join("state/update-pending.json").exists() {
+        json!("health")
+    } else {
+        json!("")
+    };
     state["current"] = json!(slots.current);
     state["arch"] = json!(architecture);
     state["checked_utc"] = json!(now_epoch());
@@ -530,6 +510,7 @@ pub fn activate_staged_update(root: &Path) -> Result<Value, UpdateError> {
     state["last_utc"] = json!(now_epoch());
     state["last_ok"] = json!(true);
     state["last_release"] = json!(release_id);
+    state["phase"] = json!("health");
     state["install_stage"] = json!(3);
     state["last_message"] =
         json!("Релиз активирован; для проверки и перезапуска вызовите адаптер роутера");
@@ -556,7 +537,7 @@ pub fn mark_bad_previous_release(root: &Path) -> Result<Value, UpdateError> {
         .clone()
         .ok_or(crate::InstallError::NoPreviousRelease)?;
     let architecture = read_install_architecture(root)?.unwrap_or_default();
-    let mut state = read_state(root);
+    let mut state = read_state(root)?;
     state["busy"] = json!("");
     state["current"] = json!(slots.current);
     state["arch"] = json!(architecture);
@@ -574,7 +555,7 @@ pub fn mark_bad_previous_release(root: &Path) -> Result<Value, UpdateError> {
 /// Результат перезапуска записывает адаптер после runtime-проверки.
 pub fn finish_router_update(root: &Path, healthy: bool) -> Result<(), UpdateError> {
     let _lock = UpdateLock::acquire(root)?;
-    let mut state = read_state(root);
+    let mut state = read_state(root)?;
     let stage = state["install_stage"].as_u64();
     if healthy && (stage != Some(3) || state["last_ok"].as_bool() != Some(true)) {
         return Ok(());
@@ -597,8 +578,13 @@ pub fn finish_router_update(root: &Path, healthy: bool) -> Result<(), UpdateErro
 /// Сохранить настройку автоустановки роутера, не сбрасывая историю обновлений.
 pub fn set_auto_update(root: &Path, enabled: bool) -> Result<Value, UpdateError> {
     let _lock = UpdateLock::acquire(root)?;
-    let mut state = read_state(root);
+    let mut state = read_state(root)?;
     state["auto"] = json!(enabled);
+    if let Some(slots) = read_install_slots(root)? {
+        state["current"] = json!(slots.current);
+        state["previous"] = json!(slots.previous);
+        state["arch"] = json!(read_install_architecture(root)?);
+    }
     if state.get("checked_utc").is_none() {
         state["never"] = json!(true);
     }
@@ -612,6 +598,7 @@ fn auto_update_enabled(state: &Value) -> bool {
 
 fn bad_release_matches(state: &Value, release_id: &str) -> bool {
     state.get("bad_release").and_then(Value::as_str) == Some(release_id)
+        || state["bad_releases"][release_id] == true
 }
 
 fn should_skip_failed_release(automatic: bool, state: &Value, release_id: &str) -> bool {
@@ -622,12 +609,13 @@ struct UpdateLock(File);
 
 impl UpdateLock {
     fn acquire(root: &Path) -> Result<Self, UpdateError> {
-        use std::fs::OpenOptions;
-        use std::path::PathBuf;
+        Self::named(root, "update.lock", false)
+    }
 
+    fn named(root: &Path, name: &str, nonblocking: bool) -> Result<Self, UpdateError> {
         let state_dir = root.join("state");
         fs::create_dir_all(&state_dir)?;
-        let path: PathBuf = state_dir.join("update.lock");
+        let path: PathBuf = state_dir.join(name);
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
         #[cfg(unix)]
@@ -646,7 +634,13 @@ impl UpdateLock {
         #[cfg(unix)]
         loop {
             use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            if unsafe {
+                libc::flock(
+                    file.as_raw_fd(),
+                    libc::LOCK_EX | if nonblocking { libc::LOCK_NB } else { 0 },
+                )
+            } == 0
+            {
                 break;
             }
             let error = io::Error::last_os_error();
@@ -654,7 +648,9 @@ impl UpdateLock {
                 return Err(error.into());
             }
         }
-        cleanup_stale_update_work_dirs(root);
+        if name == "update.lock" {
+            cleanup_stale_update_work_dirs(root);
+        }
         Ok(Self(file))
     }
 }
@@ -698,93 +694,19 @@ fn check_update_in(
     root: &Path,
     architecture: &str,
 ) -> Result<(crate::ReleaseManifest, Option<InstallSlots>), UpdateError> {
-    let manifest_path = work.join("latest.json");
-    let signature_path = work.join("latest.json.sig");
-    download(LATEST_URL, &manifest_path, MANIFEST_MAX_BYTES, "60")?;
-    download(
-        &format!("{LATEST_URL}.sig"),
-        &signature_path,
-        SIGNATURE_MAX_BYTES,
-        "60",
-    )?;
-    let manifest_bytes = read_bounded(&manifest_path, MANIFEST_MAX_BYTES)?;
-    let signature = read_bounded(&signature_path, SIGNATURE_MAX_BYTES)?;
-    let public_key = decode_public_key(PUBLIC_KEY)?;
-    let manifest = verify_manifest(&manifest_bytes, &signature, &public_key)?;
-    let _ = manifest
-        .assets
-        .get(architecture)
-        .ok_or_else(|| VerifyError::UnknownArchitecture(architecture.to_owned()))?;
     let slots = read_install_slots(root)?;
-    Ok((manifest, slots))
-}
-
-fn install_update_in(
-    work: &Path,
-    root: &Path,
-    architecture: &str,
-    automatic: bool,
-) -> Result<(crate::ReleaseManifest, InstallSlots, bool), UpdateError> {
-    let manifest_path = work.join("latest.json");
-    let signature_path = work.join("latest.json.sig");
-    let archive_path = work.join("release.tar.gz");
-    download(LATEST_URL, &manifest_path, MANIFEST_MAX_BYTES, "60")?;
-    download(
-        &format!("{LATEST_URL}.sig"),
-        &signature_path,
-        SIGNATURE_MAX_BYTES,
-        "60",
-    )?;
-    let manifest_bytes = read_bounded(&manifest_path, MANIFEST_MAX_BYTES)?;
-    let signature = read_bounded(&signature_path, SIGNATURE_MAX_BYTES)?;
-    let public_key = decode_public_key(PUBLIC_KEY)?;
-    let manifest = verify_manifest(&manifest_bytes, &signature, &public_key)?;
-    if !manifest.assets.contains_key(architecture) {
-        return Err(VerifyError::UnknownArchitecture(architecture.to_owned()).into());
+    if let Some(slots) = &slots {
+        check_compatible_slot(root, &slots.current)?;
     }
-    let slots = read_install_slots(root)?;
-    if slots
-        .as_ref()
-        .is_some_and(|installed| installed.current == manifest.release_id)
-    {
-        return Ok((manifest, slots.expect("current release was checked"), false));
-    }
-    if should_skip_failed_release(automatic, &read_state(root), &manifest.release_id) {
-        return Err(UpdateError::PreviouslyFailedRelease(manifest.release_id).into());
-    }
-    if slots.as_ref().is_some_and(|installed| {
-        installed.previous.as_deref() == Some(manifest.release_id.as_str())
-    }) {
-        if let Some(slots) = activate_previous_release(root, &manifest.release_id, architecture)? {
-            return Ok((manifest, slots, true));
-        }
-        let slots = read_install_slots(root)?;
-        if slots
-            .as_ref()
-            .is_some_and(|installed| installed.current == manifest.release_id)
-        {
-            return Ok((manifest, slots.expect("current release was checked"), false));
-        }
-    }
-    let url = format!(
-        "{DOWNLOAD_URL}/{}/r2o-{architecture}.tar.gz",
-        manifest.release_id
-    );
-    download(
-        &url,
-        &archive_path,
-        ARCHIVE_MAX_BYTES,
-        DOWNLOAD_TIMEOUT_SECONDS,
-    )?;
-    let slots = install_archive(
-        root,
-        &archive_path,
-        &manifest_bytes,
-        &signature,
-        &public_key,
-        architecture,
-    )?;
-    Ok((manifest, slots, true))
+    let catalog = catalog::fetch(work, root, architecture)?;
+    Ok((
+        catalog
+            .releases
+            .into_iter()
+            .next()
+            .expect("каталог проверен"),
+        slots,
+    ))
 }
 
 fn validate_architecture(architecture: &str) -> Result<(), UpdateError> {
@@ -807,8 +729,14 @@ fn download(
     timeout: &str,
 ) -> Result<(), UpdateError> {
     validate_download_url(url)?;
-    let overrides = resolve_download_overrides(url)?;
-    download_rust(url, destination, max_bytes, timeout, &overrides)
+    download_rust(
+        url,
+        destination,
+        max_bytes,
+        timeout,
+        &[],
+        RequestKind::Metadata,
+    )
 }
 
 const HTTP_MAX_REDIRECTS: usize = 5;
@@ -821,6 +749,19 @@ struct HttpHead {
     location: Option<String>,
     chunked: bool,
     content_length: Option<u64>,
+    content_range: Option<String>,
+    encoding: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum RequestKind<'a> {
+    Metadata,
+    Probe(u64),
+    Archive {
+        total: u64,
+        root: &'a Path,
+        source: &'a str,
+    },
 }
 
 fn download_rust(
@@ -829,6 +770,7 @@ fn download_rust(
     max_bytes: u64,
     timeout: &str,
     overrides: &[(String, Vec<Ipv4Addr>)],
+    kind: RequestKind<'_>,
 ) -> Result<(), UpdateError> {
     let timeout_seconds = timeout.parse::<u64>().unwrap_or(600).clamp(1, 3600);
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
@@ -842,10 +784,7 @@ fn download_rust(
 
     for redirect in 0..=HTTP_MAX_REDIRECTS {
         let (host, path) = parse_https_url(&current)?;
-        if redirect > 0
-            && initial_host == "github.com"
-            && !GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str())
-        {
+        if redirect > 0 && host != initial_host && !GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str()) {
             return Err(UpdateError::Download(format!(
                 "перенаправление на недопустимый хост {host}"
             )));
@@ -858,7 +797,15 @@ fn download_rust(
         let mut last_error = None;
         let mut next_url = None;
         for address in addresses.into_iter().take(4) {
-            match fetch_https(&host, &path, address, destination, max_bytes, deadline) {
+            match fetch_https(
+                &host,
+                &path,
+                address,
+                destination,
+                max_bytes,
+                deadline,
+                kind,
+            ) {
                 Ok(Some(location)) => {
                     next_url = Some(resolve_redirect(&current, &host, &location, &initial_host)?);
                     break;
@@ -942,7 +889,7 @@ fn resolve_redirect(
     validate_download_url(&next)?;
     let host = download_url_host(&next)
         .ok_or_else(|| UpdateError::Download("недопустимый адрес перенаправления".into()))?;
-    if initial_host == "github.com" && !GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str()) {
+    if host != initial_host && !GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str()) {
         return Err(UpdateError::Download(format!(
             "перенаправление на недопустимый хост {host}"
         )));
@@ -957,6 +904,7 @@ fn fetch_https(
     destination: &Path,
     max_bytes: u64,
     deadline: Instant,
+    kind: RequestKind<'_>,
 ) -> Result<Option<String>, UpdateError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -984,8 +932,22 @@ fn fetch_https(
         .map_err(|error| UpdateError::Download(format!("TLS {host}: {error}")))?;
     let mut stream = BufReader::new(StreamOwned::new(connection, tcp));
 
+    let offset = match kind {
+        RequestKind::Archive { root, .. } => {
+            if read_cancel(root)? {
+                return Err(cancelled());
+            }
+            fs::metadata(destination).map_or(0, |m| m.len())
+        }
+        _ => 0,
+    };
+    let range = match kind {
+        RequestKind::Archive { .. } if offset > 0 => format!("Range: bytes={offset}-\r\n"),
+        RequestKind::Probe(total) => format!("Range: bytes=0-{}\r\n", total.min(16 * 1024) - 1),
+        _ => String::new(),
+    };
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: r2o-manager/{}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: r2o-manager/{}\r\nAccept: */*\r\nAccept-Encoding: identity\r\n{range}Connection: close\r\n\r\n",
         env!("CARGO_PKG_VERSION")
     );
     stream
@@ -997,64 +959,128 @@ fn fetch_https(
         .flush()
         .map_err(|error| UpdateError::Download(format!("отправка запроса: {error}")))?;
 
-    let head = read_http_head(&mut stream)?;
+    receive_response(
+        &mut stream,
+        destination,
+        max_bytes,
+        deadline,
+        kind,
+        offset,
+        &format!("{host}{path}"),
+    )
+}
+
+fn receive_response(
+    stream: &mut impl BufRead,
+    destination: &Path,
+    max_bytes: u64,
+    deadline: Instant,
+    kind: RequestKind<'_>,
+    offset: u64,
+    url: &str,
+) -> Result<Option<String>, UpdateError> {
+    let head = read_http_head(stream)?;
     let parsed = parse_http_head(&head)?;
     if matches!(parsed.status, 301 | 302 | 303 | 307 | 308) {
         return Ok(Some(parsed.location.ok_or_else(|| {
             UpdateError::Download("перенаправление без Location".into())
         })?));
     }
-    if parsed.status != 200 && parsed.status != 206 {
-        return Err(UpdateError::Download(format!(
-            "HTTP {} при загрузке {host}{path}",
-            parsed.status
-        )));
+    if parsed
+        .encoding
+        .as_deref()
+        .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+    {
+        return Err(io::Error::other("сервер изменил кодирование файла").into());
     }
-
+    let limit = match kind {
+        RequestKind::Metadata if parsed.status == 200 => max_bytes,
+        RequestKind::Archive { total, .. } if parsed.status == 200 => total,
+        RequestKind::Archive { total, .. }
+            if offset > 0 && offset < total && range_matches(&parsed, offset, total - 1, total) =>
+        {
+            total - offset
+        }
+        RequestKind::Probe(total) => {
+            let probe = total.min(16 * 1024);
+            if range_matches(&parsed, 0, probe - 1, total)
+                || parsed.status == 200 && parsed.content_length == Some(total) && !parsed.chunked
+            {
+                copy_exact(stream, &mut io::sink(), probe, probe, deadline)?;
+                return Ok(None);
+            }
+            return Err(
+                io::Error::other("источник вернул неверный ответ на пробный диапазон").into(),
+            );
+        }
+        _ => {
+            return Err(UpdateError::Download(format!(
+                "HTTP {} при загрузке {url}",
+                parsed.status
+            )));
+        }
+    };
+    if parsed.content_length.is_some_and(|length| length > limit) {
+        return Err(io::Error::other("HTTP-ответ больше ожидаемого размера").into());
+    }
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    let append = matches!(kind, RequestKind::Archive { .. }) && parsed.status == 206;
+    if matches!(kind, RequestKind::Archive { .. }) {
+        options
+            .write(true)
+            .create(true)
+            .append(append)
+            .truncate(!append);
+    } else {
+        options.write(true).create_new(true);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    let mut output = options.open(destination).map_err(|error| {
+    let output = options.open(destination).map_err(|error| {
         UpdateError::Download(format!(
             "не удалось создать {}: {error}",
             destination.display()
         ))
     })?;
+    let mut output = mirrors::Progress::new(output, kind, if append { offset } else { 0 });
     let copied = if parsed.chunked {
-        copy_chunked(&mut stream, &mut output, max_bytes, deadline)
+        copy_chunked(stream, &mut output, limit, deadline)
     } else if let Some(length) = parsed.content_length {
-        copy_exact(&mut stream, &mut output, length, max_bytes, deadline)
+        copy_exact(stream, &mut output, length, limit, deadline)
     } else {
-        copy_until_eof(&mut stream, &mut output, max_bytes, deadline)
+        copy_until_eof(stream, &mut output, limit, deadline)
     };
-    let bytes = match copied {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            drop(output);
-            let _ = fs::remove_file(destination);
-            return Err(error);
-        }
-    };
-    if bytes == 0 {
+    if !matches!(kind, RequestKind::Archive { .. }) && !matches!(&copied, Ok(bytes) if *bytes > 0) {
         drop(output);
         let _ = fs::remove_file(destination);
-        return Err(UpdateError::Download("загрузки не содержат данных".into()));
+        return Err(copied
+            .err()
+            .unwrap_or_else(|| io::Error::other("загрузка пуста").into()));
     }
-    output
-        .sync_all()
-        .map_err(|error| UpdateError::Download(format!("sync загрузки: {error}")))?;
+    let bytes = copied?;
+    if matches!(kind, RequestKind::Archive { .. }) && bytes != limit {
+        return Err(io::Error::other("загружена только часть архива").into());
+    }
+    output.file.sync_all()?;
     Ok(None)
+}
+
+fn range_matches(head: &HttpHead, start: u64, end: u64, total: u64) -> bool {
+    head.status == 206
+        && !head.chunked
+        && head.content_length == Some(end - start + 1)
+        && head.content_range.as_deref() == Some(format!("bytes {start}-{end}/{total}").as_str())
 }
 
 fn read_http_head(reader: &mut impl BufRead) -> Result<Vec<u8>, UpdateError> {
     let mut head = Vec::new();
     loop {
         let mut line = Vec::new();
-        let read = reader
+        let read = (&mut *reader)
+            .take((HTTP_HEADER_MAX_BYTES + 1 - head.len()) as u64)
             .read_until(b'\n', &mut line)
             .map_err(|error| UpdateError::Download(format!("чтение заголовков: {error}")))?;
         if read == 0 {
@@ -1088,6 +1114,8 @@ fn parse_http_head(head: &[u8]) -> Result<HttpHead, UpdateError> {
     let mut location = None;
     let mut chunked = false;
     let mut content_length = None;
+    let mut content_range = None;
+    let mut encoding = None;
     for line in lines {
         let line = line.trim_end_matches('\r');
         let Some((name, value)) = line.split_once(':') else {
@@ -1100,7 +1128,16 @@ fn parse_http_head(head: &[u8]) -> Result<HttpHead, UpdateError> {
             chunked = value
                 .split(',')
                 .any(|part| part.trim().eq_ignore_ascii_case("chunked"));
+        } else if name.eq_ignore_ascii_case("content-range")
+            && content_range.replace(value.to_owned()).is_some()
+            || name.eq_ignore_ascii_case("content-encoding")
+                && encoding.replace(value.to_owned()).is_some()
+        {
+            return Err(io::Error::other("повтор заголовка HTTP").into());
         } else if name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err(io::Error::other("повтор Content-Length").into());
+            }
             content_length = Some(
                 value
                     .parse::<u64>()
@@ -1113,6 +1150,8 @@ fn parse_http_head(head: &[u8]) -> Result<HttpHead, UpdateError> {
         location,
         chunked,
         content_length,
+        content_range,
+        encoding,
     })
 }
 
@@ -1197,15 +1236,7 @@ fn copy_chunked(
     let mut buffer = [0u8; 16 * 1024];
     loop {
         check_deadline(deadline)?;
-        let mut line = String::new();
-        let read = reader
-            .read_line(&mut line)
-            .map_err(|error| UpdateError::Download(format!("чтение chunk: {error}")))?;
-        if read == 0 {
-            return Err(UpdateError::Download(
-                "соединение закрылось до конца chunked-тела".into(),
-            ));
-        }
+        let line = bounded_chunk_line(reader, deadline)?;
         let size = line
             .trim()
             .split(';')
@@ -1213,12 +1244,14 @@ fn copy_chunked(
             .and_then(|value| usize::from_str_radix(value.trim(), 16).ok())
             .ok_or_else(|| UpdateError::Download("некорректный chunk size".into()))?;
         if size == 0 {
+            let mut trailer_bytes = 0;
             loop {
-                let mut trailer = String::new();
-                let read = reader
-                    .read_line(&mut trailer)
-                    .map_err(|error| UpdateError::Download(format!("чтение trailer: {error}")))?;
-                if read == 0 || trailer == "\r\n" || trailer == "\n" {
+                let trailer = bounded_chunk_line(reader, deadline)?;
+                trailer_bytes += trailer.len();
+                if trailer_bytes > HTTP_HEADER_MAX_BYTES {
+                    return Err(io::Error::other("слишком длинный trailer HTTP").into());
+                }
+                if trailer == "\r\n" || trailer == "\n" {
                     return Ok(total);
                 }
             }
@@ -1246,6 +1279,15 @@ fn copy_chunked(
             return Err(UpdateError::Download("некорректный chunk CRLF".into()));
         }
     }
+}
+
+fn bounded_chunk_line(reader: &mut impl BufRead, deadline: Instant) -> Result<String, UpdateError> {
+    check_deadline(deadline)?;
+    let mut line = String::new();
+    if reader.take(4096).read_line(&mut line)? == 0 || !line.ends_with('\n') {
+        return Err(io::Error::other("неполная строка chunked HTTP").into());
+    }
+    Ok(line)
 }
 
 #[cfg(test)]
@@ -1406,6 +1448,7 @@ fn download_url_host(url: &str) -> Option<String> {
     Some(host.to_ascii_lowercase())
 }
 
+#[cfg(test)]
 fn release_download_hosts(url: &str) -> &'static [&'static str] {
     if download_url_host(url).as_deref() == Some("github.com") {
         &GITHUB_DOWNLOAD_HOSTS
@@ -1459,6 +1502,7 @@ fn download_curl_args(
     arguments
 }
 
+#[cfg(test)]
 fn resolve_download_overrides(url: &str) -> Result<Vec<(String, Vec<Ipv4Addr>)>, UpdateError> {
     let requested_host = download_url_host(url)
         .ok_or_else(|| UpdateError::Download("недопустимый HTTPS-адрес загрузки".into()))?;
@@ -1560,22 +1604,53 @@ fn create_work_dir(root: &Path) -> Result<PathBuf, UpdateError> {
     .into())
 }
 
-fn read_state(root: &Path) -> Value {
-    fs::read(root.join("state/update.json"))
-        .ok()
-        .filter(|bytes| bytes.len() <= 16 * 1024)
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}))
+fn read_state(root: &Path) -> Result<Value, UpdateError> {
+    let bytes = match read_bounded(&root.join("state/update.json"), 16 * 1024) {
+        Ok(bytes) => bytes,
+        Err(UpdateError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(json!({"format":1}));
+        }
+        Err(error) => return Err(error),
+    };
+    let mut state: Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let map = state
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("состояние обновления должно быть объектом"))?;
+    match map.get("format").and_then(Value::as_u64) {
+        Some(1) => (),
+        None if !map.contains_key("format") => {
+            // Выпуски с общей схемой данных могут хранить начальную телеметрию без номера формата.
+            if let Some(release) = map
+                .get("bad_release")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                crate::validate_token(release, "release_id", 128)?;
+                map.insert("bad_releases".to_owned(), json!({ (release): true }));
+            }
+            map.insert("format".to_owned(), json!(1));
+        }
+        _ => return Err(io::Error::other("неподдерживаемый формат состояния обновления").into()),
+    }
+    Ok(state)
 }
 
 fn write_state(root: &Path, state: &Value) -> Result<(), UpdateError> {
-    let path = root.join("state/update.json");
+    let mut state = state.clone();
+    state["format"] = json!(1);
+    write_json(root, "update.json", &state)
+}
+
+fn write_json(root: &Path, name: &str, state: &Value) -> Result<(), UpdateError> {
+    let path = root.join("state").join(name);
     let parent = path.parent().expect("update state has parent");
     fs::create_dir_all(parent)?;
     let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(".update-{}-{sequence}.json", std::process::id()));
     let bytes = serde_json::to_vec(state).map_err(|error| io::Error::other(error.to_string()))?;
+    if name == "update.json" && bytes.len() >= 16 * 1024 - 1 {
+        return Err(io::Error::other("состояние обновления превышает 16 КиБ").into());
+    }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1589,6 +1664,7 @@ fn write_state(root: &Path, state: &Value) -> Result<(), UpdateError> {
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, &path)?;
+        crate::install::sync_directory(parent)?;
         Ok::<(), io::Error>(())
     })();
     if result.is_err() {
@@ -1596,6 +1672,57 @@ fn write_state(root: &Path, state: &Value) -> Result<(), UpdateError> {
     }
     result?;
     Ok(())
+}
+
+fn read_cancel(root: &Path) -> Result<bool, UpdateError> {
+    Ok(root.join("state/update-cancel").try_exists()?)
+}
+
+fn cancelled() -> UpdateError {
+    io::Error::new(io::ErrorKind::Interrupted, "Обновление отменено").into()
+}
+
+pub fn cancel_router_update(root: &Path) -> Result<(), UpdateError> {
+    let _gate = UpdateLock::named(root, "update-cancel.lock", false)?;
+    match UpdateLock::named(root, "update-router.lock", true) {
+        Ok(_) => return Err(io::Error::other("Установка не запущена").into()),
+        Err(UpdateError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {}
+        Err(error) => return Err(error),
+    }
+    if root.join("state/update-pending.json").try_exists()? {
+        return Err(io::Error::other("Отмена возможна только до активации").into());
+    }
+    let path = root.join("state/update-cancel");
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    Ok(())
+}
+
+fn reset_cancel(root: &Path) -> Result<(), UpdateError> {
+    match fs::remove_file(root.join("state/update-cancel")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn check_compatible_slot(root: &Path, release_id: &str) -> Result<(), UpdateError> {
+    crate::validate_token(release_id, "release_id", 128)?;
+    check_compatible_bundle(&root.join("releases").join(release_id))
+}
+
+fn check_compatible_bundle(bundle: &Path) -> Result<(), UpdateError> {
+    if read_bounded(&bundle.join("router/update-schema"), 32)? != b"R2O-STATE-1\n" {
+        return Err(io::Error::other("несовместимые форматы конфигурации и состояния").into());
+    }
+    Ok(())
+}
+
+fn short_error(message: &str) -> String {
+    message[..message.floor_char_boundary(320)].to_owned()
 }
 
 fn now_epoch() -> u64 {
@@ -1612,10 +1739,10 @@ mod tests {
 
     static TEST_TEMP: AtomicUsize = AtomicUsize::new(0);
 
-    struct TestDir(PathBuf);
+    pub(super) struct TestDir(pub(super) PathBuf);
 
     impl TestDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let id = TEST_TEMP.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!("r2o-update-{}-{id}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
@@ -1647,6 +1774,38 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn resume_validates_range_and_restarts_if_source_ignores_it() {
+        let temp = TestDir::new();
+        let path = temp.0.join("archive");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let kind = RequestKind::Archive {
+            total: 6,
+            root: &temp.0,
+            source: "test",
+        };
+        let mut interrupted = &b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc"[..];
+        assert!(receive_response(&mut interrupted, &path, 6, deadline, kind, 0, "test").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"abc");
+
+        let mut wrong =
+            &b"HTTP/1.1 206 Partial\r\nContent-Range: bytes 2-4/6\r\nContent-Length: 3\r\n\r\ncde"
+                [..];
+        assert!(receive_response(&mut wrong, &path, 6, deadline, kind, 3, "test").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"abc");
+
+        let mut valid =
+            &b"HTTP/1.1 206 Partial\r\nContent-Range: bytes 3-5/6\r\nContent-Length: 3\r\n\r\ndef"
+                [..];
+        receive_response(&mut valid, &path, 6, deadline, kind, 3, "test").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"abcdef");
+
+        let mut restart = &b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabcdef"[..];
+        fs::write(&path, b"bad").unwrap();
+        receive_response(&mut restart, &path, 6, deadline, kind, 3, "test").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"abcdef");
+    }
+
     #[test]
     fn stale_update_work_dirs_are_removed_under_lock() {
         let temp = TestDir::new();
@@ -1752,7 +1911,7 @@ mod tests {
         let temp = TestDir::new();
         let state = json!({"busy":"","check_ok":true,"latest":{"release_id":"r2o-1"}});
         write_state(&temp.0, &state).unwrap();
-        assert_eq!(read_state(&temp.0), state);
+        assert_eq!(read_state(&temp.0).unwrap()["auto"], state["auto"]);
     }
 
     #[test]
@@ -1786,7 +1945,7 @@ mod tests {
         let result = mark_bad_previous_release(root).unwrap();
         assert_eq!(result["current"], "r2o-good");
         assert_eq!(result["bad_release"], "r2o-bad");
-        let state = read_state(root);
+        let state = read_state(root).unwrap();
         assert_eq!(state["current"], "r2o-good");
         assert_eq!(state["bad_release"], "r2o-bad");
         assert_eq!(state["last_ok"], false);
@@ -1804,7 +1963,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = TestDir::new();
         let root = &temp.0;
-        let work_relative = ".install-test-stage";
+        let work_relative = ".install-1-1";
         let work = root.join(work_relative);
         let builds = work.join("bundle/builds");
         fs::create_dir_all(&builds).unwrap();
@@ -1843,11 +2002,11 @@ mod tests {
         );
         assert!(!staged_file(root).exists());
         assert!(!work.exists());
-        assert_eq!(read_state(root)["current"], "r2o-stage-1");
-        assert_eq!(read_state(root)["install_stage"], 3);
+        assert_eq!(read_state(root).unwrap()["current"], "r2o-stage-1");
+        assert_eq!(read_state(root).unwrap()["install_stage"], 3);
         finish_router_update(root, true).unwrap();
-        assert_eq!(read_state(root)["install_stage"], 4);
-        assert_eq!(read_state(root)["last_ok"], true);
+        assert_eq!(read_state(root).unwrap()["install_stage"], 4);
+        assert_eq!(read_state(root).unwrap()["last_ok"], true);
     }
 
     #[test]

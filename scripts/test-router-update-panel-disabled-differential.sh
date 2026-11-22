@@ -12,14 +12,12 @@ R2O_INIT=$ROOT/router/S99r2o
 [ -f "$D2O_UPDATE" ] || fail "не найден D2O updater $D2O_UPDATE"
 
 tr -d '\r' < "$D2O_UPDATE" | sed -n '/^healthy() {/,$p' | sed '/^do_install() {/,$d' > "$TEMP/d2o-healthy.sh"
-tr -d '\r' < "$R2O_INIT" | sed -n '/^wait_health() {/,$p' | sed '/^update_install() {/,$d' > "$TEMP/r2o-wait-health.sh"
-tr -d '\r' < "$R2O_INIT" | sed -n '/^engine_health_once() {/,/^}/p' > "$TEMP/r2o-engine-health.sh"
+tr -d '\r' < "$R2O_INIT" | sed -n '/^update_health() {/,/^}/p' > "$TEMP/r2o-health.sh"
 tr -d '\r' < "$R2O_INIT" | sed -n '/^panel_start() {/,$p' | sed '/^start() {/,$d' > "$TEMP/r2o-panel-start.sh"
 R2O_PANEL_DEFAULT=$(tr -d '\r' < "$R2O_INIT" | sed -n 's/^\(PANEL_LISTEN=.*\)$/\1/p' | tail -n 1)
 [ -n "$R2O_PANEL_DEFAULT" ] || fail "не найдена инициализация PANEL_LISTEN в R2O"
 . "$TEMP/d2o-healthy.sh"
-. "$TEMP/r2o-engine-health.sh"
-. "$TEMP/r2o-wait-health.sh"
+. "$TEMP/r2o-health.sh"
 . "$TEMP/r2o-panel-start.sh"
 
 HEALTH_FAIL_DURING_SLEEP=0
@@ -110,36 +108,40 @@ component_running() {
     esac
 }
 RUNTIME=$TEMP/r2o/runtime
-# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
+IPV6_ENABLED_RUNTIME=0
 QUEUE4=2000
-# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
-IPV6_ENABLED=0
-# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
 DP4_PID=$TEMP/r2o/dp.pid
-# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
-CT4_PID=$TEMP/r2o/ct.pid
-# shellcheck disable=SC2034 # sourced health functions consume these fixture variables
-PN_PID=$TEMP/r2o/panel.pid
-wait_health || fail "R2O rejected a healthy datapath when PANEL_LISTEN is empty"
-
-HEALTH_FAIL_DURING_SLEEP=1
-HEALTH_FAIL_COMPONENT=datapath
-R2O_DATAPATH_ALIVE=1
-if wait_health; then fail "R2O accepted a datapath that died during the D2O 60-second health window"; fi
-HEALTH_FAIL_DURING_SLEEP=0
+TG_ENABLED=0
+META_DISABLED=$TEMP/r2o/meta-disabled
+SOCK4=$TEMP/r2o/dp.sock
+MANAGER=$TEMP/manager
+FIREWALL=$TEMP/firewall
+printf '#!/bin/sh\nexit 0\n' > "$FIREWALL"
+cat > "$MANAGER" <<'EOF'
+#!/bin/sh
+[ "$1" = update-ping-panel ] && [ -s "$R2O_TEST_PANEL_LIVE" ]
+EOF
+chmod 0755 "$MANAGER" "$FIREWALL"
+export R2O_TEST_PANEL_LIVE="$RUNTIME/panel.ready"
+python3 - "$SOCK4" <<'PY'
+import socket
+import sys
+with socket.socket(socket.AF_UNIX) as listener:
+    listener.bind(sys.argv[1])
+PY
+printf '{}\n' > "$RUNTIME/live4.json"
+meta_dns_scheduler_running() { return 0; }
+firewall_watchdog_running() { return 0; }
+update_scheduler_running() { return 0; }
+update_health || fail "R2O отклонил работающий datapath с выключенной панелью"
+R2O_DATAPATH_ALIVE=0
+if update_health; then fail "R2O принял неработающий datapath"; fi
 R2O_DATAPATH_ALIVE=1
 PANEL_LISTEN=127.0.0.1:8090
-if wait_health; then fail "R2O accepted an enabled panel without panel health"; fi
-printf 'healthy\n' > "$RUNTIME/r2o-panel.health"
-wait_health || fail "R2O rejected a configured, healthy panel"
-HEALTH_FAIL_DURING_SLEEP=1
-HEALTH_FAIL_COMPONENT=panel
-R2O_PANEL_ALIVE=1
-if wait_health; then fail "R2O accepted a panel that died during the D2O health window"; fi
-HEALTH_FAIL_DURING_SLEEP=0
-R2O_PANEL_ALIVE=1
-R2O_PANEL_ALIVE=0
-if wait_health; then fail "R2O accepted a panel that died during the D2O health window"; fi
-R2O_PANEL_ALIVE=1
+if update_health; then fail "R2O принял неготовый HTTP API панели"; fi
+printf '200\n' > "$R2O_TEST_PANEL_LIVE"
+update_health || fail "R2O отклонил работающий HTTP API панели"
+rm -f "$RUNTIME/live4.json"
+if update_health; then fail "R2O не проверил готовность контроллера"; fi
 
-echo "D2O/R2O: настройка PANEL_LISTEN и 60-секундное окно health-check совпадают"
+echo "D2O и R2O учитывают явное отключение панели при проверке доступности"

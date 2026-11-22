@@ -1,3 +1,5 @@
+mod abi;
+
 use super::{VerifyError, validate_token, verify_release_archive};
 use flate2::read::GzDecoder;
 use std::fmt;
@@ -117,6 +119,9 @@ pub fn activate_bundle(
 ) -> Result<InstallSlots, InstallError> {
     fs::create_dir_all(root)?;
     let _lock = ManagerLock::acquire(root)?;
+    if root.join("state/update-pending.json").try_exists()? {
+        return Err(InstallError::Busy);
+    }
     cleanup_stale_install_artifacts(root);
     activate_bundle_locked(root, bundle, release_id, architecture)
 }
@@ -174,12 +179,49 @@ fn prepare_archive_locked(
     public_key: &[u8],
     architecture: &str,
 ) -> Result<PreparedRelease, InstallError> {
+    prepare_archive_inner(
+        root,
+        archive_path,
+        manifest_bytes,
+        signature,
+        public_key,
+        architecture,
+        true,
+    )
+}
+
+pub(crate) fn prepare_download(
+    root: &Path,
+    path: &Path,
+    manifest: &[u8],
+    signature: &[u8],
+    key: &[u8],
+    architecture: &str,
+) -> Result<PreparedRelease, InstallError> {
+    let _lock = ManagerLock::acquire(root)?;
+    prepare_archive_inner(root, path, manifest, signature, key, architecture, false)
+}
+
+fn prepare_archive_inner(
+    root: &Path,
+    archive_path: &Path,
+    manifest_bytes: &[u8],
+    signature: &[u8],
+    public_key: &[u8],
+    architecture: &str,
+    copy: bool,
+) -> Result<PreparedRelease, InstallError> {
     cleanup_stale_install_artifacts(root);
     let work = create_work_dir(root)?;
     let result = (|| {
         let local_archive = work.join("release.tar.gz");
-        copy_archive(archive_path, &local_archive)?;
-        let mut archive_file = File::open(&local_archive)?;
+        let archive_path = if copy {
+            copy_archive(archive_path, &local_archive)?;
+            local_archive.as_path()
+        } else {
+            archive_path
+        };
+        let mut archive_file = File::open(archive_path)?;
         let (manifest, _) = verify_release_archive(
             manifest_bytes,
             signature,
@@ -187,11 +229,27 @@ fn prepare_archive_locked(
             architecture,
             &mut archive_file,
         )?;
+        let max_expanded = manifest.assets[architecture]
+            .expanded
+            .unwrap_or(ARCHIVE_MAX_EXPANDED_BYTES);
         archive_file.seek(SeekFrom::Start(0))?;
         let bundle = work.join("bundle");
         fs::create_dir(&bundle)?;
-        extract_bundle(&mut archive_file, &bundle)?;
+        extract_bundle(&mut archive_file, &bundle, max_expanded)?;
         validate_bundle(&bundle, architecture)?;
+        if manifest.metadata.is_some() {
+            abi::validate_bundle_abi(&bundle, architecture)?;
+        }
+        if !copy {
+            write_synced(&bundle.join("release-id"), manifest.release_id.as_bytes())?;
+            write_synced(
+                &bundle.join("release-architecture"),
+                architecture.as_bytes(),
+            )?;
+            sync_bundle(&bundle)?;
+            sync_directory(&work)?;
+            sync_directory(root)?;
+        }
         Ok(PreparedRelease {
             release_id: manifest.release_id,
             architecture: architecture.to_owned(),
@@ -203,6 +261,57 @@ fn prepare_archive_locked(
         let _ = fs::remove_dir_all(&work);
     }
     result
+}
+
+fn sync_bundle(bundle: &Path) -> Result<(), InstallError> {
+    for entry in fs::read_dir(bundle)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_bundle(&entry.path())?;
+        } else {
+            File::open(entry.path())?.sync_all()?;
+        }
+    }
+    sync_directory(bundle)?;
+    Ok(())
+}
+
+pub(crate) fn activate_download(
+    root: &Path,
+    prepared: &PreparedRelease,
+) -> Result<InstallSlots, InstallError> {
+    let _lock = ManagerLock::acquire(root)?;
+    let current = read_install_slots(root)?.ok_or(InstallError::NoActiveRelease)?;
+    let slots = InstallSlots {
+        current: prepared.release_id.clone(),
+        previous: Some(current.current),
+    };
+    let releases = root.join("releases");
+    let target = releases.join(&slots.current);
+    validate_bundle(&prepared.bundle, &prepared.architecture)?;
+    if fs::symlink_metadata(&target).is_ok() {
+        if slots.previous.as_deref() == Some(slots.current.as_str())
+            || current.previous.as_deref() == Some(slots.current.as_str())
+        {
+            return Err(InstallError::ReleaseAlreadyExists(slots.current));
+        }
+        ensure_release_dir(root, &slots.current)?;
+        fs::remove_dir_all(&target)?;
+    }
+    fs::rename(&prepared.bundle, &target)?;
+    sync_directory(&releases)?;
+    sync_directory(&prepared.work)?;
+    write_slots_atomically(root, &slots)?;
+    Ok(slots)
+}
+
+pub(crate) fn refresh_launcher(root: &Path) -> Result<(), InstallError> {
+    let _lock = ManagerLock::acquire(root)?;
+    let current = read_install_slots(root)?
+        .ok_or(InstallError::NoActiveRelease)?
+        .current;
+    let arch = read_release_architecture(root, &current)?;
+    install_manager_launcher(root, &root.join("releases").join(current), &arch)
 }
 
 /// Активировать ранее подготовленный выпуск, не перепроверяя архив.
@@ -238,6 +347,9 @@ pub fn install_archive(
         .map_err(|_| InstallError::InvalidArchitecture)?;
     fs::create_dir_all(root)?;
     let _lock = ManagerLock::acquire(root)?;
+    if root.join("state/update-pending.json").try_exists()? {
+        return Err(InstallError::Busy);
+    }
     let prepared = prepare_archive_locked(
         root,
         archive_path,
@@ -305,13 +417,23 @@ fn activate_bundle_locked(
         },
     };
     write_slots_atomically(root, &slots)?;
-    prune_obsolete_releases(root, &slots);
+    if !root.join("state/update-pending.json").try_exists()? {
+        prune_obsolete_releases(root, &slots);
+    }
     Ok(slots)
 }
 
 /// Удалить выпуски, на которые больше не ссылаются слоты current/previous.
 /// Каталог `releases` принадлежит установщику; чужие или недописанные
 /// каталоги без совпадающего `release-id` не трогаем.
+pub(crate) fn cleanup_releases(root: &Path) -> Result<(), InstallError> {
+    let _lock = ManagerLock::acquire(root)?;
+    if let Some(slots) = read_install_slots(root)? {
+        prune_obsolete_releases(root, &slots);
+    }
+    Ok(())
+}
+
 fn prune_obsolete_releases(root: &Path, slots: &InstallSlots) {
     let releases = root.join("releases");
     let Ok(entries) = fs::read_dir(&releases) else {
@@ -459,7 +581,11 @@ fn copy_archive(source: &Path, destination: &Path) -> Result<(), InstallError> {
     Ok(())
 }
 
-fn extract_bundle<R: Read>(reader: R, destination: &Path) -> Result<(), InstallError> {
+fn extract_bundle<R: Read>(
+    reader: R,
+    destination: &Path,
+    max_expanded: u64,
+) -> Result<(), InstallError> {
     let decoder = GzDecoder::new(reader);
     let mut archive = Archive::new(decoder);
     archive.set_preserve_permissions(false);
@@ -510,7 +636,7 @@ fn extract_bundle<R: Read>(reader: R, destination: &Path) -> Result<(), InstallE
         expanded = expanded
             .checked_add(size)
             .ok_or(InstallError::ArchiveExpandedTooLarge)?;
-        if expanded > ARCHIVE_MAX_EXPANDED_BYTES {
+        if expanded > max_expanded {
             return Err(InstallError::ArchiveExpandedTooLarge);
         }
         entry.set_mask(0o7022);
@@ -555,6 +681,18 @@ fn validate_archive_path(path: &Path) -> Result<PathBuf, InstallError> {
 pub fn rollback(root: &Path) -> Result<InstallSlots, InstallError> {
     fs::create_dir_all(root)?;
     let _lock = ManagerLock::acquire(root)?;
+    if root.join("state/update-pending.json").try_exists()? {
+        return Err(InstallError::Busy);
+    }
+    rollback_locked(root)
+}
+
+pub(crate) fn rollback_during_update(root: &Path) -> Result<InstallSlots, InstallError> {
+    let _lock = ManagerLock::acquire(root)?;
+    rollback_locked(root)
+}
+
+fn rollback_locked(root: &Path) -> Result<InstallSlots, InstallError> {
     let current = read_install_slots(root)?.ok_or(InstallError::NoPreviousRelease)?;
     let previous = current.previous.ok_or(InstallError::NoPreviousRelease)?;
     ensure_release_dir(root, &previous)?;
@@ -589,7 +727,9 @@ pub(crate) fn activate_previous_release(
         previous: Some(current.current),
     };
     write_slots_atomically(root, &slots)?;
-    prune_obsolete_releases(root, &slots);
+    if !root.join("state/update-pending.json").try_exists()? {
+        prune_obsolete_releases(root, &slots);
+    }
     Ok(Some(slots))
 }
 
@@ -887,7 +1027,7 @@ fn valid_release_id(value: &str) -> bool {
     validate_token(value, "release_id", 128).is_ok()
 }
 
-fn sync_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 

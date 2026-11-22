@@ -1,9 +1,10 @@
 use r2o_manager::{
-    activate_bundle, activate_staged_update, active_component_path, check_update,
+    activate_bundle, active_component_path, cancel_router_update, check_update,
     config::initialize_config, decode_public_key, finish_router_update, install_archive,
-    install_update, install_update_auto, mark_bad_previous_release, read_install_architecture,
-    rollback, set_auto_update, stage_update, stage_update_auto, verify_release_archive,
+    mark_bad_previous_release, read_install_architecture, recover_router_update, rollback,
+    run_router_update, set_auto_update, verify_release_archive,
 };
+use r2o_manager::{run_update_schedule, watch_router_update};
 use serde_json::json;
 use std::error::Error;
 use std::fs::File;
@@ -35,12 +36,22 @@ fn run() -> Result<(), Box<dyn Error>> {
     match command.to_str() {
         Some("verify-release") => verify_release_command(args),
         Some("install-archive") => install_archive_command(args),
-        Some("update-check") => update_command(args, false, false),
-        Some("update-install") => update_command(args, true, false),
-        Some("update-install-auto") => update_command(args, true, true),
-        Some("update-stage") => stage_command(args, false),
-        Some("update-stage-auto") => stage_command(args, true),
-        Some("update-activate") => activate_command(args),
+        Some("update-watch") => {
+            let root = PathBuf::from(args.next().ok_or_else(usage_error)?);
+            let service = PathBuf::from(args.next().ok_or_else(usage_error)?);
+            if args.next().is_some() {
+                return Err(usage_error());
+            }
+            watch_router_update(&root, &service).map_err(Into::into)
+        }
+        Some("update-schedule") => schedule_command(args),
+        Some("update-check") => update_command(args, false, false, false),
+        Some("update-install") => update_command(args, true, false, false),
+        Some("update-install-auto") => update_command(args, true, true, false),
+        Some("update-rollback") => update_command(args, true, false, true),
+        Some("update-recover") => recover_router_update(&root_only(args)?).map_err(Into::into),
+        Some("update-cancel") => cancel_router_update(&root_only(args)?).map_err(Into::into),
+        Some("update-ping-panel") => ping_panel(args),
         Some("update-runtime-ok") => finish_command(args, true),
         Some("update-runtime-error") => finish_command(args, false),
         Some("update-auto") => update_auto_command(args),
@@ -95,8 +106,12 @@ fn update_command(
     mut args: impl Iterator<Item = std::ffi::OsString>,
     install: bool,
     automatic: bool,
+    previous: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut root = None;
+    let mut adapter = None;
+    let mut release = None;
+    let mut source = None;
     let mut architecture: Option<String> = None;
     while let Some(option) = args.next() {
         let value = args
@@ -104,6 +119,19 @@ fn update_command(
             .ok_or_else(|| format!("missing value for {}", option.to_string_lossy()))?;
         match option.to_str() {
             Some("--root") => set_once(&mut root, PathBuf::from(value), "--root")?,
+            Some("--service") if install => {
+                set_once(&mut adapter, PathBuf::from(value), "--service")?
+            }
+            Some("--release") if install && !automatic && !previous => set_once(
+                &mut release,
+                value.into_string().map_err(|_| "неверный id выпуска")?,
+                "--release",
+            )?,
+            Some("--source") if install && !automatic && !previous => set_once(
+                &mut source,
+                value.into_string().map_err(|_| "неверный источник")?,
+                "--source",
+            )?,
             Some("--architecture") => set_once(
                 &mut architecture,
                 value
@@ -120,10 +148,17 @@ fn update_command(
         None => read_install_architecture(&root)?
             .ok_or("missing --architecture and no active release records one")?,
     };
-    let result = if install && automatic {
-        install_update_auto(&root, &architecture)?
-    } else if install {
-        install_update(&root, &architecture)?
+    let result = if install {
+        let adapter = adapter.unwrap_or_else(|| PathBuf::from("/opt/etc/init.d/S99r2o"));
+        run_router_update(
+            &root,
+            &adapter,
+            &architecture,
+            automatic,
+            release.as_deref(),
+            source.as_deref(),
+            previous,
+        )?
     } else {
         check_update(&root, &architecture)?
     };
@@ -131,59 +166,82 @@ fn update_command(
     Ok(())
 }
 
-fn stage_command(
+fn schedule_command(
     mut args: impl Iterator<Item = std::ffi::OsString>,
-    automatic: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut root = None;
-    let mut architecture: Option<String> = None;
+    let mut adapter = None;
+    let mut enabled = None;
     while let Some(option) = args.next() {
-        let value = args
-            .next()
-            .ok_or_else(|| format!("missing value for {}", option.to_string_lossy()))?;
+        let value = args.next().ok_or_else(usage_error)?;
         match option.to_str() {
             Some("--root") => set_once(&mut root, PathBuf::from(value), "--root")?,
-            Some("--architecture") => set_once(
-                &mut architecture,
-                value
-                    .into_string()
-                    .map_err(|_| "architecture must be UTF-8")?,
-                "--architecture",
-            )?,
-            _ => return Err(format!("unknown option: {}", option.to_string_lossy()).into()),
+            Some("--service") => set_once(&mut adapter, PathBuf::from(value), "--service")?,
+            Some("--enabled") => {
+                let enabled_value = match value.to_str() {
+                    Some("0") => false,
+                    Some("1") => true,
+                    _ => return Err(usage_error()),
+                };
+                set_once(&mut enabled, enabled_value, "--enabled")?;
+            }
+            _ => return Err(usage_error()),
         }
     }
-    let root = required(root, "--root")?;
-    let architecture = match architecture {
-        Some(value) => value,
-        None => read_install_architecture(&root)?
-            .ok_or("missing --architecture and no active release records one")?,
-    };
-    let result = if automatic {
-        stage_update_auto(&root, &architecture)?
-    } else {
-        stage_update(&root, &architecture)?
-    };
-    println!("{}", serde_json::to_string(&result)?);
+    run_update_schedule(
+        &required(root, "--root")?,
+        &required(adapter, "--service")?,
+        enabled.unwrap_or(true),
+    )?;
     Ok(())
 }
 
-fn activate_command(
+fn root_only(
     mut args: impl Iterator<Item = std::ffi::OsString>,
-) -> Result<(), Box<dyn Error>> {
-    let mut root = None;
-    while let Some(option) = args.next() {
-        let value = args
-            .next()
-            .ok_or_else(|| format!("missing value for {}", option.to_string_lossy()))?;
-        match option.to_str() {
-            Some("--root") => set_once(&mut root, PathBuf::from(value), "--root")?,
-            _ => return Err(format!("unknown option: {}", option.to_string_lossy()).into()),
-        }
+) -> Result<PathBuf, Box<dyn Error>> {
+    if args.next().as_deref().and_then(std::ffi::OsStr::to_str) != Some("--root") {
+        return Err(usage_error());
     }
-    let root = required(root, "--root")?;
-    let result = activate_staged_update(&root)?;
-    println!("{}", serde_json::to_string(&result)?);
+    let path = PathBuf::from(args.next().ok_or("не задан --root")?);
+    if args.next().is_some() {
+        return Err(usage_error());
+    }
+    Ok(path)
+}
+
+fn ping_panel(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+    use std::time::Duration;
+    let mut addr: SocketAddr = args
+        .next()
+        .ok_or("не задан адрес панели")?
+        .into_string()
+        .map_err(|_| "некорректный адрес панели")?
+        .parse()?;
+    if args.next().is_some() {
+        return Err(usage_error());
+    }
+    if addr.ip().is_unspecified() {
+        addr.set_ip(if addr.is_ipv4() {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        } else {
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        });
+    }
+    let timeout = Duration::from_secs(2);
+    let mut tcp = TcpStream::connect_timeout(&addr, timeout)?;
+    tcp.set_read_timeout(Some(timeout))?;
+    tcp.set_write_timeout(Some(timeout))?;
+    write!(
+        tcp,
+        "GET /api/update HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut line = String::new();
+    BufReader::new(tcp.take(512)).read_line(&mut line)?;
+    if line.split_ascii_whitespace().nth(1) != Some("200") {
+        return Err("HTTP API панели не готов".into());
+    }
     Ok(())
 }
 
@@ -504,11 +562,11 @@ fn usage() {
         "  install-archive --root DIR --archive FILE --manifest FILE --signature FILE --public-key FILE --architecture ARCH"
     );
     println!("  update-check --root DIR [--architecture ARCH]");
-    println!("  update-install --root DIR [--architecture ARCH]");
+    println!("  update-install --root DIR [--service PATH] [--release TAG] [--source SOURCE]");
+    println!("  update-rollback --root DIR [--service PATH]");
+    println!("  update-recover --root DIR");
+    println!("  update-cancel --root DIR");
     println!("  update-install-auto --root DIR [--architecture ARCH]");
-    println!("  update-stage --root DIR [--architecture ARCH]");
-    println!("  update-stage-auto --root DIR [--architecture ARCH]");
-    println!("  update-activate --root DIR");
     println!("  update-mark-bad-previous --root DIR");
     println!("  update-auto --root DIR --enabled 0|1");
     println!("  exec --root DIR --component NAME [-- ARGS...]");

@@ -1,6 +1,10 @@
 //! Строгая проверка подписанных метаданных выпусков r2o и архивов выпуска.
 
 pub mod config;
+pub use update::{
+    cancel_router_update, recover_router_update, run_router_update, run_update_schedule,
+    watch_router_update,
+};
 
 use base64::Engine as _;
 use ring::signature::{ED25519, UnparsedPublicKey};
@@ -24,11 +28,33 @@ pub struct ReleaseManifest {
     pub version: String,
     pub notes: String,
     pub assets: BTreeMap<String, ReleaseAsset>,
+    pub metadata: Option<ReleaseMetadata>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReleaseAsset {
     pub sha256: String,
+    pub bytes: Option<u64>,
+    pub expanded: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseMetadata {
+    pub format: u32,
+    pub state_format: u32,
+    pub config_format: u32,
+    pub commit: String,
+    pub title: String,
+    pub created_utc: u64,
+    pub sequence: u64,
+    pub r2_url: Option<String>,
+}
+
+impl ReleaseManifest {
+    pub(crate) fn sequence(&self) -> u64 {
+        self.metadata.as_ref().map_or(0, |meta| meta.sequence)
+    }
 }
 
 #[derive(Debug)]
@@ -92,6 +118,7 @@ struct RawManifest {
     version: String,
     notes: String,
     assets: UniqueAssets,
+    metadata: Option<ReleaseMetadata>,
 }
 
 struct UniqueAssets(BTreeMap<String, RawAsset>);
@@ -132,6 +159,8 @@ impl<'de> Deserialize<'de> for UniqueAssets {
 #[serde(deny_unknown_fields)]
 struct RawAsset {
     sha256: String,
+    bytes: Option<u64>,
+    expanded: Option<u64>,
 }
 
 /// Сначала проверить точные байты манифеста, затем разобрать их. Производные
@@ -145,16 +174,43 @@ pub fn verify_manifest(
     if manifest_bytes.len() > MANIFEST_MAX_BYTES {
         return Err(VerifyError::ManifestTooLarge);
     }
+    verify_signature(manifest_bytes, signature, public_key)?;
+    let raw: RawManifest = serde_json::from_slice(manifest_bytes)
+        .map_err(|error| VerifyError::InvalidManifest(error.to_string()))?;
+    validate_manifest(raw)
+}
+
+fn verify_signature(bytes: &[u8], signature: &[u8], public_key: &[u8]) -> Result<(), VerifyError> {
     if signature.len() != SIGNATURE_BYTES {
         return Err(VerifyError::InvalidSignature);
     }
     let key = decode_public_key(public_key)?;
     UnparsedPublicKey::new(&ED25519, key)
-        .verify(manifest_bytes, signature)
-        .map_err(|_| VerifyError::InvalidSignature)?;
+        .verify(bytes, signature)
+        .map_err(|_| VerifyError::InvalidSignature)
+}
 
-    let raw: RawManifest = serde_json::from_slice(manifest_bytes)
-        .map_err(|error| VerifyError::InvalidManifest(error.to_string()))?;
+fn validate_manifest(raw: RawManifest) -> Result<ReleaseManifest, VerifyError> {
+    if let Some(meta) = &raw.metadata {
+        if meta.format != 2
+            || meta.state_format != 1
+            || meta.config_format != 1
+            || meta.sequence == 0
+            || meta.created_utc == 0
+            || meta.title.is_empty()
+            || meta.title.len() > 128
+            || meta.title.contains('\0')
+            || meta.commit.len() != 40
+            || !meta
+                .commit
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(VerifyError::InvalidManifest(
+                "неподдерживаемые метаданные выпуска".into(),
+            ));
+        }
+    }
     validate_token(&raw.release_id, "release_id", 128)?;
     if raw.version.is_empty() || raw.version.len() > 128 || raw.version.contains('\0') {
         return Err(VerifyError::InvalidManifest("invalid version".into()));
@@ -181,10 +237,24 @@ pub fn verify_manifest(
         {
             return Err(VerifyError::InvalidDigest);
         }
+        if raw.metadata.is_some()
+            && (!asset
+                .bytes
+                .is_some_and(|bytes| (1..=268_435_456).contains(&bytes))
+                || !asset
+                    .expanded
+                    .is_some_and(|bytes| (1..=268_435_456).contains(&bytes)))
+        {
+            return Err(VerifyError::InvalidManifest(
+                "недопустимый размер архива".into(),
+            ));
+        }
         assets.insert(
             arch,
             ReleaseAsset {
                 sha256: asset.sha256,
+                bytes: asset.bytes,
+                expanded: asset.expanded,
             },
         );
     }
@@ -194,6 +264,7 @@ pub fn verify_manifest(
         version: raw.version,
         notes: raw.notes,
         assets,
+        metadata: raw.metadata,
     })
 }
 
@@ -250,9 +321,8 @@ pub use install::{
     read_install_slots, rollback,
 };
 pub use update::{
-    UpdateError, activate_staged_update, check_update, finish_router_update, install_update,
-    install_update_auto, mark_bad_previous_release, set_auto_update, stage_update,
-    stage_update_auto,
+    UpdateError, check_update, finish_router_update,
+    mark_bad_previous_release, set_auto_update,
 };
 
 /// Принять сырые байты Ed25519, 64 шестнадцатеричных символа или PEM Ed25519 SPKI.

@@ -309,6 +309,13 @@ enable_supervisor() {
 }
 
 supervise() {
+    if [ -e "$ROOT/state/update-pending.json" ]; then
+        "$MANAGER" update-recover --root "$ROOT" || return 0
+        exec "$INIT" start
+    fi
+    if [ -f "$SCRIPT_DIR/update-schema" ] && [ -s "$ROOT/state/update.json" ]; then
+        "$MANAGER" update-recover --root "$ROOT" || return 0
+    fi
     [ ! -e "$SUPERVISOR_DISABLED" ] || return 0
     start
 }
@@ -663,14 +670,14 @@ update_scheduler_running() {
     case "$update_pid" in ''|*[!0-9]*) return 1 ;; esac
     kill -0 "$update_pid" 2>/dev/null || return 1
     update_cmdline=$(tr '\000' ' ' < "$PROC/$update_pid/cmdline" 2>/dev/null) || return 1
-    case "$update_cmdline" in *r2o-update-scheduler.sh*) return 0 ;; *) return 1 ;; esac
+    case "$update_cmdline" in *" update-schedule "*) return 0 ;; *) return 1 ;; esac
 }
 
 update_scheduler_start() {
     [ -x "$UPDATER" ] || return 0
     update_scheduler_running && return 0
     rm -f "$UPD_PID"
-    start-stop-daemon -S -b -m -p "$UPD_PID" -x "$UPDATER" -- run || return 1
+    start-stop-daemon -S -b -m -p "$UPD_PID" -x "$UPDATER" -- "$AUTOUPDATE" || return 1
     attempt=0
     while [ "$attempt" -lt 20 ]; do
         update_scheduler_running && return 0
@@ -1506,99 +1513,22 @@ stop() {
     update_scheduler_stop || say "не удалось остановить планировщик обновлений"
     telegram_stop || say "не удалось безопасно остановить Telegram"
     rt_proxy_stop full || say "не удалось полностью остановить rt-proxy RuTracker"
-    engine_stop
+    stop_rc=0
+    engine_stop || stop_rc=$?
     panel_stop
     log_maintenance_stop
-    "$FIREWALL" rst-down || say "не удалось снять RST таблицу firewall"
+    "$FIREWALL" rst-down || { stop_rc=1; say "не удалось снять RST таблицу firewall"; }
+    return "$stop_rc"
 }
 
-engine_health_once() {
-    engine_components_running && queue_bound "$QUEUE4" \
-        && { [ "$IPV6_ENABLED" = 0 ] || queue_bound "$QUEUE6"; } \
-        && { [ -z "$PANEL_LISTEN" ] \
-            || { component_running r2o-panel "$PN_PID" && [ -s "$RUNTIME/r2o-panel.health" ]; }; }
-}
-
-wait_health() {
-    attempt=0
-    while [ "$attempt" -lt 100 ]; do
-        if engine_health_once; then
-            sleep 60 2>/dev/null || sleep 1
-            engine_health_once && return 0
-            return 1
-        fi
-        attempt=$((attempt + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-    done
-    return 1
-}
-
-update_rollback() {
-    "$INIT" stop || true
-    "$MANAGER" rollback --root "$ROOT" || die "rollback не выполнен"
-    "$MANAGER" update-mark-bad-previous --root "$ROOT" >/dev/null || \
-        say "не удалось сохранить отказавший release для пропуска ночной повторной установки"
-    if "$INIT" start && wait_health; then
-        say "предыдущий release восстановлен"
-    else
-        die "предыдущий release восстановлен, но не прошёл runtime-проверку"
-    fi
-}
-
-update_install() {
-    update_mode=${1:-manual}
-    case "$update_mode" in
-        manual) manager_stage_command=update-stage ;;
-        auto) manager_stage_command=update-stage-auto ;;
-        *) return 2 ;;
-    esac
-    stage_result=$("$MANAGER" "$manager_stage_command" --root "$ROOT") || {
-        say "подготовка обновления не удалась; работающий release оставлен без изменений"
-        return 1
-    }
-    printf '%s\n' "$stage_result"
-    case "$stage_result" in
-        *'"staged":true'*) ;;
-        *'"already_current":true'*)
-            say "текущий release уже установлен; работающий runtime оставлен без перезапуска"
-            return 0
-            ;;
-        *)
-            say "менеджер обновления не подтвердил подготовку release"
-            return 1
-            ;;
-    esac
-    if ! stop; then
-        say "не удалось остановить runtime перед активацией; запускаю прежний release"
-        "$INIT" start || true
-        "$MANAGER" update-runtime-error --root "$ROOT" || true
-        return 1
-    fi
-    activate_result=$("$MANAGER" update-activate --root "$ROOT") || {
-        say "не удалось активировать подготовленный release; запускаю прежний"
-        "$INIT" start || true
-        "$MANAGER" update-runtime-error --root "$ROOT" || true
-        return 1
-    }
-    printf '%s\n' "$activate_result"
-    case "$activate_result" in
-        *'"activated":true'*) ;;
-        *)
-            say "менеджер обновления не подтвердил активацию release"
-            "$INIT" start || true
-            "$MANAGER" update-runtime-error --root "$ROOT" || true
-            return 1
-            ;;
-    esac
-    if "$INIT" start && wait_health; then
-        "$MANAGER" update-runtime-ok --root "$ROOT" || true
-        say "обновление запущено и прошло runtime-проверку"
-        return 0
-    fi
-    say "новый release не прошёл runtime-проверку; выполняю rollback"
-    "$MANAGER" update-runtime-error --root "$ROOT" || true
-    update_rollback
-    return 1
+update_health() {
+    engine_components_running && queue_bound "$QUEUE4" && [ -S "$SOCK4" ] && [ -s "$RUNTIME/live4.json" ] \
+        && { [ "$IPV6_ENABLED_RUNTIME" = 0 ] || { queue_bound "$QUEUE6" && [ -S "$SOCK6" ] && [ -s "$RUNTIME/live6.json" ]; }; } \
+        && "$FIREWALL" status && "$FIREWALL" dns-ensure \
+        && { [ -z "$PANEL_LISTEN" ] || "$MANAGER" update-ping-panel "$PANEL_LISTEN"; } \
+        && { [ "$TG_ENABLED" = 0 ] || telegram_ready; } \
+        && { [ -e "$META_DISABLED" ] || meta_dns_scheduler_running; } \
+        && firewall_watchdog_running && update_scheduler_running
 }
 
 status_d2k() {
@@ -1712,7 +1642,22 @@ status() {
 
 case "${1:-}" in
     "") echo "usage: $0 {start|stop|restart|supervise|status|engine-start|engine-stop|engine-restart|settings-restart|reapply|heal|firewall-heal|flowoffload-ensure|flowoffload-restore|ppe-ensure|ppe-remove|ppe-status|clear-found|telegram-enable|telegram-disable|telegram-restart|telegram-check|telegram-reapply|meta-protection-on|meta-protection-off|meta-dns-refresh|lists-refresh|meta-dns-remove|tg-heal|tg-stop-rules|update-check|update-install|update-install-auto|update-auto-on|update-auto-off|log-tick}" >&2; exit 2 ;;
-    start) start ;;
+    start)
+        if [ -e "$ROOT/state/update-pending.json" ]; then
+            "$MANAGER" update-recover --root "$ROOT" || exit 1
+            exec "$INIT" start
+        fi
+        if [ -f "$SCRIPT_DIR/update-schema" ]; then
+            "$MANAGER" update-recover --root "$ROOT" || exit 1
+        fi
+        start
+        ;;
+    update-start)
+        rm -f "$RUNTIME/live4.json" "$RUNTIME/live6.json"
+        start
+        ;;
+    update-stop) stop ;;
+    update-health) update_health ;;
     stop) stop ;;
     restart) stop && start ;;
     supervise) supervise ;;
@@ -1761,8 +1706,12 @@ case "${1:-}" in
     lists-refresh) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --refresh-lists ;;
     meta-dns-remove) "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --remove-meta-dns ;;
     update-check) "$MANAGER" update-check --root "$ROOT" ;;
-    update-install) update_install manual ;;
-    update-install-auto) update_install auto ;;
+    update-install|update-install-auto|update-rollback)
+        update_action=$1
+        shift
+        exec "$MANAGER" "$update_action" --root "$ROOT" --service "$INIT" "$@"
+        ;;
+    update-cancel) exec "$MANAGER" update-cancel --root "$ROOT" ;;
     update-auto-on) set_update_auto 1 ;;
     update-auto-off) set_update_auto 0 ;;
     clear-found) clear_found ;;
