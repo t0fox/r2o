@@ -696,7 +696,12 @@ case "$1" in
             exit 1
         fi
         ;;
-    update-stop|update-health) ;;
+    update-stop)
+        if [ -e '{dir}/fail-stop-base' ] && [ "$(sed -n '2p' '{root}/release-slots')" = r2o-base ]; then
+            exit 1
+        fi
+        ;;
+    update-health) ;;
     *) exit 2 ;;
 esac
 "#,
@@ -714,6 +719,7 @@ esac
         service.to_str().unwrap(),
     ];
 
+    fs::write(temp.0.join("fail-stop-base"), []).unwrap();
     fs::write(temp.0.join("hold"), []).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-manager"))
         .args(args)
@@ -793,6 +799,7 @@ esac
         "r2o-next"
     );
     fs::remove_file(temp.0.join("fail-base")).unwrap();
+    fs::remove_file(temp.0.join("fail-stop-base")).unwrap();
 
     json_output(invoke(&args));
     assert_eq!(
@@ -854,6 +861,15 @@ fn router_update_refuses_incompatible_state_before_service_changes() {
     assert_eq!(
         fs::read_to_string(catalog).unwrap(),
         r#"{"schema":2,"boxes":[]}"#
+    );
+    let status: Value =
+        serde_json::from_slice(&fs::read(root.join("state/update.json")).unwrap()).unwrap();
+    assert_eq!(status["last_ok"], false);
+    assert!(
+        status["last_message"]
+            .as_str()
+            .unwrap()
+            .contains("версия обученного каталога")
     );
     assert!(!root.join("state/update-pending.json").exists());
 }

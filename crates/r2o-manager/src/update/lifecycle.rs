@@ -197,14 +197,28 @@ pub fn watch_router_update(root: &Path, adapter: &Path) -> Result<(), UpdateErro
     let Some(tx) = pending(root)? else {
         return recover_idle(root);
     };
-    if !tx.committed && read_install_slots(root)?.is_some_and(|slots| slots.current == tx.target) {
-        service(adapter, "update-stop")?;
-    }
-    recover(
+    recover_running(
         root,
+        adapter,
         &tx,
         "Процесс обновления прерван, рабочий выпуск восстановлен",
-    )?;
+    )
+}
+
+fn recover_running(
+    root: &Path,
+    adapter: &Path,
+    tx: &Transaction,
+    reason: &str,
+) -> Result<(), UpdateError> {
+    if !tx.committed
+        && read_install_slots(root)?.is_some_and(|slots| slots.current == tx.target)
+        && let Err(error) = service(adapter, "update-stop")
+    {
+        // Ошибка остановки кандидата не должна оставлять его активным.
+        eprintln!("r2o-manager: остановка при восстановлении: {error}");
+    }
+    recover(root, tx, reason)?;
     service(adapter, "update-start")
 }
 
@@ -234,23 +248,28 @@ pub fn run_router_update(
 ) -> Result<Value, UpdateError> {
     let _guard = UpdateLock::named(root, "update-router.lock", true)?;
     if let Some(tx) = pending(root)? {
-        service(adapter, "update-stop")?;
-        recover(root, &tx, "Прерванная установка отменена")?;
-        service(adapter, "update-start")?;
+        recover_running(root, adapter, &tx, "Прерванная установка отменена")?;
     }
-    let old = read_install_slots(root)?.ok_or(crate::InstallError::NoActiveRelease)?;
-    check_compatible_slot(root, &old.current)?;
-    if read_install_architecture(root)?.as_deref() != Some(architecture) {
-        return Err(UpdateError::InvalidArchitecture);
-    }
-    check_catalog_schema(root)?;
-    let _watch = watch_command(root, adapter)?;
+    let preflight = (|| {
+        let old = read_install_slots(root)?.ok_or(crate::InstallError::NoActiveRelease)?;
+        check_compatible_slot(root, &old.current)?;
+        if read_install_architecture(root)?.as_deref() != Some(architecture) {
+            return Err(UpdateError::InvalidArchitecture);
+        }
+        check_catalog_schema(root)?;
+        Ok((old, watch_command(root, adapter)?))
+    })();
+    let (old, _watch) = report_preflight(root, release, preflight)?;
     {
         let _gate = UpdateLock::named(root, "update-cancel.lock", false)?;
         reset_cancel(root)?;
     }
     let result = if previous {
-        stage_previous(root, architecture, &old)?
+        report_preflight(
+            root,
+            old.previous.as_deref(),
+            stage_previous(root, architecture, &old),
+        )?
     } else {
         stage_update_with_policy(root, architecture, automatic, release, source)?
     };
@@ -307,16 +326,37 @@ pub fn run_router_update(
     match outcome {
         Ok(result) => Ok(result),
         Err(error) if pending(root)?.is_some_and(|tx| !tx.committed) => {
-            if read_install_slots(root)?.is_some_and(|slots| slots.current == tx.target) {
-                service(adapter, "update-stop")?;
-            }
-            recover(root, &tx, &error.to_string())?;
-            service(adapter, "update-start")?;
+            recover_running(root, adapter, &tx, &error.to_string())?;
             health(root, adapter, &tx.old)?;
             Err(error)
         }
         Err(error) => Err(error),
     }
+}
+
+fn report_preflight<T>(
+    root: &Path,
+    release: Option<&str>,
+    result: Result<T, UpdateError>,
+) -> Result<T, UpdateError> {
+    if let Err(error) = &result {
+        let persisted = (|| {
+            let _lock = UpdateLock::acquire(root)?;
+            let mut state = read_state(root)?;
+            state["busy"] = json!("");
+            state["phase"] = json!("check");
+            state["install_stage"] = json!(0);
+            state["last_utc"] = json!(now_epoch());
+            state["last_ok"] = json!(false);
+            state["last_release"] = json!(release);
+            state["last_message"] = json!(short_error(&error.to_string()));
+            write_state(root, &state)
+        })();
+        if let Err(write_error) = persisted {
+            eprintln!("r2o-manager: {write_error}");
+        }
+    }
+    result
 }
 
 fn save(root: &Path, tx: &Transaction) -> Result<(), UpdateError> {
