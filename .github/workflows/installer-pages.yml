@@ -26,9 +26,12 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: read
       pages: write
       id-token: write
+    env:
+      PAGES_ARTIFACT_NAME: github-pages-${{ github.run_attempt }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -46,8 +49,29 @@ jobs:
           python3 -B scripts/bootstrap-pins.py --pages "$GITHUB_SHA" site/get
           sh -n site/get
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
+      - id: upload
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # версия v5.0.0
         with:
+          name: ${{ env.PAGES_ARTIFACT_NAME }}
           path: site
+      - name: Дождаться регистрации артефакта Pages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact_id }}
+        run: |
+          : "${ARTIFACT_ID:?Загрузка не вернула ID артефакта Pages}"
+          for attempt in {1..10}; do
+            if gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+                -f name="$PAGES_ARTIFACT_NAME" --jq '.artifacts[] | select(.expired == false).id' |
+                grep -Fxq "$ARTIFACT_ID"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 10 ]; then sleep 3; fi
+          done
+          echo "::error::Артефакт Pages $ARTIFACT_ID не появился после загрузки"
+          exit 1
       - id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # версия v5.0.1
+        with:
+          artifact_name: ${{ env.PAGES_ARTIFACT_NAME }}

@@ -1170,13 +1170,20 @@ esac
   await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   assert.equal(await evaluate("performance.getEntriesByType('resource').some(item => item.name.includes('/assets/supporter'))"), false,
     "ресурсы страницы подгружаются только с логотипа");
-  const brandPoint = await evaluate(`(() => {
+  await evaluate("document.querySelector('.brand-mark').scrollIntoView({ block: 'nearest', behavior: 'instant' })");
+  await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  const brandPoint = await waitFor(() => evaluate(`(() => {
     const mark = document.querySelector(".brand-mark");
-    const rect = mark.getBoundingClientRect();
-    window.panelBrandFlow = mark.querySelector(".brand-flow").getAnimations()
+    const flow = mark.querySelector(".brand-flow").getAnimations()
       .find(animation => animation.animationName === "loop-flow");
-    return { x: rect.left + rect.width / 2 - 8, y: rect.top + rect.height / 2 };
-  })()`);
+    const transform = mark.getScreenCTM();
+    if (!transform || flow?.playState !== "running" || flow.pending) return null;
+    const stroke = document.querySelector("#r2o-loop").getPointAtLength(0);
+    const { x, y } = stroke.matrixTransform(transform);
+    if (!mark.contains(document.elementFromPoint(x, y))) return null;
+    window.panelBrandFlow = flow;
+    return { x, y };
+  })()`), "видимый логотип панели с работающей анимацией после смены размера экрана");
   const brandTime = await evaluate("panelBrandFlow.currentTime");
   await call("Input.dispatchMouseEvent", { type: "mouseMoved", ...brandPoint });
   await waitFor(() => evaluate("document.querySelector('.brand-mark[data-mark-repel] rect[data-flow-lit]') !== null"),
