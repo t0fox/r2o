@@ -92,6 +92,7 @@ pub async fn run() {
             direct_fallback: !config.rt_no_direct_fallback,
             verbose: config.verbose,
             health_spki_pin: config.rt_health_spki_pin.clone(),
+            health_file: config.health_file.clone(),
         };
         if let Err(error) = r2o_telegram::rt_proxy::run(settings).await {
             eprintln!("ошибка RuTracker-прокси: {error}");

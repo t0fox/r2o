@@ -15,8 +15,11 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::fs::OpenOptions;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -61,6 +64,7 @@ pub struct RtProxySettings {
     pub direct_fallback: bool,
     pub verbose: bool,
     pub health_spki_pin: Option<String>,
+    pub health_file: Option<PathBuf>,
 }
 
 impl Default for RtProxySettings {
@@ -86,6 +90,7 @@ impl Default for RtProxySettings {
             direct_fallback: true,
             verbose: false,
             health_spki_pin: None,
+            health_file: None,
         }
     }
 }
@@ -142,11 +147,22 @@ pub async fn run(settings: RtProxySettings) -> Result<(), String> {
     let listen = parse_listen(&settings.listen)?;
     let config = Arc::new(RtConfig { settings });
     let pool = Arc::new(ProxyPool::new(config.clone()));
-    tokio::spawn(health_loop(pool.clone()));
-
     let listener = TcpListener::bind(listen)
         .await
         .map_err(|error| format!("rt-proxy: listen {listen}: {error}"))?;
+    let listen = listener
+        .local_addr()
+        .map_err(|error| format!("rt-proxy: local_addr: {error}"))?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|error| format!("rt-proxy: SIGTERM: {error}"))?;
+    let _health_file = config
+        .settings
+        .health_file
+        .clone()
+        .map(|path| ListenerHealth::publish(path, listen))
+        .transpose()
+        .map_err(|error| format!("rt-proxy: health-file: {error}"))?;
+    let health_task = tokio::spawn(health_loop(pool.clone()));
     log(
         &config,
         &format!(
@@ -158,11 +174,23 @@ pub async fn run(settings: RtProxySettings) -> Result<(), String> {
     // Публичный CONNECT-пул blockme.site не выдерживает пачку параллельных
     // туннелей от Chrome: страница открывает 6+ соединений к static, пул
     // отвечает только части, остальные получают ERR_FAILED. Ограничиваем
-    // одновременные upstream-сессии, чтобы ассеты грузились очередью.
+    // одновременные установки upstream-сессий. Уже проверенный туннель
+    // освобождает слот, чтобы keep-alive одного клиента не блокировал другие.
     let upstream_limit = Arc::new(Semaphore::new(UPSTREAM_CONCURRENCY));
     let mut refused = 0_u64;
     loop {
-        let (client, peer) = match listener.accept().await {
+        let connection = tokio::select! {
+            connection = listener.accept() => connection,
+            _ = terminate.recv() => {
+                health_task.abort();
+                return Ok(());
+            }
+            _ = tokio::signal::ctrl_c() => {
+                health_task.abort();
+                return Ok(());
+            }
+        };
+        let (client, peer) = match connection {
             Ok(connection) => connection,
             Err(error) => {
                 log(&config, &format!("accept: {error}"));
@@ -200,6 +228,43 @@ pub async fn run(settings: RtProxySettings) -> Result<(), String> {
                 }
             }
         });
+    }
+}
+
+struct ListenerHealth {
+    path: PathBuf,
+    body: String,
+}
+
+impl ListenerHealth {
+    fn publish(path: PathBuf, listen: SocketAddr) -> io::Result<Self> {
+        let body = format!("R2ORT1 {} {listen}\n", std::process::id());
+        let temporary = PathBuf::from(format!("{}.tmp.{}", path.display(), std::process::id()));
+        let _ = std::fs::remove_file(&temporary);
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            std::io::Write::write_all(&mut file, body.as_bytes())?;
+            drop(file);
+            std::fs::rename(&temporary, &path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result?;
+        Ok(Self { path, body })
+    }
+}
+
+impl Drop for ListenerHealth {
+    fn drop(&mut self) {
+        // Не удаляем файл, который уже принадлежит новому слушателю.
+        if std::fs::read_to_string(&self.path).ok().as_deref() == Some(self.body.as_str()) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -489,11 +554,12 @@ async fn handle_client(
     if sni.is_empty() {
         return Err("в ClientHello нет SNI".to_string());
     }
-    let _upstream_permit = upstream_limit
+    let upstream_permit = upstream_limit
         .acquire()
         .await
         .map_err(|_| "upstream-лимит остановлен".to_string())?;
     if let Some((up, flight)) = dial_upstream(&pool, &sni, &hello, &config).await {
+        drop(upstream_permit);
         if config.settings.verbose {
             log(&config, &format!("{peer} -> {sni}:443 через upstream"));
         }
@@ -502,6 +568,7 @@ async fn handle_client(
     if config.settings.direct_fallback
         && let Some((up, flight)) = dial_direct(&sni, &hello, &config).await
     {
+        drop(upstream_permit);
         if config.settings.verbose {
             log(&config, &format!("{peer} -> {sni}:443 напрямую"));
         }
@@ -649,10 +716,7 @@ async fn dial_direct(
     sni: &str,
     hello: &[u8],
     config: &Arc<RtConfig>,
-) -> Option<(
-    BufReader<tokio_rustls::client::TlsStream<TcpStream>>,
-    Vec<u8>,
-)> {
+) -> Option<(BufReader<TcpStream>, Vec<u8>)> {
     if !direct_host_allowed(sni, &config.settings.direct_hosts) {
         log(
             config,
@@ -665,30 +729,35 @@ async fn dial_direct(
         if !routable_unicast(ip) {
             continue;
         }
-        let deadline = Instant::now() + DIAL_TIMEOUT;
-        let Ok(tcp) =
-            connect_marked(SocketAddr::new(ip, 443), config.settings.mark, DIAL_TIMEOUT).await
-        else {
-            continue;
-        };
-        let Ok(tls) = tls_connect(tcp, sni, false, remaining(deadline)).await else {
-            continue;
-        };
-        let mut up = BufReader::with_capacity(BUF_SIZE, tls);
-        if timeout(remaining(deadline), up.get_mut().write_all(hello))
-            .await
-            .is_err()
-        {
-            continue;
-        }
-        if let Some(flight) =
-            verify_first_flight(&mut up, FIRST_BYTE_TIMEOUT.min(remaining(deadline))).await
+        if let Some(up) =
+            dial_direct_address(SocketAddr::new(ip, 443), hello, config.settings.mark).await
         {
             log(config, &format!("{sni} обслужен напрямую через {ip}"));
-            return Some((up, flight));
+            return Some(up);
         }
     }
     None
+}
+
+async fn dial_direct_address(
+    address: SocketAddr,
+    hello: &[u8],
+    mark: u32,
+) -> Option<(BufReader<TcpStream>, Vec<u8>)> {
+    let deadline = Instant::now() + DIAL_TIMEOUT;
+    let tcp = connect_marked(address, mark, remaining(deadline))
+        .await
+        .ok()?;
+    // TLS устанавливает сам клиент с конечным сервером. Дополнительный
+    // TLS здесь превратил бы ClientHello в прикладные данные другого
+    // TLS-сеанса, тогда как сервер уже ждёт HTTP-запрос.
+    let mut up = BufReader::with_capacity(BUF_SIZE, tcp);
+    timeout(remaining(deadline), up.get_mut().write_all(hello))
+        .await
+        .ok()?
+        .ok()?;
+    let flight = verify_first_flight(&mut up, FIRST_BYTE_TIMEOUT.min(remaining(deadline))).await?;
+    Some((up, flight))
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,12 +1220,15 @@ fn base64_encode(bytes: &[u8]) -> String {
 // splice с half-close и idle-watchdog
 // ---------------------------------------------------------------------------
 
-async fn splice(
+async fn splice<S>(
     client: TcpStream,
-    up: BufReader<tokio_rustls::client::TlsStream<TcpStream>>,
+    up: BufReader<S>,
     flight: Vec<u8>,
     config: Arc<RtConfig>,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (client_read, client_write) = client.into_split();
     let (up_read, up_write) = tokio::io::split(up);
     let up_read = PrefixReader::new(flight, up_read);
@@ -1264,6 +1336,379 @@ fn epoch_seconds() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::TlsAcceptor;
+
+    fn health_test_path() -> PathBuf {
+        static NEXT_PATH: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "r2o-rt-ready-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[tokio::test]
+    async fn local_health_is_published_after_bind_without_a_live_upstream() {
+        let path = health_test_path();
+        let server = tokio::spawn(run(RtProxySettings {
+            listen: "127.0.0.1:0".to_string(),
+            proxy_host: "invalid..proxy".to_string(),
+            proxy_port: 0,
+            health_file: Some(path.clone()),
+            ..Default::default()
+        }));
+        let body = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(body) = std::fs::read_to_string(&path) {
+                    break body;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("локальная готовность не должна ждать DNS или внешнего пула");
+        let fields = body.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0], "R2ORT1");
+        assert_eq!(fields[1], std::process::id().to_string());
+        let listen = fields[2].parse::<SocketAddr>().unwrap();
+        assert_ne!(listen.port(), 0);
+        let client = TcpStream::connect(listen).await.unwrap();
+        drop(client);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert!(
+            !path.exists(),
+            "завершённый слушатель должен убрать готовность"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_failure_never_publishes_local_health() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let path = health_test_path();
+        let result = run(RtProxySettings {
+            listen: listener.local_addr().unwrap().to_string(),
+            health_file: Some(path.clone()),
+            ..Default::default()
+        })
+        .await;
+        assert!(result.unwrap_err().contains("listen"));
+        assert!(!path.exists());
+    }
+
+    fn tunnel_test_tls() -> (Arc<rustls::ServerConfig>, Arc<ClientConfig>) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certificate =
+            rcgen::generate_simple_self_signed(vec!["rutracker.org".to_string()]).unwrap();
+        let leaf = CertificateDer::from(certificate.serialize_der().unwrap());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(leaf.clone()).unwrap();
+        let mut server = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf], key)
+            .unwrap();
+        server.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let client = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        (Arc::new(server), Arc::new(client))
+    }
+
+    async fn transparent_tls_roundtrip(via_connect: bool) {
+        let (server_tls, client_tls) = tunnel_test_tls();
+        let upload = (0..96 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let download = (0..128 * 1024)
+            .map(|index| (250 - index % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut request = format!(
+            "POST /echo HTTP/1.1\r\nHost: rutracker.org\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            upload.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&upload);
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            download.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&download);
+
+        let origin_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let origin_address = origin_listener.local_addr().unwrap();
+        let origin_tls = server_tls.clone();
+        let origin_response = response.clone();
+        let origin = tokio::spawn(async move {
+            let (socket, _) = origin_listener.accept().await.unwrap();
+            let mut tls = TlsAcceptor::from(origin_tls).accept(socket).await.unwrap();
+            assert_eq!(tls.get_ref().1.server_name(), Some("rutracker.org"));
+            let mut received = Vec::new();
+            // Ответ после EOF проверяет, что half-close клиента не обрывает
+            // обратное направление прозрачного туннеля.
+            tls.read_to_end(&mut received).await.unwrap();
+            tls.write_all(&origin_response).await.unwrap();
+            tls.shutdown().await.unwrap();
+            received
+        });
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listen_address = listener.local_addr().unwrap();
+        let mut upstream = None;
+        let proxy = if via_connect {
+            let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let upstream_address = upstream_listener.local_addr().unwrap();
+            upstream = Some(tokio::spawn(async move {
+                let (socket, _) = upstream_listener.accept().await.unwrap();
+                let tls = TlsAcceptor::from(server_tls).accept(socket).await.unwrap();
+                assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
+                let mut tunnel = BufReader::new(tls);
+                let line = read_line(&mut tunnel, Duration::from_secs(5))
+                    .await
+                    .unwrap();
+                assert_eq!(line, b"CONNECT rutracker.org:443 HTTP/1.1\r\n");
+                assert!(drain_headers(&mut tunnel, Duration::from_secs(5)).await);
+                tunnel
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .unwrap();
+                let mut origin = TcpStream::connect(origin_address).await.unwrap();
+                tokio::io::copy_bidirectional(&mut tunnel, &mut origin)
+                    .await
+                    .unwrap()
+            }));
+            let config = Arc::new(RtConfig {
+                settings: RtProxySettings {
+                    proxy_host: "connect.r2o.test".to_string(),
+                    proxy_port: upstream_address.port(),
+                    direct_fallback: false,
+                    idle_timeout: Duration::from_secs(5),
+                    ..Default::default()
+                },
+            });
+            let pool = Arc::new(ProxyPool::new(config.clone()));
+            pool.state.lock().unwrap().live = vec![upstream_address.ip()];
+            tokio::spawn(async move {
+                let (client, peer) = listener.accept().await.unwrap();
+                handle_client(client, peer, pool, Arc::new(Semaphore::new(1)), config)
+                    .await
+                    .unwrap();
+            })
+        } else {
+            tokio::spawn(async move {
+                let (mut client, _) = listener.accept().await.unwrap();
+                let (sni, hello) = peek_client_hello(&mut client).await.unwrap();
+                assert_eq!(sni, "rutracker.org");
+                // Проверяется низкоуровневый transport после production
+                // allowlist/DNS-фильтра: loopback не добавляется в разрешённые IP.
+                let (up, flight) = dial_direct_address(origin_address, &hello, 0)
+                    .await
+                    .expect("прямой TCP должен передать исходный ClientHello");
+                splice(
+                    client,
+                    up,
+                    flight,
+                    Arc::new(RtConfig {
+                        settings: RtProxySettings {
+                            idle_timeout: Duration::from_secs(5),
+                            ..Default::default()
+                        },
+                    }),
+                )
+                .await
+                .unwrap();
+            })
+        };
+
+        let socket = TcpStream::connect(listen_address).await.unwrap();
+        let mut client = TlsConnector::from(client_tls)
+            .connect(ServerName::try_from("rutracker.org").unwrap(), socket)
+            .await
+            .expect("конечный клиент проверяет сертификат origin через прозрачный туннель");
+        client.write_all(&request).await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).await.unwrap();
+        assert_eq!(received, response);
+        assert_eq!(origin.await.unwrap(), request);
+        proxy.await.unwrap();
+        if let Some(upstream) = upstream {
+            let (to_origin, from_origin) = upstream.await.unwrap();
+            assert!(to_origin > upload.len() as u64);
+            assert!(from_origin > download.len() as u64);
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_tunnel_preserves_client_tls_and_bidirectional_half_close() {
+        timeout(Duration::from_secs(15), transparent_tls_roundtrip(false))
+            .await
+            .expect("прямой TLS-туннель не должен зависать");
+    }
+
+    #[tokio::test]
+    async fn https_connect_tunnel_preserves_client_tls_and_bidirectional_half_close() {
+        timeout(Duration::from_secs(15), transparent_tls_roundtrip(true))
+            .await
+            .expect("HTTPS CONNECT-туннель не должен зависать");
+    }
+
+    #[tokio::test]
+    async fn established_keep_alive_tunnel_does_not_block_another_client() {
+        timeout(Duration::from_secs(12), async {
+            let (server_tls, client_tls) = tunnel_test_tls();
+            let origin_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let origin_address = origin_listener.local_addr().unwrap();
+            let first_closed = Arc::new(AtomicUsize::new(0));
+            let observed_first_closed = first_closed.clone();
+            let origin_tls = server_tls.clone();
+            let first_response =
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: keep-alive\r\n\r\n1";
+            let second_response =
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n2";
+            let origin = tokio::spawn(async move {
+                let mut connections = JoinSet::new();
+                for _ in 0..2 {
+                    let (socket, _) = origin_listener.accept().await.unwrap();
+                    let tls = origin_tls.clone();
+                    let first_closed = observed_first_closed.clone();
+                    connections.spawn(async move {
+                        let tls = TlsAcceptor::from(tls).accept(socket).await.unwrap();
+                        let mut tls = BufReader::new(tls);
+                        let request = read_line(&mut tls, Duration::from_secs(5)).await.unwrap();
+                        assert!(drain_headers(&mut tls, Duration::from_secs(5)).await);
+                        if request == b"GET /first HTTP/1.1\r\n" {
+                            tls.write_all(first_response).await.unwrap();
+                            tls.flush().await.unwrap();
+                            let mut remaining = Vec::new();
+                            tls.read_to_end(&mut remaining).await.unwrap();
+                            first_closed.store(1, Ordering::SeqCst);
+                        } else {
+                            assert_eq!(request, b"GET /second HTTP/1.1\r\n");
+                            tls.write_all(second_response).await.unwrap();
+                        }
+                        tls.shutdown().await.unwrap();
+                    });
+                }
+                while let Some(result) = connections.join_next().await {
+                    result.unwrap();
+                }
+            });
+
+            let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let upstream_address = upstream_listener.local_addr().unwrap();
+            let upstream = tokio::spawn(async move {
+                let mut connections = JoinSet::new();
+                for _ in 0..2 {
+                    let (socket, _) = upstream_listener.accept().await.unwrap();
+                    let tls = server_tls.clone();
+                    connections.spawn(async move {
+                        let tls = TlsAcceptor::from(tls).accept(socket).await.unwrap();
+                        let mut tunnel = BufReader::new(tls);
+                        let line = read_line(&mut tunnel, Duration::from_secs(5))
+                            .await
+                            .unwrap();
+                        assert_eq!(line, b"CONNECT rutracker.org:443 HTTP/1.1\r\n");
+                        assert!(drain_headers(&mut tunnel, Duration::from_secs(5)).await);
+                        tunnel.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+                        let mut origin = TcpStream::connect(origin_address).await.unwrap();
+                        tokio::io::copy_bidirectional(&mut tunnel, &mut origin)
+                            .await
+                            .unwrap();
+                    });
+                }
+                while let Some(result) = connections.join_next().await {
+                    result.unwrap();
+                }
+            });
+            let config = Arc::new(RtConfig {
+                settings: RtProxySettings {
+                    proxy_host: "connect.r2o.test".to_string(),
+                    proxy_port: upstream_address.port(),
+                    direct_fallback: false,
+                    idle_timeout: Duration::from_secs(30),
+                    ..Default::default()
+                },
+            });
+            let pool = Arc::new(ProxyPool::new(config.clone()));
+            pool.state.lock().unwrap().live = vec![upstream_address.ip()];
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let proxy = tokio::spawn(async move {
+                let limit = Arc::new(Semaphore::new(UPSTREAM_CONCURRENCY));
+                let mut clients = JoinSet::new();
+                for _ in 0..2 {
+                    let (client, peer) = listener.accept().await.unwrap();
+                    clients.spawn(handle_client(
+                        client,
+                        peer,
+                        pool.clone(),
+                        limit.clone(),
+                        config.clone(),
+                    ));
+                }
+                while let Some(result) = clients.join_next().await {
+                    result.unwrap().unwrap();
+                }
+            });
+            let connector = TlsConnector::from(client_tls);
+            let mut first = connector
+                .connect(
+                    ServerName::try_from("rutracker.org").unwrap(),
+                    TcpStream::connect(address).await.unwrap(),
+                )
+                .await
+                .unwrap();
+            first
+                .write_all(
+                    b"GET /first HTTP/1.1\r\nHost: rutracker.org\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut first_reply = vec![0; first_response.len()];
+            first.read_exact(&mut first_reply).await.unwrap();
+            assert_eq!(first_reply, first_response);
+
+            // Первый TLS/HTTP-сеанс остаётся открытым всё время второго
+            // запроса. Ограничение установки туннелей не должно удерживаться
+            // до закрытия keep-alive или истечения его idle-тайм-аута.
+            timeout(Duration::from_secs(5), async {
+                let mut second = connector
+                    .connect(
+                        ServerName::try_from("rutracker.org").unwrap(),
+                        TcpStream::connect(address).await.unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                second
+                    .write_all(
+                        b"GET /second HTTP/1.1\r\nHost: rutracker.org\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                let mut response = Vec::new();
+                second.read_to_end(&mut response).await.unwrap();
+                assert_eq!(response, second_response);
+            })
+            .await
+            .expect("другой клиент должен получить HTTPS-ответ при живом первом туннеле");
+            assert_eq!(first_closed.load(Ordering::SeqCst), 0);
+            first.shutdown().await.unwrap();
+            let mut tail = Vec::new();
+            first.read_to_end(&mut tail).await.unwrap();
+            assert!(tail.is_empty());
+            origin.await.unwrap();
+            upstream.await.unwrap();
+            proxy.await.unwrap();
+        })
+        .await
+        .expect("параллельные HTTPS-сеансы должны завершиться");
+    }
 
     #[test]
     fn duration_parser_supports_go_units() {

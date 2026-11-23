@@ -290,7 +290,7 @@ pub struct Config {
     )]
     pub stats_socket_path: PathBuf,
 
-    /// D2O-совместимый heartbeat-файл для Telegram watchdog.
+    /// Heartbeat Telegram watchdog; в режиме --rt-proxy — локальная готовность слушателя.
     #[arg(long = "health-file", env = "TG_HEALTH_FILE")]
     pub health_file: Option<PathBuf>,
 
