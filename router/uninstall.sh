@@ -82,6 +82,7 @@ esac
 ACTIVE_SCRIPT=$ROOT/releases/$ACTIVE/router/S99r2o
 ACTIVE_NDM_HOOK=$ROOT/releases/$ACTIVE/router/001-r2o.sh
 OWNED_SHIM=0
+STOP_FAILED=0
 emergency_stop() {
     # D2O uninstall продолжает удаление, даже если init уже снят. Останавливаем
     # только собственные PID-файлы, не трогая чужие процессы.
@@ -108,11 +109,40 @@ if [ -e "$INIT_SCRIPT" ]; then
     cmp -s "$INIT_SCRIPT" "$EXPECTED_SHIM" || fail "shim автозапуска не совпадает с активным выпуском"
     [ -x "$INIT_SCRIPT" ] || fail "shim автозапуска не исполняемый"
     OWNED_SHIM=1
-    "$INIT_SCRIPT" stop || echo "r2o uninstall: остановка через shim вернула ошибку — продолжаю удаление" >&2
+    R2O_DIR=$ROOT "$INIT_SCRIPT" stop || STOP_FAILED=1
 elif [ ! -L "$ACTIVE_SCRIPT" ] && [ -f "$ACTIVE_SCRIPT" ] && [ -x "$ACTIVE_SCRIPT" ]; then
-    R2O_DIR=$ROOT "$ACTIVE_SCRIPT" stop || echo "r2o uninstall: остановка активного выпуска вернула ошибку — продолжаю удаление" >&2
+    R2O_DIR=$ROOT "$ACTIVE_SCRIPT" stop || STOP_FAILED=1
 else
     echo "r2o uninstall: адаптер службы не найден — аварийная остановка по PID-файлам" >&2
+    STOP_FAILED=1
+fi
+
+# При недоступном NDM/UCI нельзя удалять журнал владения и прокси, пока DNS
+# продолжает выдавать sentinel. Повторный clear безопасен после обычного stop.
+RT_DNS_ADAPTER=$ROOT/releases/$ACTIVE/router/r2o-rt-dns.sh
+if [ ! -e "$RT_DNS_ADAPTER" ] && [ ! -L "$RT_DNS_ADAPTER" ]; then
+    RT_DNS_ADAPTER=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/r2o-rt-dns.sh
+fi
+if [ -e "$RT_DNS_ADAPTER" ] || [ -L "$RT_DNS_ADAPTER" ]; then
+    [ -f "$RT_DNS_ADAPTER" ] && [ ! -L "$RT_DNS_ADAPTER" ] && [ -x "$RT_DNS_ADAPTER" ] \
+        || fail 'адаптер очистки RuTracker DNS повреждён; установка сохранена'
+    R2O_DIR=$ROOT R2O_CONFIG=${R2O_CONFIG:-$ROOT/config} "$RT_DNS_ADAPTER" clear \
+        || fail 'RuTracker DNS не снят; прокси, конфигурация и журнал сохранены для повторного удаления'
+elif [ -e "$ROOT/state/rt-dns/backend" ]; then
+    fail 'нет адаптера очистки RuTracker DNS; установка и журнал сохранены'
+fi
+RT_FIREWALL_ADAPTER=$ROOT/releases/$ACTIVE/router/r2o-rt-firewall.sh
+if [ ! -e "$RT_FIREWALL_ADAPTER" ] && [ ! -L "$RT_FIREWALL_ADAPTER" ]; then
+    RT_FIREWALL_ADAPTER=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/r2o-rt-firewall.sh
+fi
+if [ -e "$RT_FIREWALL_ADAPTER" ] || [ -L "$RT_FIREWALL_ADAPTER" ]; then
+    [ -f "$RT_FIREWALL_ADAPTER" ] && [ ! -L "$RT_FIREWALL_ADAPTER" ] && [ -x "$RT_FIREWALL_ADAPTER" ] \
+        || fail 'адаптер очистки RuTracker firewall повреждён; установка сохранена'
+    R2O_DIR=$ROOT R2O_CONFIG=${R2O_CONFIG:-$ROOT/config} "$RT_FIREWALL_ADAPTER" stop \
+        || fail 'RuTracker firewall не снят; установка сохранена для повторного удаления'
+fi
+if [ "$STOP_FAILED" = 1 ]; then
+    echo 'r2o uninstall: DNS очищен; завершаю оставшиеся процессы по PID-файлам' >&2
     emergency_stop
 fi
 
