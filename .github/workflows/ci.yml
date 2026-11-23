@@ -141,12 +141,12 @@ jobs:
             if [ "$test_name" = test-router-openwrt-init.sh ]; then
               test_shell='bash'
             fi
+            status=0
             if [ "$test_name" = test-router-firewall.sh ] || [ "$test_name" = test-router-dns-route-netns.sh ]; then
-              sudo sh "$test"
+              sudo sh "$test" || status=$?
             else
-              "$test_shell" "$test"
+              "$test_shell" "$test" || status=$?
             fi
-            status=$?
             if [ "$status" -ne 0 ]; then
               failed+=("$test ($status)")
             fi

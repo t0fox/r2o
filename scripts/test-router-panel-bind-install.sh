@@ -14,6 +14,8 @@ cp "$ROOT/router/select-panel-ip.sh" "$BUNDLE/router/select-panel-ip.sh"
 cp "$ROOT/router/r2o-firewall-fw3-include.sh" "$BUNDLE/router/r2o-firewall-fw3-include.sh"
 cp "$ROOT/router/001-r2o.sh" "$BUNDLE/router/001-r2o.sh"
 cp "$ROOT/router/r2o-ppe-deoffload.sh" "$BUNDLE/router/r2o-ppe-deoffload.sh"
+cp "$ROOT/router/r2o-rt-firewall.sh" "$BUNDLE/router/r2o-rt-firewall.sh"
+cp "$ROOT/router/r2o-rt-dns.sh" "$BUNDLE/router/r2o-rt-dns.sh"
 printf '#!/bin/sh\nexit 0\n' > "$BUNDLE/router/S99r2o.shim"
 printf '#!/bin/sh\nexit 0\n' > "$BUNDLE/router/S99r2o"
 
