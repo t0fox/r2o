@@ -1,63 +1,82 @@
 const canvas = document.querySelector("canvas");
-const reduction = matchMedia("(prefers-reduced-motion: reduce)");
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 const vertex = `
-  attribute vec3 position;
-  attribute vec3 normal;
-  attribute float advance;
-  uniform vec2 angle;
-  uniform float aspect;
-  varying vec3 vNormal;
-  varying vec3 vPosition;
-  varying vec2 vPath;
+  attribute vec3 home;
+  attribute vec3 flight;
+  attribute vec3 detail;
+  uniform vec4 scene;
+  uniform vec2 pointer;
+  uniform float repel;
+  varying vec3 tint;
+  varying float opacity;
+  varying float byteValue;
 
   void main() {
-    float ca = cos(angle.x), sa = sin(angle.x);
-    float cb = cos(angle.y), sb = sin(angle.y);
-    mat3 tilt = mat3(1., 0., 0., 0., ca, sa, 0., -sa, ca);
-    mat3 turn = mat3(cb, 0., -sb, 0., 1., 0., sb, 0., cb);
-    vec3 p = tilt * turn * position;
-    vNormal = tilt * turn * normal;
-    vPosition = p;
-    vPath = vec2(position.x, advance);
-    float framing = min(aspect * .72, 1.04);
-    float perspective = 3.7 / (3.7 - p.z);
-    gl_Position = vec4(p.xy * vec2(framing / aspect, framing) * perspective
-      + vec2(0., .11), -.24 * p.z, 1.);
+    float time = scene.x;
+    float phase = mod(time, 12.);
+    float seed = detail.x;
+    float path = detail.y;
+    float delay = seed * .64;
+    float outward = smoothstep(2.35 + delay, 4.90 + delay, phase);
+    float inward = smoothstep(6.10 + delay, 10.95 + delay, phase);
+    float spread = outward * (1. - inward);
+    vec3 drift = vec3(sin(time * 1.16 + seed * 58.), cos(time * .91 + seed * 107.),
+      sin(time * 1.28 + seed * 91.));
+    vec3 turn = vec3(-flight.y, flight.x * .55, sin(path * 32.));
+    vec3 p = home + flight * spread + turn * sin(phase * .91 + seed * 9.) * spread * .23
+      + drift * (.012 + spread * .095);
+
+    vec2 delta = p.xy - pointer;
+    float distance = length(delta);
+    float force = pow(max(0., 1. - distance / .59), 1.35) * repel;
+    p.xy += delta / max(.022, distance) * force * .29;
+    p.z += force * .30;
+
+    float angle = -.12 + sin(time * .43) * .31;
+    float tilt = -.12 + cos(time * .5) * .11;
+    float ca = cos(angle), sa = sin(angle), ct = cos(tilt), st = sin(tilt);
+    p = vec3(ca * p.x + sa * p.z, p.y, ca * p.z - sa * p.x);
+    p = vec3(p.x, ct * p.y - st * p.z, ct * p.z + st * p.y);
+
+    float depth = 3.75 / (3.75 - p.z);
+    float framing = min(scene.y * .74, 1.05);
+    gl_Position = vec4(p.xy * vec2(framing / scene.y, framing) * depth + vec2(0., .11), -.24 * p.z, 1.);
+    gl_PointSize = clamp(scene.z * (.62 + detail.z * .88) * depth, 1., scene.w);
+
+    vec3 cool = vec3(.50, .82, .83);
+    vec3 warm = vec3(.84, .64, .36);
+    vec3 base = mix(cool, warm, smoothstep(-.22, .38, home.x));
+    // Фаза штриха определяется исходной позицией. Она не сбрасывается при разлёте.
+    float wave = pow(max(0., cos(6.283185 * (path - time / 7.5))), 22.);
+    float shimmer = .5 + .5 * sin(time * (1.7 + seed * 3.) + seed * 71.);
+    tint = mix(base, vec3(.91, .99, .97), wave * .79 + force * .14);
+    opacity = clamp(.28 + detail.z * .45 + wave * .42 + shimmer * .14
+      + p.z * .10 - spread * .08, 0., 1.);
+    float beat = floor(time * (4.5 + seed * 3.2) + seed * 53.);
+    byteValue = floor(fract(seed * 397.31 + beat * .61803399) * 256.);
   }
 `;
 
 const fragment = `
-  precision highp float;
-  uniform float time;
-  varying vec3 vNormal;
-  varying vec3 vPosition;
-  varying vec2 vPath;
+  precision mediump float;
+  uniform sampler2D atlas;
+  varying vec3 tint;
+  varying float opacity;
+  varying float byteValue;
 
   void main() {
-    vec3 n = normalize(vNormal);
-    vec3 view = normalize(vec3(0., 0., 3.7) - vPosition);
-    vec3 cool = vec3(.50, .82, .83);
-    vec3 warm = vec3(.84, .64, .36);
-    vec3 metal = mix(cool, warm, smoothstep(-.10, .28, vPath.x));
-    vec3 light = normalize(vec3(-.75, 1., 1.3));
-    vec3 amberLight = normalize(vec3(.85, -.75, .9));
-    float diffuse = max(dot(n, light), 0.);
-    float bronze = max(dot(n, amberLight), 0.);
-    float rim = pow(1. - max(dot(n, view), 0.), 2.8);
-    float polish = pow(max(dot(n, normalize(light + view)), 0.), 62.);
-    float glow = pow(max(dot(n, normalize(amberLight + view)), 0.), 18.);
-    float stroke = .5 + .5 * cos(6.283185 * (vPath.y - time * .10));
-    vec3 reflected = mix(cool, warm, smoothstep(-.65, .7, n.x));
-    float highlight = exp(-pow((n.y - .56) * 8., 2.));
-    vec3 rgb = metal * (.09 + .44 * diffuse + .25 * bronze)
-      + reflected * (.28 * rim + .11 * highlight + .44 * pow(stroke, 18.))
-      + vec3(.78, .93, .95) * polish * .65 + warm * glow * .33;
-    gl_FragColor = vec4(rgb, 1.);
+    vec2 cell = vec2(mod(byteValue, 16.), floor(byteValue / 16.));
+    vec2 sampleAt = (cell + clamp(gl_PointCoord, .02, .98)) / 16.;
+    float ink = texture2D(atlas, sampleAt).a * opacity;
+    vec2 delta = (gl_PointCoord - .5) * vec2(1., 1.9);
+    float aura = max(0., 1. - dot(delta, delta) * 4.);
+    float alpha = ink + aura * aura * .075 * opacity;
+    gl_FragColor = vec4(tint, alpha);
   }
 `;
 
-// Контур штатного знака панели. Скругляем повороты перед построением трубы.
+// Контур пиксельной петли панели.
 const outline = [
   [20, 20], [17.5, 20], [17.5, 17.5], [15, 17.5], [15, 15], [12.5, 15],
   [12.5, 12.5], [7.5, 12.5], [7.5, 15], [5, 15], [5, 17.5],
@@ -70,114 +89,141 @@ const outline = [
   [25, 25], [25, 22.5], [22.5, 22.5], [22.5, 20]
 ];
 
-function makeTube() {
-  const count = outline.length;
-  const samples = [];
-  const corner = 0.32;
+function makeAtlas(gl) {
+  const sheet = document.createElement("canvas");
+  const cell = 64;
+  sheet.width = sheet.height = cell * 16;
+  const ink = sheet.getContext("2d");
+  if (!ink) return false;
+  ink.fillStyle = "#fff";
+  ink.font = "600 33px ui-monospace, Consolas, monospace";
+  ink.textAlign = "center";
+  ink.textBaseline = "middle";
+  for (let i = 0; i < 256; i++) {
+    const value = i.toString(16).toUpperCase().padStart(2, "0");
+    ink.fillText(value, (i % 16 + .5) * cell, (Math.floor(i / 16) + .51) * cell);
+  }
+  gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sheet);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return true;
+}
 
-  for (let i = 0; i < count; i++) {
-    const before = outline[(i + count - 1) % count];
-    const after = outline[(i + 1) % count];
+function makeParticles() {
+  let state = 24053;
+  const random = () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+  const points = [];
+  const segments = [];
+  let perimeter = 0;
+  for (let i = 0; i < outline.length; i++) {
     const [x, y] = outline[i];
-    for (let step = 0; step <= 6; step++) {
-      const t = step / 6;
-      const start = (1 - t) ** 2 * corner;
-      const end = t ** 2 * corner;
-      samples.push([
-        (x + (before[0] - x) * start + (after[0] - x) * end - 20) / 17,
-        (20 - y - (before[1] - y) * start - (after[1] - y) * end) / 17,
-      ]);
-    }
+    const [nextX, nextY] = outline[(i + 1) % outline.length];
+    const dx = nextX - x, dy = nextY - y;
+    const length = Math.hypot(dx, dy);
+    segments.push({ x, y, dx, dy, length, start: perimeter });
+    perimeter += length;
   }
 
-  const sides = 24;
-  const vertices = [];
-  const triangles = [];
-  for (let ring = 0; ring <= samples.length; ring++) {
-    const i = ring % samples.length;
-    const [x, y] = samples[i];
-    const before = samples[(i + samples.length - 1) % samples.length];
-    const after = samples[(i + 1) % samples.length];
-    const dx = after[0] - before[0];
-    const dy = after[1] - before[1];
-    const tangent = Math.hypot(dx, dy);
-    for (let side = 0; side < sides; side++) {
-      const a = side * Math.PI * 2 / sides;
-      const nx = -dy / tangent * Math.cos(a);
-      const ny = dx / tangent * Math.cos(a);
-      const nz = Math.sin(a);
-      vertices.push(x + nx * .048, y + ny * .048, nz * .087, nx, ny, nz, ring / samples.length);
-      if (ring > 0) {
-        const first = (ring - 1) * sides + side;
-        const second = (ring - 1) * sides + (side + 1) % sides;
-        triangles.push(first, second, first + sides, second, second + sides, first + sides);
-      }
+  for (const { x, y, dx, dy, length, start } of segments) {
+    for (let i = 0; i < Math.ceil(length * 8.4); i++) {
+      const along = random();
+      const width = (random() + random() - 1) * 3.3;
+      const px = (x + dx * along + dy / length * width - 20) / 17;
+      const py = (20 - y - dy * along + dx / length * width) / 17;
+      const z = (random() - .5) * .24;
+      const velocity = random() * .49 + .20;
+      const fx = px * velocity + (random() - .5) * 1.12;
+      const fy = py * velocity + (random() - .5) * 1.50;
+      const fz = (random() - .5) * 1.56;
+      points.push(px, py, z, fx, fy, fz, random(), (start + along * length) / perimeter, random());
     }
   }
-  return [new Float32Array(vertices), new Uint16Array(triangles)];
+  return new Float32Array(points);
 }
 
 function start() {
-  const gl = canvas.getContext("webgl", { alpha: true, antialias: true });
+  const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: true });
   if (!gl) return;
 
-  const makeShader = (type, source) => {
+  const compile = (type, source) => {
     const shader = gl.createShader(type);
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
     return gl.getShaderParameter(shader, gl.COMPILE_STATUS) ? shader : null;
   };
-  const vs = makeShader(gl.VERTEX_SHADER, vertex);
-  const fs = makeShader(gl.FRAGMENT_SHADER, fragment);
+  const vs = compile(gl.VERTEX_SHADER, vertex);
+  const fs = compile(gl.FRAGMENT_SHADER, fragment);
   if (!vs || !fs) return;
   const program = gl.createProgram();
   gl.attachShader(program, vs);
   gl.attachShader(program, fs);
   gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return;
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS) || !makeAtlas(gl)) return;
   gl.useProgram(program);
 
-  const [vertices, triangles] = makeTube();
+  const data = makeParticles();
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-  for (const [name, size, offset] of [["position", 3, 0], ["normal", 3, 12], ["advance", 1, 24]]) {
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  for (const [name, offset] of [["home", 0], ["flight", 12], ["detail", 24]]) {
     const location = gl.getAttribLocation(program, name);
     gl.enableVertexAttribArray(location);
-    gl.vertexAttribPointer(location, size, gl.FLOAT, false, 28, offset);
+    gl.vertexAttribPointer(location, 3, gl.FLOAT, false, 36, offset);
   }
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, triangles, gl.STATIC_DRAW);
-  gl.enable(gl.DEPTH_TEST);
+  gl.enable(gl.BLEND);
+  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.clearColor(0, 0, 0, 0);
 
-  const angle = gl.getUniformLocation(program, "angle");
-  const aspect = gl.getUniformLocation(program, "aspect");
-  const time = gl.getUniformLocation(program, "time");
-  let frame = 0;
+  const scene = gl.getUniformLocation(program, "scene");
+  const pointer = gl.getUniformLocation(program, "pointer");
+  const repel = gl.getUniformLocation(program, "repel");
+  const limit = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1];
+  const startAt = performance.now();
+  let frame = 0, push = 0, target = 0, x = 0, y = 0;
 
-  function draw(ms) {
+  function draw(now) {
     frame = 0;
-    const seconds = reduction.matches ? 0 : ms / 1000;
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    gl.uniform2f(angle, -.22 + Math.sin(seconds * .64) * .13, -.18 + Math.sin(seconds * .46) * .42);
-    gl.uniform1f(time, seconds);
-    gl.drawElements(gl.TRIANGLES, triangles.length, gl.UNSIGNED_SHORT, 0);
-    if (!document.hidden && !reduction.matches) frame = requestAnimationFrame(draw);
+    if (gl.isContextLost()) return;
+    const seconds = reducedMotion.matches ? 0 : (now - startAt) / 1000;
+    const aspect = canvas.width / canvas.height;
+    const size = Math.max(12, Math.min(canvas.width, canvas.height) * .020);
+    push += (target - push) * .16;
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniform4f(scene, seconds, aspect, size, limit);
+    gl.uniform2f(pointer, x, y);
+    gl.uniform1f(repel, reducedMotion.matches ? 0 : push);
+    gl.drawArrays(gl.POINTS, 0, data.length / 9);
+    if (!document.hidden && !reducedMotion.matches) frame = requestAnimationFrame(draw);
   }
 
   function resize() {
-    if (!canvas.clientWidth || !canvas.clientHeight) return;
-    const density = Math.min(devicePixelRatio, 3840 / canvas.clientWidth, 2160 / canvas.clientHeight);
-    canvas.width = Math.round(canvas.clientWidth * density);
-    canvas.height = Math.round(canvas.clientHeight * density);
+    const { clientWidth: width, clientHeight: height } = canvas;
+    if (!width || !height || gl.isContextLost()) return;
+    const density = Math.min(devicePixelRatio, 3840 / width, 2160 / height);
+    canvas.width = Math.round(width * density);
+    canvas.height = Math.round(height * density);
     gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.uniform1f(aspect, canvas.width / canvas.height);
     cancelAnimationFrame(frame);
     draw(performance.now());
   }
 
+  const stage = canvas.parentElement;
+  stage.addEventListener("pointermove", event => {
+    const rect = canvas.getBoundingClientRect();
+    const aspect = rect.width / rect.height;
+    const scale = Math.min(aspect * .74, 1.05);
+    x = ((event.clientX - rect.left) * 2 / rect.width - 1) * aspect / scale;
+    y = (1 - (event.clientY - rect.top) * 2 / rect.height - .11) / scale;
+    target = 1;
+  }, { passive: true });
+  stage.addEventListener("pointerleave", () => { target = 0; });
   window.addEventListener("resize", resize);
-  reduction.addEventListener("change", resize);
+  reducedMotion.addEventListener("change", resize);
   document.addEventListener("visibilitychange", resize);
   canvas.addEventListener("webglcontextlost", () => {
     cancelAnimationFrame(frame);
