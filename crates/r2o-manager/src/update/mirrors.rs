@@ -40,7 +40,7 @@ pub(super) struct Route {
 }
 
 impl Route {
-    fn url(&self, github: &str) -> String {
+    pub(super) fn url(&self, github: &str) -> String {
         if self.r2 {
             format!(
                 "{}/{}",
@@ -50,10 +50,83 @@ impl Route {
                     .expect("адрес ресурса")
                     .trim_start_matches('/')
             )
+        } else if self.prefix.contains("{url}") {
+            self.prefix.replacen("{url}", github, 1)
+        } else if self.prefix.contains("{encoded_url}") {
+            self.prefix.replacen(
+                "{encoded_url}",
+                &github.replace(':', "%3A").replace('/', "%2F"),
+                1,
+            )
         } else {
             format!("{}{github}", self.prefix)
         }
     }
+}
+
+pub(super) fn github_routes(preferred: Option<&str>) -> Vec<Route> {
+    let configured = std::env::var("R2O_GITHUB_MIRRORS").unwrap_or_default();
+    configured_routes(&configured)
+        .chain(
+            [
+                ("gh-proxy", "https://gh-proxy.com/"),
+                ("ghproxy", "https://ghproxy.net/"),
+                ("ghfast", "https://ghfast.top/"),
+            ]
+            .into_iter()
+            .filter(|(name, _)| preferred == Some(*name))
+            .map(|(name, prefix)| Route {
+                name,
+                prefix: prefix.to_owned(),
+                r2: false,
+            }),
+        )
+        .collect()
+}
+
+fn configured_routes(value: &str) -> impl Iterator<Item = Route> + '_ {
+    value
+        .split_whitespace()
+        .filter(|url| !url.contains(['#', '@']) && url.len() <= 512 && parse_https_url(url).is_ok())
+        .take(4)
+        .map(|url| Route {
+            name: "configured",
+            prefix: if url.contains("{url}") || url.contains("{encoded_url}") {
+                url.to_owned()
+            } else {
+                format!("{}/", url.trim_end_matches('/'))
+            },
+            r2: false,
+        })
+}
+
+#[cfg(test)]
+#[test]
+fn configured_proxy_templates_preserve_the_canonical_signature_url() {
+    let routes: Vec<_> = configured_routes(
+        "http://invalid.test https://user@invalid.test/ https://proxy.test/ \
+         https://raw.test/get/{url} https://encoded.test/get?target={encoded_url}",
+    )
+    .collect();
+    let source = "https://github.com/t0fox/r2o/releases/latest/download/catalog.json.sig";
+    assert_eq!(routes.len(), 3);
+    assert_eq!(
+        routes[0].url(source),
+        format!("https://proxy.test/{source}")
+    );
+    assert_eq!(
+        routes[1].url(source),
+        format!("https://raw.test/get/{source}")
+    );
+    assert_eq!(
+        routes[2].url(source),
+        "https://encoded.test/get?target=https%3A%2F%2Fgithub.com%2Ft0fox%2Fr2o%2Freleases%2Flatest%2Fdownload%2Fcatalog.json.sig"
+    );
+}
+
+pub(super) fn configured_host(host: &str) -> bool {
+    let value = std::env::var("R2O_GITHUB_MIRRORS").unwrap_or_default();
+    configured_routes(&value).any(|route| download_url_host(&route.prefix).as_deref() == Some(host))
 }
 
 pub(super) fn routes(
@@ -82,17 +155,7 @@ pub(super) fn routes(
             r2: true,
         });
     }
-    for (name, prefix) in [
-        ("gh-proxy", "https://gh-proxy.com/"),
-        ("ghproxy", "https://ghproxy.net/"),
-        ("ghfast", "https://ghfast.top/"),
-    ] {
-        routes.push(Route {
-            name,
-            prefix: prefix.to_owned(),
-            r2: false,
-        });
-    }
+    routes.extend(github_routes(preferred));
     if let Some(source) = preferred.filter(|source| *source != "auto") {
         let index = routes
             .iter()

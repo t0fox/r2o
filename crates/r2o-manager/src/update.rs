@@ -329,7 +329,7 @@ fn stage_update_in(
         state["current"] = json!(slots.current);
         state["previous"] = json!(slots.previous);
     }
-    let catalog = catalog::fetch(work, root, architecture)?;
+    let catalog = catalog::fetch(work, root, architecture, source)?;
     state["latest"] = catalog::describe(&catalog.releases[0], architecture);
     let target = match release {
         Some(id) => catalog
@@ -703,7 +703,7 @@ fn check_update_in(
     if let Some(slots) = &slots {
         check_compatible_slot(root, &slots.current)?;
     }
-    let catalog = catalog::fetch(work, root, architecture)?;
+    let catalog = catalog::fetch(work, root, architecture, None)?;
     Ok((
         catalog
             .releases
@@ -791,7 +791,7 @@ fn download_rust(
 
     for redirect in 0..=HTTP_MAX_REDIRECTS {
         let (host, path) = parse_https_url(&current)?;
-        if redirect > 0 && host != initial_host && !GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str()) {
+        if redirect > 0 && !trusted_redirect_host(&initial_host, &host) {
             return Err(UpdateError::Download(format!(
                 "перенаправление на недопустимый хост {host}"
             )));
@@ -882,7 +882,7 @@ fn resolve_redirect(
     }
     let next = if location.starts_with("https://") {
         location.to_owned()
-    } else if location.starts_with("//") {
+    } else if location.starts_with("//") || location.contains("://") {
         return Err(UpdateError::Download(
             "протокол-относительное перенаправление запрещено".into(),
         ));
@@ -899,12 +899,18 @@ fn resolve_redirect(
     validate_download_url(&next)?;
     let host = download_url_host(&next)
         .ok_or_else(|| UpdateError::Download("недопустимый адрес перенаправления".into()))?;
-    if host != initial_host && !GITHUB_DOWNLOAD_HOSTS.contains(&host.as_str()) {
+    if !trusted_redirect_host(initial_host, &host) {
         return Err(UpdateError::Download(format!(
             "перенаправление на недопустимый хост {host}"
         )));
     }
     Ok(next)
+}
+
+fn trusted_redirect_host(initial: &str, host: &str) -> bool {
+    host == initial
+        || GITHUB_DOWNLOAD_HOSTS.contains(&host)
+        || (mirrors::configured_host(initial) && mirrors::configured_host(host))
 }
 
 fn fetch_https(

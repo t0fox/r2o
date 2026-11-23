@@ -292,55 +292,61 @@ check_runtime_dependencies() {
     fi
 }
 
-fetch_url_impl() {
-    fetch_url_value=$1
-    fetch_output=$2
-    fetch_limit=$3
-    fetch_timeout=${4:-600}
-    fetch_error=
-    fetch_ok=0
-    if command -v curl >/dev/null 2>&1; then
-        # В интерактивном терминале показываем полосу прогресса, в
-        # неинтерактивном — только ошибки. -L обязателен: latest/download
-        # на GitHub отвечает 302 на objects.githubusercontent.com.
-        curl_progress=-sS
-        [ ! -t 1 ] || curl_progress=--progress-bar
-        if curl -fL $curl_progress --retry 3 --retry-delay 1 \
-            --proto '=https' --proto-redir '=https' --connect-timeout 15 \
-            --max-time "$fetch_timeout" --max-filesize "$fetch_limit" \
-            -o "$fetch_output" "$fetch_url_value"; then
-            fetch_ok=1
-        fi
-    fi
-    if [ "$fetch_ok" -eq 0 ] && command -v wget >/dev/null 2>&1; then
-        wget_quiet=-q
-        [ ! -t 1 ] || wget_quiet=
-        if wget $wget_quiet -T "$fetch_timeout" -O "$fetch_output" "$fetch_url_value"; then
-            fetch_ok=1
-        fi
-    fi
-    if [ "$fetch_ok" -eq 0 ]; then
-        fetch_error="не удалось скачать $fetch_url_value"
-        return 1
-    fi
-    [ -f "$fetch_output" ] ||
-        { fetch_error="загрузчик не создал $fetch_output"; return 1; }
-    fetched_bytes=$(wc -c < "$fetch_output" | tr -d ' ')
-    case "$fetched_bytes" in
-        ''|*[!0-9]*) fetch_error="не удалось проверить размер $fetch_output"; return 1 ;;
+github_routes() (
+    set -f
+    printf '%s\n' direct
+    count=0
+    # shellcheck disable=SC2086
+    for mirror in ${R2O_GITHUB_MIRRORS:-}; do
+        [ "${#mirror}" -le 512 ] || continue
+        case "$mirror" in https://*) ;; *) continue ;; esac
+        case "$mirror" in *'#'*|*'@'*) continue ;; esac
+        printf '%s\n' "$mirror"
+        count=$((count + 1))
+        [ "$count" -lt 4 ] || break
+    done
+)
+
+github_url() {
+    case "$1" in
+        direct) printf '%s\n' "$2" ;;
+        *'{url}'*) printf '%s%s%s\n' "${1%%\{url\}*}" "$2" "${1#*\{url\}}" ;;
+        *'{encoded_url}'*)
+            encoded=$(printf '%s' "$2" | sed 's/:/%3A/g; s!/!%2F!g') || return 1
+            printf '%s%s%s\n' "${1%%\{encoded_url\}*}" "$encoded" "${1#*\{encoded_url\}}" ;;
+        *) printf '%s/%s\n' "${1%/}" "$2" ;;
     esac
-    [ "$fetched_bytes" -le "$fetch_limit" ] ||
-        { fetch_error="загрузка превысила лимит $fetch_limit байт"; return 1; }
-    return 0
 }
 
-fetch_url() {
-    fetch_url_impl "$@" || die "${fetch_error:-не удалось скачать $1}"
-}
+fetch_one() (
+    progress=-sS
+    [ ! -t 1 ] || progress=--progress-bar
+    rm -f "$2"
+    # Старые версии curl не ограничивают HTTP-поток неизвестного размера.
+    ulimit -f "$((($3 + 511) / 512))" 2>/dev/null || true
+    curl -q -fL "$progress" --globoff --proto '=https' --proto-redir '=https' \
+        --connect-timeout 8 --max-time "$4" --max-redirs 5 --max-filesize "$3" \
+        -o "$2" -- "$1" &&
+        [ "$(wc -c < "$2")" -le "$3" ]
+)
 
-# Мягкая загрузка: не завершает установку, если необязательный запрос не удался.
-try_fetch_url() {
-    fetch_url_impl "$@"
+fetch_url() (
+    set -f
+    for route in $(github_routes); do
+        url=$(github_url "$route" "$1") || continue
+        if fetch_one "$url" "$2" "$3" "$4" &&
+            [ "$(sha256_file "$2")" = "$5" ]; then
+            exit 0
+        fi
+    done
+    rm -f "$2"
+    exit 1
+)
+
+verify_downloaded_manifest() {
+    [ -s "$TMP/latest.json.sig" ] && [ "$(wc -c < "$TMP/latest.json.sig")" -eq 64 ] &&
+        openssl pkeyutl -verify -pubin -inkey "$TMP/release-public.pem" -rawin \
+            -in "$TMP/latest.json" -sigfile "$TMP/latest.json.sig" >/dev/null 2>&1
 }
 
 sha256_file() {
@@ -374,15 +380,8 @@ asset_size_from_api() {
 # этом работает, и её последний ответ содержит Content-Length архива.
 asset_size_from_headers() {
     r2o_size_url=$1
-    r2o_headers=
-    if command -v curl >/dev/null 2>&1; then
-        r2o_headers=$(curl -f -s -S -I -L --proto '=https' --proto-redir '=https' \
-            --connect-timeout 15 --max-time 60 "$r2o_size_url" 2>/dev/null) || return 1
-    elif command -v wget >/dev/null 2>&1; then
-        r2o_headers=$(wget -qS --spider -T 60 "$r2o_size_url" 2>&1) || return 1
-    else
-        return 1
-    fi
+    r2o_headers=$(curl -q -fsSL -I --globoff --proto '=https' --proto-redir '=https' \
+        --connect-timeout 8 --max-time 12 --max-redirs 5 -- "$r2o_size_url") || return 1
     printf '%s\n' "$r2o_headers" | awk '
         {
             header = tolower($1)
@@ -403,7 +402,10 @@ verify_archive_listing() {
         END { if (bad) exit 1; print total+0 }
     ' "$TMP/archive-listing") || die 'архив содержит ссылку, специальный файл или неверный размер'
     [ "$expanded_bytes" -gt 0 ] || die 'релизный архив пуст'
-    [ "$expanded_bytes" -le "$((MAX_EXPANDED_KB * 1024))" ] || die 'распакованный релиз превышает проверенный лимит 24 МиБ'
+    [ "$expanded_bytes" -le "$((expanded_bound_kb * 1024))" ] ||
+        die "распакованный релиз превышает проверенный лимит $expanded_bound_kb КиБ"
+    [ -z "$signed_expanded" ] || [ "$expanded_bytes" -eq "$signed_expanded" ] ||
+        die 'размер распаковки не совпал с подписанным манифестом'
     tar -tzf "$ARCHIVE" > "$TMP/archive-paths" || die 'не удалось проверить пути релизного архива'
     while IFS= read -r archive_path; do
         case "$archive_path" in
@@ -523,9 +525,10 @@ command -v tar >/dev/null 2>&1 || die 'не найдена команда tar'
 command -v awk >/dev/null 2>&1 || die 'не найдена команда awk'
 command -v df >/dev/null 2>&1 || die 'не найдена команда df'
 command -v sha256sum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 || die 'не найден sha256sum или openssl'
-command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die 'нужен curl или wget'
+command -v curl >/dev/null 2>&1 || die 'curl отсутствует после установки зависимостей'
 
 say 'загружаю подписанный манифест'
+printf '%s\n' '-----BEGIN PUBLIC KEY-----' "$PUBLIC_KEY_B64" '-----END PUBLIC KEY-----' > "$TMP/release-public.pem"
 if [ -n "$LOCAL_MANIFEST" ]; then
     [ -f "$LOCAL_MANIFEST" ] && [ ! -L "$LOCAL_MANIFEST" ] ||
         die "локальный манифест не найден или является ссылкой: $LOCAL_MANIFEST"
@@ -536,14 +539,19 @@ if [ -n "$LOCAL_MANIFEST" ]; then
     cp "$LOCAL_SIGNATURE" "$TMP/latest.json.sig" || die 'не удалось скопировать локальную подпись'
     say "использую локальный подписанный манифест: $LOCAL_MANIFEST"
 else
-    fetch_url "$LATEST/latest.json" "$TMP/latest.json" 65536 60
-    fetch_url "$LATEST/latest.json.sig" "$TMP/latest.json.sig" 64 60
+    set -f
+    for manifest_route in $(github_routes); do
+        if fetch_one "$(github_url "$manifest_route" "$LATEST/latest.json")" "$TMP/latest.json" 65536 15 &&
+            fetch_one "$(github_url "$manifest_route" "$LATEST/latest.json.sig")" "$TMP/latest.json.sig" 64 15 &&
+            verify_downloaded_manifest; then
+            break
+        fi
+        rm -f "$TMP/latest.json" "$TMP/latest.json.sig"
+    done
+    set +f
 fi
-[ "$(wc -c < "$TMP/latest.json.sig" | tr -d ' ')" = 64 ] || die 'подпись манифеста имеет неверный размер'
-printf '%s\n' '-----BEGIN PUBLIC KEY-----' "$PUBLIC_KEY_B64" '-----END PUBLIC KEY-----' > "$TMP/release-public.pem"
-openssl pkeyutl -verify -pubin -inkey "$TMP/release-public.pem" -rawin \
-    -in "$TMP/latest.json" -sigfile "$TMP/latest.json.sig" >/dev/null 2>&1 ||
-    die 'Ed25519 подпись манифеста не совпадает с закреплённым ключом R2O'
+verify_downloaded_manifest ||
+    die 'Ed25519 подпись манифеста не совпадает с закреплённым ключом R2O или манифест недоступен'
 TARGET_RELEASE=$(sed -n 's/.*"release_id":"\([A-Za-z0-9][A-Za-z0-9._-]*\)".*/\1/p' "$TMP/latest.json")
 [ -n "$TARGET_RELEASE" ] || die 'в подписанном манифесте нет безопасного release_id'
 expected_sha=$(awk -v architecture="$ARCH" '
@@ -563,13 +571,25 @@ case "$expected_sha" in ''|*[!0-9a-f]*) die "в манифесте нет SHA-25
 ASSET=r2o-$ARCH.tar.gz
 LATEST=https://github.com/$REPO/releases/download/$TARGET_RELEASE
 
+# Статическая сборка Keenetic может занимать больше места, чем общий лимит.
+# Для выбора staging используем размер из подписанного манифеста.
+expanded_limit_kb=$MAX_EXPANDED_KB
+if [ "$PLATFORM" = keenetic ] && [ "$ARCH" = mipsel ]; then
+    expanded_limit_kb=32768
+fi
+expanded_bound_kb=$MAX_EXPANDED_KB
+signed_expanded=$(sed -n "s/.*\"$ARCH\":{\"sha256\":\"$expected_sha\",\"bytes\":[0-9][0-9]*,\"expanded\":\([0-9][0-9]*\).*/\1/p" "$TMP/latest.json")
+if [ -n "$signed_expanded" ]; then
+    [ "$signed_expanded" -gt 0 ] && [ "$signed_expanded" -le "$((expanded_limit_kb * 1024))" ] ||
+        die "подписанный размер распаковки выпуска превышает лимит $expanded_limit_kb КиБ"
+    expanded_bound_kb=$(((signed_expanded + 1023) / 1024))
+fi
+
 archive_bytes=
-if [ -n "$LOCAL_ARCHIVE" ]; then
-    [ -f "$LOCAL_ARCHIVE" ] && [ ! -L "$LOCAL_ARCHIVE" ] ||
-        die "локальный архив не найден или является ссылкой: $LOCAL_ARCHIVE"
-    archive_bytes=$(wc -c < "$LOCAL_ARCHIVE" | tr -d ' ')
-else
-    if try_fetch_url "$RELEASE_API/$TARGET_RELEASE" "$TMP/release-api.json" 1048576 60; then
+if [ -z "$LOCAL_ARCHIVE" ]; then
+    archive_bytes=$(sed -n "s/.*\"$ARCH\":{\"sha256\":\"$expected_sha\",\"bytes\":\([0-9][0-9]*\).*/\1/p" "$TMP/latest.json")
+    # Для старых выпусков без подписанного размера используем только GitHub.
+    if [ -z "$archive_bytes" ] && fetch_one "$RELEASE_API/$TARGET_RELEASE" "$TMP/release-api.json" 1048576 12; then
         archive_bytes=$(asset_size_from_api "$ASSET" "$TMP/release-api.json")
     fi
     case "$archive_bytes" in ''|*[!0-9]*) archive_bytes= ;; esac
@@ -591,14 +611,16 @@ if [ -n "$LOCAL_ARCHIVE" ]; then
     archive_downloaded=1
     say "использую локальный архив: $LOCAL_ARCHIVE"
 elif [ -z "$archive_bytes" ]; then
-    # Ни API, ни заголовки не дали размер (wget без вывода заголовков, прокси,
-    # ограничение площадки). Скачиваем в staging на flash с верхним лимитом и
-    # измеряем фактический файл до выбора схемы размещения.
+    # Без известного размера оставляем резерв flash до выбора схемы размещения.
     say 'размер актива не удалось узнать заранее; скачиваю с ограничением и проверяю фактический размер'
+    available_bytes=$((($(free_kb "$STORAGE_PATH") - DEPENDENCY_RESERVE_KB) * 1024))
+    [ "$available_bytes" -gt 0 ] || die 'на flash нет места для загрузки архива'
+    [ "$available_bytes" -le "$MAX_ARCHIVE_BYTES" ] || available_bytes=$MAX_ARCHIVE_BYTES
     DISK_TMP=$(mktemp -d "$STORAGE_PATH/.r2o-install.XXXXXX") ||
         die "не удалось создать staging на $STORAGE_PATH"
     ARCHIVE=$DISK_TMP/$ASSET
-    fetch_url "$LATEST/$ASSET" "$ARCHIVE" "$MAX_ARCHIVE_BYTES"
+    fetch_url "$LATEST/$ASSET" "$ARCHIVE" "$available_bytes" 180 "$expected_sha" ||
+        die 'архив недоступен или SHA-256 архива не совпадает с подписанным манифестом'
     archive_bytes=$(wc -c < "$ARCHIVE" | tr -d ' ')
     case "$archive_bytes" in ''|*[!0-9]*) die "не удалось проверить размер актива $ASSET" ;; esac
     archive_downloaded=1
@@ -609,13 +631,13 @@ archive_kb=$(((archive_bytes + 1023) / 1024))
 
 memory_kb=$(memory_available_kb)
 flash_kb=$(free_kb "$STORAGE_PATH")
-ram_both_need=$((archive_kb + MAX_EXPANDED_KB + RAM_RESERVE_KB))
-ram_bundle_need=$((MAX_EXPANDED_KB + RAM_RESERVE_KB))
+ram_both_need=$((archive_kb + expanded_bound_kb + RAM_RESERVE_KB))
+ram_bundle_need=$((expanded_bound_kb + RAM_RESERVE_KB))
 ram_archive_need=$((archive_kb + RAM_RESERVE_KB))
-flash_one=$((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB))
-flash_archive_one=$((archive_kb + MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB))
-flash_two=$((MAX_EXPANDED_KB * 2 + DEPENDENCY_RESERVE_KB))
-flash_archive_two=$((archive_kb + MAX_EXPANDED_KB * 2 + DEPENDENCY_RESERVE_KB))
+flash_one=$((expanded_bound_kb + DEPENDENCY_RESERVE_KB))
+flash_archive_one=$((archive_kb + expanded_bound_kb + DEPENDENCY_RESERVE_KB))
+flash_two=$((expanded_bound_kb * 2 + DEPENDENCY_RESERVE_KB))
+flash_archive_two=$((archive_kb + expanded_bound_kb * 2 + DEPENDENCY_RESERVE_KB))
 if [ "$memory_kb" -ge "$ram_both_need" ] && [ "$flash_kb" -ge "$flash_one" ]; then
     ARCHIVE_IN_RAM=1; BUNDLE_IN_RAM=1
 elif [ "$memory_kb" -ge "$ram_bundle_need" ] && [ "$flash_kb" -ge "$flash_archive_one" ]; then
@@ -625,7 +647,7 @@ elif [ "$memory_kb" -ge "$ram_archive_need" ] && [ "$flash_kb" -ge "$flash_two" 
 elif [ "$memory_kb" -ge "$RAM_RESERVE_KB" ] && [ "$flash_kb" -ge "$flash_archive_two" ]; then
     ARCHIVE_IN_RAM=0; BUNDLE_IN_RAM=0
 else
-    die "не хватает ресурсов до установки: RAM ${memory_kb} КиБ; flash ${flash_kb} КиБ; архив до ${archive_kb} КиБ, распаковка до ${MAX_EXPANDED_KB} КиБ"
+    die "не хватает ресурсов до установки: RAM ${memory_kb} КиБ; flash ${flash_kb} КиБ; архив до ${archive_kb} КиБ, распаковка до ${expanded_bound_kb} КиБ"
 fi
 if [ "$ARCHIVE_IN_RAM" -eq 1 ]; then
     if [ "$archive_downloaded" -eq 1 ]; then
@@ -648,9 +670,10 @@ say "ресурсы проверены: свободно ${memory_kb} КиБ RAM
 
 if [ "$archive_downloaded" -eq 0 ]; then
     say "скачиваю $ASSET (${archive_kb} КиБ)"
-    fetch_url "$LATEST/$ASSET" "$ARCHIVE" "$archive_bytes"
+    fetch_url "$LATEST/$ASSET" "$ARCHIVE" "$archive_bytes" 180 "$expected_sha" ||
+        die 'архив недоступен или SHA-256 архива не совпадает с подписанным манифестом'
 fi
-[ "$(wc -c < "$ARCHIVE" | tr -d ' ')" = "$archive_bytes" ] || die "размер актива $ASSET не совпал с GitHub"
+[ "$(wc -c < "$ARCHIVE" | tr -d ' ')" = "$archive_bytes" ] || die "размер актива $ASSET не совпал с ожидаемым"
 actual_sha=$(sha256_file "$ARCHIVE")
 [ "$actual_sha" = "$expected_sha" ] || die 'SHA-256 архива не совпадает с подписанным манифестом'
 verify_archive_listing
@@ -677,6 +700,11 @@ done
 [ "$(cat "$BUNDLE/router/update-schema")" = R2O-STATE-1 ] ||
     die "нужен базовый выпуск универсального обновлятора"
 [ -x "$BUNDLE/builds/r2o-manager-linux-$ARCH" ] || die "менеджер выпуска $ARCH не исполняемый"
+
+if [ "$PLATFORM" = keenetic ] && [ "$ARCH" = mipsel ] &&
+    ! "$BUNDLE/builds/r2o-manager-linux-$ARCH" --version >/dev/null; then
+    die "выпуск $TARGET_RELEASE не запускается на Keenetic MIPS. Нужна статическая сборка R2O для Entware"
+fi
 
 INSTALL_STARTED=1
 say "устанавливаю подписанный выпуск $TARGET_RELEASE"

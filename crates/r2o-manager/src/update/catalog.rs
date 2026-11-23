@@ -8,7 +8,12 @@ pub(super) struct Catalog {
     pub(super) releases: Vec<crate::ReleaseManifest>,
 }
 
-pub(super) fn fetch(work: &Path, root: &Path, architecture: &str) -> Result<Catalog, UpdateError> {
+pub(super) fn fetch(
+    work: &Path,
+    root: &Path,
+    architecture: &str,
+    preferred: Option<&str>,
+) -> Result<Catalog, UpdateError> {
     let mirror = read_install_slots(root)?.and_then(|slots| {
         let file = root
             .join("releases")
@@ -23,45 +28,81 @@ pub(super) fn fetch(work: &Path, root: &Path, architecture: &str) -> Result<Cata
         (!url.is_empty() && parse_https_url(&url).is_ok()).then_some(url)
     });
     let published = github_latest(work);
-    let tag = match (&published, &mirror) {
-        (Ok(tag), _) => tag.clone(),
-        (Err(_), Some(mirror)) => {
+    let r2_tag = (published.is_err())
+        .then_some(mirror.as_deref())
+        .flatten()
+        .and_then(|base| {
             let path = work.join("mirror-head");
-            download(&format!("{mirror}/latest"), &path, 256, "12")?;
-            String::from_utf8(read_bounded(&path, 256)?)
-                .map_err(io::Error::other)?
-                .trim()
-                .to_owned()
-        }
-        (Err(error), None) => return Err(io::Error::other(error.to_string()).into()),
+            download(&format!("{base}/latest"), &path, 256, "12").ok()?;
+            let tag = String::from_utf8(read_bounded(&path, 256).ok()?).ok()?;
+            crate::validate_token(tag.trim(), "release_id", 128).ok()?;
+            Some(tag.trim().to_owned())
+        });
+    let direct_tag = published.as_deref().ok();
+    let github = direct_tag.map_or_else(
+        || LATEST_CATALOG.to_owned(),
+        |tag| format!("{DOWNLOAD_URL}/{tag}/catalog.json"),
+    );
+    let mut sources = Vec::new();
+    if let Some(tag) = direct_tag {
+        sources.push((github.clone(), format!("{github}.sig"), Some(tag)));
+    }
+    if let (Some(base), Some(tag)) = (&mirror, direct_tag.or(r2_tag.as_deref())) {
+        let url = format!("{base}/{tag}/catalog.json");
+        sources.push((url.clone(), format!("{url}.sig"), Some(tag)));
+    }
+    let github_signature = format!("{github}.sig");
+    sources.extend(
+        mirrors::github_routes(preferred)
+            .iter()
+            .map(|route| (route.url(&github), route.url(&github_signature), direct_tag)),
+    );
+    let marker = read_bounded(&root.join("state/update-catalog-head.json"), 1024);
+    let state: Value = match marker {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+        Err(UpdateError::Io(error)) if error.kind() == io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error),
     };
-    crate::validate_token(&tag, "release_id", 128)?;
-    let github = format!("{DOWNLOAD_URL}/{tag}/catalog.json");
-    let mirrors = [
-        published.is_ok().then(|| github.clone()),
-        mirror
-            .as_ref()
-            .map(|base| format!("{base}/{tag}/catalog.json")),
-        published
-            .is_ok()
-            .then(|| format!("https://gh-proxy.com/{github}")),
-        published
-            .is_ok()
-            .then(|| format!("https://ghproxy.net/{github}")),
-        published
-            .is_ok()
-            .then(|| format!("https://ghfast.top/{github}")),
-    ];
+    let high = state["catalog_sequence"].as_u64().unwrap_or(0);
+    let mut sequence_min = 0;
+    if let Some(slots) = read_install_slots(root)? {
+        let seq_path = root
+            .join("releases")
+            .join(&slots.current)
+            .join("router/update-sequence");
+        sequence_min = std::str::from_utf8(&read_bounded(&seq_path, 32)?)
+            .map_err(io::Error::other)?
+            .trim()
+            .parse::<u64>()
+            .map_err(io::Error::other)?;
+    }
+
     let body = work.join("catalog.json");
     let signature = work.join("catalog.json.sig");
-    let mut verified = Err(invalid("подписанный каталог не загружен"));
-    for url in mirrors.iter().flatten() {
+    let mut verified = Err(published.as_ref().err().map_or_else(
+        || invalid("подписанный каталог не загружен"),
+        |err| invalid(&err.to_string()),
+    ));
+    for (url, sig_url, tag) in sources {
         verified = (|| {
-            download(url, &body, CATALOG_MAX, "15")?;
-            download(&format!("{url}.sig"), &signature, SIGNATURE_MAX_BYTES, "15")?;
+            download(&url, &body, CATALOG_MAX, "15")?;
+            download(&sig_url, &signature, SIGNATURE_MAX_BYTES, "15")?;
             let bytes = read_bounded(&body, CATALOG_MAX)?;
             let sig = read_bounded(&signature, SIGNATURE_MAX_BYTES)?;
-            decode(&bytes, &sig, PUBLIC_KEY, &tag)
+            let result = decode(&bytes, &sig, PUBLIC_KEY, tag)?;
+            let latest = &result.releases[0];
+            let sequence = latest.sequence();
+            if sequence < sequence_min {
+                return Err(invalid("каталог старше установленного выпуска"));
+            }
+            if sequence < high
+                || sequence == high && state["catalog_tag"] != latest.release_id.as_str()
+            {
+                return Err(invalid(
+                    "опубликованный каталог старше последнего проверенного",
+                ));
+            }
+            Ok(result)
         })();
         if verified.is_ok() {
             break;
@@ -70,37 +111,9 @@ pub(super) fn fetch(work: &Path, root: &Path, architecture: &str) -> Result<Cata
         let _ = fs::remove_file(&signature);
     }
     let result = verified?;
-    let latest = result
-        .releases
-        .first()
-        .expect("проверенный каталог содержит последнее издание");
+    let latest = &result.releases[0];
+    let tag = &latest.release_id;
     let sequence = latest.sequence();
-    let marker = read_bounded(&root.join("state/update-catalog-head.json"), 1024);
-    let state: Value = match marker {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
-        Err(UpdateError::Io(error)) if error.kind() == io::ErrorKind::NotFound => json!({}),
-        Err(error) => return Err(error),
-    };
-    let high = state["catalog_sequence"].as_u64().unwrap_or(0);
-    if let Some(slots) = read_install_slots(root)? {
-        let seq_path = root
-            .join("releases")
-            .join(&slots.current)
-            .join("router/update-sequence");
-        let sequence_min = std::str::from_utf8(&read_bounded(&seq_path, 32)?)
-            .map_err(io::Error::other)?
-            .trim()
-            .parse::<u64>()
-            .map_err(io::Error::other)?;
-        if sequence < sequence_min {
-            return Err(invalid("каталог старше установленного выпуска"));
-        }
-    }
-    if sequence < high || sequence == high && state["catalog_tag"] != tag {
-        return Err(invalid(
-            "опубликованный каталог старше последнего проверенного",
-        ));
-    }
     write_json(
         root,
         "update-catalog-head.json",
@@ -179,7 +192,7 @@ fn tag_from_catalog_redirect(location: &str) -> Result<String, UpdateError> {
     Ok(tag.to_owned())
 }
 
-fn decode(bytes: &[u8], sig: &[u8], key: &[u8], tag: &str) -> Result<Catalog, UpdateError> {
+fn decode(bytes: &[u8], sig: &[u8], key: &[u8], tag: Option<&str>) -> Result<Catalog, UpdateError> {
     crate::verify_signature(bytes, sig, key)?;
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -205,7 +218,7 @@ fn decode(bytes: &[u8], sig: &[u8], key: &[u8], tag: &str) -> Result<Catalog, Up
         previous = manifest.sequence();
         releases.push(manifest);
     }
-    if releases[0].release_id != tag {
+    if tag.is_some_and(|tag| releases[0].release_id != tag) {
         return Err(invalid("подпись каталога относится к другому тегу"));
     }
     Ok(Catalog { releases })
@@ -252,7 +265,7 @@ mod tests {
         let verify = |releases: Value, tag| {
             let bytes = serde_json::to_vec(&json!({"format":1,"releases":releases})).unwrap();
             let signature = pair.sign(&bytes);
-            decode(&bytes, signature.as_ref(), key, tag)
+            decode(&bytes, signature.as_ref(), key, Some(tag))
         };
         let a = item("r2o-a", 1);
         let b = item("r2o-b", 2);
@@ -263,7 +276,11 @@ mod tests {
         let mut legacy = a.clone();
         legacy.as_object_mut().unwrap().remove("metadata");
         assert!(verify(json!([b, legacy]), "r2o-b").is_err());
-        assert!(decode(b"{}", &[0; 64], key, "r2o-b").is_err());
+        assert!(decode(b"{}", &[0; 64], key, None).is_err());
+        let bytes = serde_json::to_vec(&json!({"format":1,"releases":[b, a]})).unwrap();
+        let signature = pair.sign(&bytes);
+        let fallback = decode(&bytes, signature.as_ref(), key, None).unwrap();
+        assert_eq!(fallback.releases[0].release_id, "r2o-b");
     }
 
     #[test]

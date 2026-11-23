@@ -96,6 +96,7 @@ RT_DIRECT_ECH_DOMAINS=${R2O_RT_DIRECT_ECH_DOMAINS:-"rutracker.org www.rutracker.
 
 # shellcheck disable=SC1090  # конфигурация owner-managed, путь задаётся выше
 [ ! -r "$CONF" ] || . "$CONF"
+export R2O_GITHUB_MIRRORS
 FIREWALL=${R2O_FIREWALL:-$SCRIPT_DIR/r2o-firewall.sh}
 STATE=${STATE_DIR:-$ROOT/state}
 QUEUE4=${QUEUE_NUM:-2000}

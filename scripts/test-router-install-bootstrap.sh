@@ -33,6 +33,26 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$url" ] || exit 2
+original_url=$url
+case "$url" in
+    https://partial.test/*) exit 28 ;;
+    https://bad-signature.test/*)
+        case "$url" in
+            */latest.json.sig) dd if=/dev/zero of="$output" bs=64 count=1 2>/dev/null; exit 0 ;;
+            */latest.json) url=${url#https://bad-signature.test/} ;;
+            *) exit 22 ;;
+        esac
+        ;;
+    https://bad-archive.test/*)
+        case "$url" in
+            */r2o-*.tar.gz) printf 'broken archive' > "$output"; exit 0 ;;
+            *) exit 22 ;;
+        esac
+        ;;
+    https://mirror.test/get?url=*)
+        url=$(printf '%s' "${url#*?url=}" | sed 's/%3A/:/g; s!%2F!/!g') ;;
+    *) [ "${R2O_TEST_MIRROR_ONLY:-0}" != 1 ] || exit 28 ;;
+esac
 if [ "$head" -eq 1 ]; then
     [ "${R2O_TEST_FAIL_HEAD:-0}" = 1 ] && exit 22
     case "$url" in
@@ -46,7 +66,7 @@ if [ "$head" -eq 1 ]; then
     esac
 fi
 [ -n "$output" ] || exit 2
-printf '%s\t%s\n' "$url" "$output" >> "$R2O_TEST_FETCH_LOG"
+printf '%s\t%s\n' "$original_url" "$output" >> "$R2O_TEST_FETCH_LOG"
 case "$url" in
     */latest.json.sig) source=$R2O_TEST_FIXTURES/latest.json.sig ;;
     */latest.json) source=$R2O_TEST_FIXTURES/latest.json ;;
@@ -108,7 +128,7 @@ command_name=$1
 shift
 case "$command_name" in
     update-install)
-        printf 'update-install %s\n' "$*" >> "$R2O_TEST_MANAGER_LOG"
+        printf 'update-install %s\nmirrors %s\n' "$*" "${R2O_GITHUB_MIRRORS:-}" >> "$R2O_TEST_MANAGER_LOG"
         ;;
     install-local)
         root= bundle= release= architecture=
@@ -265,6 +285,20 @@ R2O_TEST_FAIL_API=1 run_install > "$CASE/out" 2>&1 ||
 grep -q 'по заголовкам загрузки' "$CASE/out" || fail 'unreachable API did not use the HEAD size fallback'
 [ -s "$CASE/manager.log" ] || fail 'manager was not activated after the unreachable API fallback'
 
+new_case verified-configured-mirror
+printf '{"release_id":"r2o-bootstrap-test","version":"1","notes":"","assets":{"mipsel-openwrt-musl":{"sha256":"%s","bytes":%s}}}\n' \
+    "$ARCHIVE_SHA" "$ARCHIVE_SIZE" > "$CASE/fixtures/latest.json"
+openssl pkeyutl -sign -inkey "$TEMP/test-key.pem" -rawin -in "$CASE/fixtures/latest.json" \
+    -out "$CASE/fixtures/latest.json.sig"
+R2O_TEST_MIRROR_ONLY=1 R2O_GITHUB_MIRRORS='https://partial.test/ https://bad-signature.test/ https://bad-archive.test/ https://mirror.test/get?url={encoded_url}' \
+    run_install > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'clean install did not switch to the verified mirror'; }
+grep -q '^https://mirror.test/get?url=https%3A%2F%2Fgithub.com.*latest.json.sig' "$CASE/fetch.log" ||
+    fail 'the valid signature was not loaded through the encoded mirror'
+grep -q '^https://mirror.test/get?url=https%3A%2F%2Fgithub.com.*r2o-mipsel-openwrt-musl.tar.gz' "$CASE/fetch.log" ||
+    fail 'the valid archive was not loaded through the encoded mirror'
+[ -s "$CASE/manager.log" ] || fail 'the verified release did not run'
+
 new_case api-and-head-unavailable
 # API и заголовки недоступны (wget без -S, прокси): архив скачивается с
 # верхним лимитом, измеряется фактический размер и установка продолжается.
@@ -310,7 +344,7 @@ for outcome in success failure; do
     helper=$(awk '$1 == "--virtual" && $3 == "openssl-util" && $4 == "curl" { print $2 }' "$CASE/packages.log")
     case "$helper" in .r2o-bootstrap-*) ;; *) fail 'bootstrap dependencies are not temporary' ;; esac
     grep -Fqx "del $helper" "$CASE/packages.log" || fail 'temporary APK group was left installed'
-    grep -q '^kmod-nfnetlink-queue ' "$CASE/packages.log" || fail 'runtime modules are not separate'
+    grep -Eq '^(ca-bundle )?kmod-nfnetlink-queue ' "$CASE/packages.log" || fail 'runtime modules are not separate'
 done
 mv "$TEMP/install.saved" "$TEMP/install.sh"
 
@@ -451,9 +485,10 @@ install_count=$(grep -c '^install-local ' "$CASE/manager.log")
 printf '#!/bin/sh\nexit 31\n' > "$CASE/opt/r2o/releases/r2o-bootstrap-test/router/install.sh"
 chmod 0755 "$CASE/opt/r2o/releases/r2o-bootstrap-test/router/install.sh"
 fetch_count=$(wc -l < "$CASE/fetch.log")
-run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'repeat install did not complete'; }
+R2O_GITHUB_MIRRORS=https://example.test/ run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'repeat install did not complete'; }
 [ "$(wc -l < "$CASE/fetch.log")" -eq "$fetch_count" ] || fail 'bootstrap downloaded before calling the Rust updater'
 grep -q '^update-install --root .* --service ' "$CASE/manager.log" || fail 'Rust updater was not invoked'
+grep -Fxq 'mirrors https://example.test/' "$CASE/manager.log" || fail 'Rust updater did not inherit the mirror'
 [ "$(grep -c '^install-local ' "$CASE/manager.log")" -eq "$install_count" ] || fail 'repeat install reactivated an already current release'
 printf '%s\n' '{"schema":1,"boxes":[{"id":"kept"}]}' > "$CASE/expected-catalog.json"
 cmp -s "$CASE/opt/r2o/state/catalog.json" "$CASE/expected-catalog.json" ||
