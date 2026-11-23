@@ -6,6 +6,9 @@ set -f
 INSTALL_SHA256='3c4549d2526047c3ffdc974ae0cf0939a24919d848a723829f7e3c7e0cb06efb'
 source_url=https://raw.githubusercontent.com/t0fox/r2o/${R2O_BOOTSTRAP_REF:-main}/scripts/install.sh
 export PATH="/opt/bin:/opt/sbin:$PATH"
+# Прямой GitHub первым, затем резервные HTTPS-зеркала с проверкой SHA-256.
+# Явно заданный список при необходимости заменяет зеркала по умолчанию.
+: "${R2O_GITHUB_MIRRORS:=https://ghfast.top/ https://ghproxy.net/ https://gh-proxy.com/}"
 export R2O_GITHUB_MIRRORS
 
 if ! command -v curl >/dev/null 2>&1; then

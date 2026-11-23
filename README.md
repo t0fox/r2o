@@ -146,18 +146,9 @@ Telegram **не требует собственного VPS или WARP**. Го�
 (apk -U add curl ca-bundle || (opkg update && opkg install curl ca-bundle)) && r2o=$(curl -qfsS https://t0fox.github.io/r2o/get) && sh -c "$r2o"
 ```
 
-Для доступа через зеркало задайте `R2O_GITHUB_MIRRORS` в окружении до установки.
-Можно указать до четырёх доверенных HTTPS-адресов через пробел.
-Поддерживаются префиксы `https://proxy.example/` и шаблоны
-`https://proxy.example/get/{url}` или `https://proxy.example/get?url={encoded_url}`.
-Фоновое обновление и панель используют эту переменную из `/opt/r2o/config`.
-
-Короткий адрес отдаёт стартовый сценарий с GitHub Pages по HTTPS.
-При первом запуске GitHub Pages должен быть доступен. Сценарий сверяет SHA-256
-`bootstrap.sh`, а bootstrap проверяет
-SHA-256 `install.sh`. Для обоих можно использовать настроенное зеркало.
-При изменении `install.sh` обновите его закреплённую сумму командой
-`python3 scripts/bootstrap-pins.py --write`.
+Если GitHub недоступен, R2O автоматически пробует резервные HTTPS-зеркала.
+Все загрузки проверяются перед запуском — ничего настраивать не нужно.
+Для начала установки требуется доступ к GitHub Pages.
 
 Установщик сам определяет платформу и ABI, **доустанавливает недостающие
 зависимости** (`openssl-util` и модули NFQUEUE/conntrack)

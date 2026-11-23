@@ -64,24 +64,25 @@ impl Route {
     }
 }
 
-pub(super) fn github_routes(preferred: Option<&str>) -> Vec<Route> {
+pub(super) fn github_routes(_preferred: Option<&str>) -> Vec<Route> {
     let configured = std::env::var("R2O_GITHUB_MIRRORS").unwrap_or_default();
-    configured_routes(&configured)
-        .chain(
-            [
-                ("gh-proxy", "https://gh-proxy.com/"),
-                ("ghproxy", "https://ghproxy.net/"),
-                ("ghfast", "https://ghfast.top/"),
-            ]
-            .into_iter()
-            .filter(|(name, _)| preferred == Some(*name))
-            .map(|(name, prefix)| Route {
+    let mut routes: Vec<Route> = configured_routes(&configured).collect();
+    // Проверенные подписи и хеши обязательны независимо от источника.
+    // Удаляем повторы, если пользователь уже добавил один из этих адресов.
+    for (name, prefix) in [
+        ("gh-proxy", "https://gh-proxy.com/"),
+        ("ghproxy", "https://ghproxy.net/"),
+        ("ghfast", "https://ghfast.top/"),
+    ] {
+        if !routes.iter().any(|route| route.prefix == prefix) {
+            routes.push(Route {
                 name,
                 prefix: prefix.to_owned(),
                 r2: false,
-            }),
-        )
-        .collect()
+            });
+        }
+    }
+    routes
 }
 
 fn configured_routes(value: &str) -> impl Iterator<Item = Route> + '_ {
@@ -98,6 +99,19 @@ fn configured_routes(value: &str) -> impl Iterator<Item = Route> + '_ {
             },
             r2: false,
         })
+}
+
+#[cfg(test)]
+#[test]
+fn builtin_github_mirrors_are_available_automatically() {
+    let routes = github_routes(None);
+    for prefix in [
+        "https://ghfast.top/",
+        "https://ghproxy.net/",
+        "https://gh-proxy.com/",
+    ] {
+        assert!(routes.iter().any(|route| route.prefix == prefix));
+    }
 }
 
 #[cfg(test)]

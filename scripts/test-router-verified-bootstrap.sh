@@ -44,6 +44,8 @@ case "$1" in
     https://timeout.test/*) exit 28 ;;
     https://mirror.test/raw/https://*)
         url=${1#https://mirror.test/raw/} ;;
+    https://ghfast.top/https://*)
+        url=${1#https://ghfast.top/} ;;
     https://encoded.test/get?url=*)
         url=$(printf '%s' "${1#*?url=}" | sed 's/%3A/:/g; s!%2F!/!g') ;;
     *) exit 22 ;;
@@ -68,6 +70,7 @@ export PATH="$work/bin:$PATH" R2O_BOOTSTRAP_TEST="$work"
 sh "$work/get" direct
 R2O_TEST_OFFLINE=1 R2O_GITHUB_MIRRORS='https://timeout.test/ https://bad.test/ https://mirror.test/raw/{url}' sh "$work/get" raw
 R2O_TEST_OFFLINE=1 R2O_GITHUB_MIRRORS='https://bad.test/ https://encoded.test/get?url={encoded_url}' sh "$work/get" encoded
+R2O_TEST_OFFLINE=1 sh "$work/get" automatic
 if R2O_TEST_OFFLINE=1 R2O_GITHUB_MIRRORS='https://bad.test/' sh "$work/get" invalid; then
     echo 'запуск с неверной суммой оказался успешным' >&2
     exit 1
@@ -80,8 +83,8 @@ entry=$(awk '/^\(apk .*t0fox\.github\.io\/r2o\/get/{print; exit}' "$ROOT/README.
 [ -n "$entry" ]
 R2O_TEST_OPENWRT=1 sh -c "$entry"
 sh -c "$entry"
-[ "$(wc -l < "$work/ran")" -eq 5 ]
-[ "$(sed -n '1,3p' "$work/ran")" = "$(printf 'direct\nraw\nencoded\n')" ]
+[ "$(wc -l < "$work/ran")" -eq 6 ]
+[ "$(sed -n '1,4p' "$work/ran")" = "$(printf 'direct\nraw\nencoded\nautomatic\n')" ]
 grep -q '^apk -U add curl ca-bundle$' "$work/packages"
 grep -q '^opkg install curl ca-bundle$' "$work/packages"
 printf '%s\n' 'проверены команда README, обе платформы, две закреплённые суммы и резервные источники'
