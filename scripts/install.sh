@@ -430,6 +430,23 @@ run_router_install() {
         sh "$install_bundle/router/install.sh" "$install_bundle" "$install_release" "$ARCH"
 }
 
+show_failed_install_logs() {
+    # Первая установка может удалить весь ROOT при откате: выводим причины до него.
+    log_dir=$ROOT/log
+    shown=0
+    if [ -d "$log_dir" ] && [ ! -L "$log_dir" ]; then
+        for file in "$log_dir/r2o-datapath.log" "$log_dir/r2o-datapath4.log" "$log_dir/r2o-datapath6.log"; do
+            [ -s "$file" ] && [ ! -L "$file" ] || continue
+            printf 'r2o: журнал запуска %s (последние 80 строк, до отката):\n' "$file" >&2
+            tail -n 80 "$file" >&2 || true
+            shown=1
+        done
+    fi
+    if [ "$shown" -eq 0 ]; then
+        echo 'r2o: журналы datapath отсутствуют или пусты; процесс мог завершиться до записи ошибки' >&2
+    fi
+}
+
 rollback_failed_install() {
     [ "$INSTALL_STARTED" -eq 1 ] || return 0
     [ -n "$TARGET_RELEASE" ] || return 0
@@ -711,7 +728,10 @@ fi
 
 INSTALL_STARTED=1
 say "устанавливаю подписанный выпуск $TARGET_RELEASE"
-run_router_install "$BUNDLE" "$TARGET_RELEASE" || die 'установщик выпуска завершился ошибкой'
+run_router_install "$BUNDLE" "$TARGET_RELEASE" || {
+    show_failed_install_logs
+    die 'установщик выпуска завершился ошибкой'
+}
 CURRENT_RELEASE=$(sed -n '2p' "$ROOT/release-slots" 2>/dev/null || true)
 [ "$CURRENT_RELEASE" = "$TARGET_RELEASE" ] || die 'менеджер не активировал проверенный выпуск'
 INSTALL_STARTED=0

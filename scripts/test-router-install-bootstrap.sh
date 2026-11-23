@@ -145,7 +145,12 @@ case "$command_name" in
         previous=$(sed -n '2p' "$root/release-slots" 2>/dev/null || true)
         mkdir -p "$root/releases/$release"
         cp -R "$bundle/." "$root/releases/$release/"
-        [ "${R2O_TEST_FAIL_DURING_INSTALL:-0}" != 1 ] || exit 1
+        if [ "${R2O_TEST_FAIL_DURING_INSTALL:-0}" = 1 ]; then
+            mkdir -p "$root/log"
+            printf '%s\n' 'R2O_TEST_DATAPATH_FAILURE_BEFORE_ROLLBACK' > "$root/log/r2o-datapath.log"
+            printf '%s\n' 'R2O_TEST_SPLIT_FAILURE_BEFORE_ROLLBACK' > "$root/log/r2o-datapath4.log"
+            exit 1
+        fi
         printf '%s\n' "$architecture" > "$root/releases/$release/release-architecture"
         { printf 'R2O-RELEASE-SLOTS-1\n%s\n' "$release"; [ -z "$previous" ] || printf '%s\n' "$previous"; } > "$root/release-slots.new"
         mv -f "$root/release-slots.new" "$root/release-slots"
@@ -408,6 +413,10 @@ new_case failed-first-install
 if R2O_TEST_FAIL_DURING_INSTALL=1 run_install > "$CASE/out" 2>&1; then
     fail 'incomplete first install was accepted'
 fi
+grep -Fq 'R2O_TEST_DATAPATH_FAILURE_BEFORE_ROLLBACK' "$CASE/out" ||
+    fail 'merged datapath diagnostics disappeared before rollback'
+grep -Fq 'R2O_TEST_SPLIT_FAILURE_BEFORE_ROLLBACK' "$CASE/out" ||
+    fail 'split datapath diagnostics disappeared before rollback'
 [ ! -e "$CASE/opt/r2o" ] || fail 'incomplete first install left release files behind'
 [ ! -e "$CASE/opt/etc/init.d/S99r2o" ] || fail 'incomplete first install left its startup shim behind'
 [ ! -e "$CASE/etc/init.d/r2o" ] || fail 'incomplete first install left its OpenWrt service behind'
