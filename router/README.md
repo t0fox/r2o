@@ -7,10 +7,8 @@
 
 ## Установка через SSH
 
-Подключитесь к OpenWrt или Keenetic с установленным Entware как `root` и
-следуйте [инструкции по установке через SSH](../README.md#установка-по-ssh).
-Для чистого Entware инструкция включает установку `curl` и сертификатов через
-`/opt/bin/opkg` до загрузки сценария по HTTPS.
+Подключитесь к роутеру по SSH как `root` и вставьте целиком блок для
+[OpenWrt](../README.md#openwrt) или [Keenetic с Entware](../README.md#keenetic-с-entware).
 
 Установщик распознаёт ABI OpenWrt `mipsel-openwrt-musl`,
 `aarch64-openwrt-musl`, `armv7-openwrt-musl`, `armv5-musleabi`, а также

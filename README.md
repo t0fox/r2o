@@ -140,23 +140,40 @@ Telegram **не требует собственного VPS или WARP**. Го�
 
 ### Установка по SSH
 
-Подключитесь по SSH как `root`. На Keenetic с чистым Entware сначала установите
-`curl` и корневые сертификаты. Штатный `wget` Keenetic может не поддерживать HTTPS.
+Подключитесь к роутеру по SSH как `root` и вставьте целиком один блок для
+своей системы.
 
-```sh
-export PATH="/opt/bin:/opt/sbin:$PATH"
-/opt/bin/opkg update && /opt/bin/opkg install curl ca-bundle
-```
-
-На OpenWrt без `curl` установите его командой `apk update && apk add curl ca-bundle`
-или `opkg update && opkg install curl ca-bundle` в зависимости от менеджера пакетов.
-Скачайте установщик и запустите его после успешной загрузки.
+#### OpenWrt
 
 ```sh
 (
+    if ! command -v curl >/dev/null 2>&1 ||
+        { [ ! -s /etc/ssl/cert.pem ] && [ ! -s /etc/ssl/certs/ca-certificates.crt ]; }; then
+        if command -v apk >/dev/null 2>&1; then
+            apk update && apk add curl ca-bundle || exit 1
+        else
+            opkg update && opkg install curl ca-bundle || exit 1
+        fi
+    fi
     installer=$(mktemp /tmp/r2o-bootstrap.XXXXXX) || exit 1
     trap 'rm -f "$installer"' EXIT
     curl -fsSL --proto '=https' --proto-redir '=https' -o "$installer" \
+        'https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh' &&
+        sh "$installer"
+)
+```
+
+#### Keenetic с Entware
+
+```sh
+(
+    export PATH="/opt/bin:/opt/sbin:$PATH"
+    if [ ! -x /opt/bin/curl ] || [ ! -s /opt/etc/ssl/certs/ca-certificates.crt ]; then
+        /opt/bin/opkg update && /opt/bin/opkg install curl ca-bundle || exit 1
+    fi
+    installer=$(mktemp /tmp/r2o-bootstrap.XXXXXX) || exit 1
+    trap 'rm -f "$installer"' EXIT
+    /opt/bin/curl -fsSL --proto '=https' --proto-redir '=https' -o "$installer" \
         'https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh' &&
         sh "$installer"
 )
