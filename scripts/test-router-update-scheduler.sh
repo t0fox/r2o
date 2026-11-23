@@ -58,7 +58,8 @@ EOF
 chmod 0755 "$TEMP/manager"
 EVENTS="$TEMP/events" R2O_DIR="$TEMP/root" R2O_MANAGER="$TEMP/manager" R2O_INIT="$TEMP/init" \
     sh "$SCHEDULER" 0
-printf '%s\n' update-schedule --root "$TEMP/root" --service "$TEMP/init" --enabled 0 > "$TEMP/expected"
+printf '%s\n' exec --root "$TEMP/root" --component r2o-manager -- \
+    update-schedule --root "$TEMP/root" --service "$TEMP/init" --enabled 0 > "$TEMP/expected"
 cmp "$TEMP/events" "$TEMP/expected"
 
 cd "$ROOT"

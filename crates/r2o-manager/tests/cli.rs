@@ -895,14 +895,10 @@ esac
             .current,
         "r2o-base"
     );
-    json_output(invoke(&args));
-    assert_eq!(
-        r2o_manager::read_install_slots(&root)
-            .unwrap()
-            .unwrap()
-            .current,
-        "r2o-next"
-    );
+    let slots = r2o_manager::read_install_slots(&root).unwrap().unwrap();
+    assert_eq!(slots.previous, None);
+    assert!(!root.join("releases/r2o-next").exists());
+    assert!(!invoke(&args).status.success());
     assert_eq!(
         fs::read_to_string(root.join("config")).unwrap(),
         "MODE=observe\n"

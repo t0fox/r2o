@@ -204,6 +204,7 @@ fn recover(root: &Path, tx: &Transaction, reason: &str) -> Result<(), UpdateErro
     write_state(root, &state)?;
     clear_staged(root);
     let _ = fs::remove_file(root.join("state/update-transfer.json"));
+    crate::install::discard_unreferenced_releases(root)?;
     clear(root)
 }
 
@@ -256,7 +257,32 @@ pub fn compact_install_rollback(root: &Path) -> Result<(), UpdateError> {
     if pending(root)?.is_some() {
         return Err(crate::InstallError::Busy.into());
     }
-    Ok(crate::install::cleanup_releases(root)?)
+    let _lock = UpdateLock::acquire(root)?;
+    crate::install::cleanup_releases(root)?;
+    let mut state = read_state(root)?;
+    state["previous"] = Value::Null;
+    write_state(root, &state)
+}
+
+pub(super) fn finish_legacy_update(root: &Path) -> Result<(), UpdateError> {
+    // При первом переходе обновление завершает старый менеджер. Ждём его проверки служб.
+    let _guard = UpdateLock::named(root, "update-router.lock", false)?;
+    if pending(root)?.is_some() {
+        return Ok(());
+    }
+    let _lock = UpdateLock::acquire(root)?;
+    let mut state = read_state(root)?;
+    if state["phase"] == "commit"
+        && state["last_ok"] == true
+        && let Some(slots) = read_install_slots(root)?
+        && slots.previous.is_some()
+        && state["current"] == slots.current
+    {
+        crate::install::cleanup_releases(root)?;
+        state["previous"] = Value::Null;
+        write_state(root, &state)?;
+    }
+    Ok(())
 }
 
 pub fn watch_router_update(root: &Path, adapter: &Path) -> Result<(), UpdateError> {
@@ -393,7 +419,9 @@ pub fn run_router_update(
         tx.committed = true;
         save(root, &tx)?;
         finalize(root, &tx)?;
-        Ok(activated)
+        let mut result = activated;
+        result["previous"] = Value::Null;
+        Ok(result)
     })();
     match outcome {
         Ok(result) => Ok(result),
@@ -452,7 +480,7 @@ fn finalize(root: &Path, tx: &Transaction) -> Result<(), UpdateError> {
     state["busy"] = json!("");
     state["phase"] = json!("commit");
     state["install_stage"] = json!(4);
-    state["previous"] = json!(&tx.old);
+    state["previous"] = Value::Null;
     state["last_utc"] = json!(now_epoch());
     state["last_ok"] = json!(true);
     state["last_message"] = json!("Выпуск установлен, обязательные службы готовы");
@@ -471,12 +499,9 @@ fn finalize(root: &Path, tx: &Transaction) -> Result<(), UpdateError> {
     }
     write_state(root, &state)?;
     clear_rejected(root, &tx.target)?;
+    crate::install::cleanup_releases(root)?;
+    crate::install::refresh_launcher(root)?;
     clear(root)?;
-    if let Err(error) =
-        crate::install::refresh_launcher(root).and_then(|()| crate::install::cleanup_releases(root))
-    {
-        eprintln!("r2o-manager: очистка после установки: {error}");
-    }
     Ok(())
 }
 
@@ -583,4 +608,63 @@ fn stage_previous(
         &json!({"release_id":previous,"architecture":architecture,"kind":"previous"}),
     )?;
     Ok(json!({"staged":true,"release_id":previous}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn ten_healthy_updates_leave_one_slot() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = super::super::tests::TestDir::new();
+        let root = &temp.0.join("root");
+        let bundle = temp.0.join("bundle");
+        fs::create_dir_all(bundle.join("builds")).unwrap();
+        for component in [
+            "datapath",
+            "controller",
+            "panel",
+            "telegram",
+            "manager",
+            "fetch",
+        ] {
+            let file = bundle
+                .join("builds")
+                .join(format!("r2o-{component}-linux-mipsel"));
+            fs::write(&file, component).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let catalog = b"{\"schema\":1,\"boxes\":[]}";
+        fs::create_dir_all(root.join("state")).unwrap();
+        fs::write(root.join("config"), "MODE=observe\n").unwrap();
+        fs::write(root.join("state/catalog.json"), catalog).unwrap();
+        crate::activate_bundle(root, &bundle, "r2o-0", "mipsel").unwrap();
+        for step in 1..=10 {
+            let tx = Transaction {
+                version: 1,
+                old: format!("r2o-{}", step - 1),
+                old_previous: None,
+                target: format!("r2o-{step}"),
+                committed: false,
+            };
+            let slots = crate::activate_bundle(root, &bundle, &tx.target, "mipsel").unwrap();
+            assert_eq!(slots.previous.as_deref(), Some(tx.old.as_str()));
+            let tx = Transaction {
+                committed: true,
+                ..tx
+            };
+            save(root, &tx).unwrap();
+            recover_router_update(root).unwrap();
+            let slots = read_install_slots(root).unwrap().unwrap();
+            assert_eq!(slots.current, tx.target);
+            assert_eq!(slots.previous, None);
+            assert!(read_state(root).unwrap()["previous"].is_null());
+            assert_eq!(fs::read_dir(root.join("releases")).unwrap().count(), 1);
+            assert!(!root.join("state").join(JOURNAL).exists());
+        }
+        assert_eq!(fs::read(root.join("config")).unwrap(), b"MODE=observe\n");
+        assert_eq!(fs::read(root.join("state/catalog.json")).unwrap(), catalog);
+    }
 }

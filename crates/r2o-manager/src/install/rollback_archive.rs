@@ -1,31 +1,24 @@
 use super::{
-    ARCHIVE_MAX_BYTES, ARCHIVE_MAX_ENTRIES, ARCHIVE_MAX_ENTRY_BYTES, ARCHIVE_MAX_EXPANDED_BYTES,
-    InstallError, create_staging_dir, extract_bundle, read_release_architecture, sync_directory,
-    validate_archive_path, validate_bundle,
+    ARCHIVE_MAX_BYTES, ARCHIVE_MAX_EXPANDED_BYTES, InstallError, create_staging_dir,
+    extract_bundle, read_release_architecture, sync_directory, validate_bundle,
 };
-use lzma_rust2::{XzOptions, XzReader, XzWriter};
+#[cfg(test)]
+use super::{ARCHIVE_MAX_ENTRIES, ARCHIVE_MAX_ENTRY_BYTES, validate_archive_path};
+use lzma_rust2::XzReader;
+#[cfg(test)]
+use lzma_rust2::{XzOptions, XzWriter};
 use std::fs::{self, File, Metadata};
-use std::io::{self, BufReader, BufWriter, Read};
+#[cfg(test)]
+use std::io::BufWriter;
+use std::io::{self, BufReader, Read};
 use std::path::Path;
 
 pub(super) const ARCHIVE: &str = ".rollback-builds.tar.xz";
-pub(super) const FORMAT: &[u8] = b"R2O-ROLLBACK-XZ-4\n";
 const DICTIONARY_BYTES: u32 = 2 * 1024 * 1024;
 const DECODE_LIMIT_KIB: u32 = DICTIONARY_BYTES / 1024 + 128;
 
-pub(super) fn supported_by(root: &Path, release: &str) -> bool {
-    let path = root
-        .join("releases")
-        .join(release)
-        .join("router/rollback-xz");
-    let mut marker = Vec::with_capacity(FORMAT.len());
-    File::open(path)
-        .and_then(|file| file.take(FORMAT.len() as u64 + 1).read_to_end(&mut marker))
-        .is_ok()
-        && marker == FORMAT
-}
-
-pub(super) fn compact(root: &Path, id: &str) -> Result<(), InstallError> {
+#[cfg(test)]
+pub(super) fn compact_fixture(root: &Path, id: &str) -> Result<(), InstallError> {
     let releases = root.join("releases");
     let release = releases.join(id);
     let builds = release.join("builds");
@@ -37,7 +30,8 @@ pub(super) fn compact(root: &Path, id: &str) -> Result<(), InstallError> {
     }
     let architecture = read_release_architecture(root, id)?;
     let controller = fs::metadata(builds.join(format!("r2o-controller-linux-{architecture}")))?;
-    let options = compression_options(&architecture)?;
+    let mut options = XzOptions::with_preset(1);
+    options.lzma_options.dict_size = DICTIONARY_BYTES;
     let stage = create_staging_dir(&releases, id)?;
     let result = (|| {
         let temporary = stage.join(ARCHIVE);
@@ -91,41 +85,6 @@ pub(super) fn compact(root: &Path, id: &str) -> Result<(), InstallError> {
     result
 }
 
-fn compression_options(architecture: &str) -> io::Result<XzOptions> {
-    let mut options = XzOptions::with_preset(4);
-    options.lzma_options.dict_size = DICTIONARY_BYTES;
-    #[cfg(target_os = "linux")]
-    if let Some(available_kib) = fs::read_to_string("/proc/meminfo")
-        .ok()
-        .as_deref()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                line.strip_prefix("MemAvailable:")?
-                    .split_whitespace()
-                    .next()?
-                    .parse::<u32>()
-                    .ok()
-            })
-        })
-    {
-        // Оставляем работающим службам запас сверх памяти кодировщика.
-        let budget = available_kib.saturating_sub(8192);
-        if options.lzma_options.get_memory_usage() > budget {
-            options = XzOptions::with_preset(1);
-        }
-        if options.lzma_options.get_memory_usage() > budget {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "недостаточно RAM для сжатия резервного слота",
-            ));
-        }
-    }
-    if architecture == "aarch64-openwrt-musl" {
-        options.prepend_pre_filter(lzma_rust2::FilterType::BcjArm64, 0);
-    }
-    Ok(options)
-}
-
 pub(super) fn restore(root: &Path, id: &str) -> Result<(), InstallError> {
     let releases = root.join("releases");
     let release = releases.join(id);
@@ -151,7 +110,7 @@ pub(super) fn restore(root: &Path, id: &str) -> Result<(), InstallError> {
             false,
             DECODE_LIMIT_KIB,
         );
-        let decoder = extract_bundle(decoder, &stage, ARCHIVE_MAX_EXPANDED_BYTES)?;
+        let decoder = extract_bundle(decoder, &stage, ARCHIVE_MAX_EXPANDED_BYTES, None)?;
         // Дочитываем XZ для проверки контрольной суммы и ограничиваем хвост tar.
         if io::copy(&mut decoder.take(16 * 1024), &mut io::sink())? == 16 * 1024 {
             return Err(InstallError::InvalidArchive(

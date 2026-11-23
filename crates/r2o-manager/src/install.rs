@@ -236,7 +236,19 @@ fn prepare_archive_inner(
         archive_file.seek(SeekFrom::Start(0))?;
         let bundle = work.join("bundle");
         fs::create_dir(&bundle)?;
-        extract_bundle(GzDecoder::new(&mut archive_file), &bundle, max_expanded)?;
+        let existing_builds = if copy {
+            None
+        } else {
+            read_install_slots(root)?
+                .map(|slots| root.join("releases").join(slots.current).join("builds"))
+                .filter(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+        };
+        extract_bundle(
+            GzDecoder::new(&mut archive_file),
+            &bundle,
+            max_expanded,
+            existing_builds.as_deref(),
+        )?;
         validate_bundle(&bundle, architecture)?;
         if manifest.metadata.is_some() {
             abi::validate_bundle_abi(&bundle, architecture)?;
@@ -435,7 +447,7 @@ fn activate_bundle_locked(
     };
     write_slots_atomically(root, &slots)?;
     if !root.join("state/update-pending.json").try_exists()? {
-        prune_obsolete_releases(root, &slots);
+        let _ = prune_obsolete_releases(root, &slots);
     }
     Ok(slots)
 }
@@ -445,23 +457,28 @@ fn activate_bundle_locked(
 /// каталоги без совпадающего `release-id` не трогаем.
 pub(crate) fn cleanup_releases(root: &Path) -> Result<(), InstallError> {
     let _lock = ManagerLock::acquire(root)?;
-    if let Some(slots) = read_install_slots(root)? {
-        prune_obsolete_releases(root, &slots);
-        if let Some(previous) = &slots.previous
-            && rollback_archive::supported_by(root, &slots.current)
-        {
-            rollback_archive::compact(root, previous)?;
+    if let Some(mut slots) = read_install_slots(root)? {
+        if slots.previous.take().is_some() {
+            write_slots_atomically(root, &slots)?;
         }
+        prune_obsolete_releases(root, &slots)?;
     }
     Ok(())
 }
 
-fn prune_obsolete_releases(root: &Path, slots: &InstallSlots) {
+pub(crate) fn discard_unreferenced_releases(root: &Path) -> Result<(), InstallError> {
+    let _lock = ManagerLock::acquire(root)?;
+    if let Some(slots) = read_install_slots(root)? {
+        prune_obsolete_releases(root, &slots)?;
+    }
+    Ok(())
+}
+
+fn prune_obsolete_releases(root: &Path, slots: &InstallSlots) -> io::Result<()> {
     let releases = root.join("releases");
-    let Ok(entries) = fs::read_dir(&releases) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let mut deleted = false;
+    for entry in fs::read_dir(&releases)? {
+        let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -483,10 +500,13 @@ fn prune_obsolete_releases(root: &Path, slots: &InstallSlots) {
         if marker.as_deref() != Some(name.as_bytes()) {
             continue;
         }
-        // Уборка не должна отменять уже состоявшуюся активацию: если старый
-        // выпуск занят или права не позволяют, установка всё равно успешна.
-        let _ = fs::remove_dir_all(&path);
+        fs::remove_dir_all(&path)?;
+        deleted = true;
     }
+    if deleted {
+        sync_directory(&releases)?;
+    }
+    Ok(())
 }
 
 /// Убрать оставшиеся после SIGKILL/сбоя питания временные каталоги и
@@ -613,6 +633,7 @@ fn extract_bundle<R: Read>(
     reader: R,
     destination: &Path,
     max_expanded: u64,
+    existing_builds: Option<&Path>,
 ) -> Result<R, InstallError> {
     let mut archive = Archive::new(reader);
     archive.set_preserve_permissions(false);
@@ -666,6 +687,23 @@ fn extract_bundle<R: Read>(
         if expanded > max_expanded {
             return Err(InstallError::ArchiveExpandedTooLarge);
         }
+        #[cfg(unix)]
+        if entry_type.is_file()
+            && entry
+                .header()
+                .mode()
+                .is_ok_and(|mode| mode & 0o7755 == 0o755)
+            && path.parent() == Some(Path::new("builds"))
+            && let Some(builds) = existing_builds
+            && read_or_reuse_binary(
+                &mut entry,
+                &builds.join(path.file_name().expect("имя бинарника")),
+                &destination.join(&path),
+                size,
+            )?
+        {
+            continue;
+        }
         entry.set_mask(0o7022);
         if !entry
             .unpack_in(destination)
@@ -678,6 +716,50 @@ fn extract_bundle<R: Read>(
         }
     }
     Ok(archive.into_inner())
+}
+
+#[cfg(unix)]
+fn read_or_reuse_binary(
+    entry: &mut impl Read,
+    existing: &Path,
+    destination: &Path,
+    size: u64,
+) -> io::Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = fs::symlink_metadata(existing) else {
+        return Ok(false);
+    };
+    if !meta.is_file() || meta.len() != size || meta.permissions().mode() & 0o7777 != 0o755 {
+        return Ok(false);
+    }
+    let mut source = File::open(existing)?;
+    let mut matched = 0;
+    let mut incoming = [0; 16 * 1024];
+    let mut old = [0; 16 * 1024];
+    fs::create_dir_all(destination.parent().expect("каталог бинарников"))?;
+    while matched < size {
+        let length = (size - matched).min(incoming.len() as u64) as usize;
+        entry.read_exact(&mut incoming[..length])?;
+        source.read_exact(&mut old[..length])?;
+        if incoming[..length] != old[..length] {
+            // Префикс уже совпал с подписанным архивом. Записываем его только при различии.
+            source.rewind()?;
+            let mut file = File::create_new(destination)?;
+            io::copy(&mut (&mut source).take(matched), &mut file)?;
+            file.write_all(&incoming[..length])?;
+            io::copy(entry, &mut file)?;
+            file.set_permissions(fs::Permissions::from_mode(0o755))?;
+            return Ok(true);
+        }
+        matched += length as u64;
+    }
+    if fs::hard_link(existing, destination).is_err() {
+        source.rewind()?;
+        let mut file = File::create_new(destination)?;
+        io::copy(&mut source, &mut file)?;
+        file.set_permissions(fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(true)
 }
 
 fn validate_archive_path(path: &Path) -> Result<PathBuf, InstallError> {
@@ -779,7 +861,7 @@ pub(crate) fn activate_previous_release(
     };
     write_slots_atomically(root, &slots)?;
     if !root.join("state/update-pending.json").try_exists()? {
-        prune_obsolete_releases(root, &slots);
+        let _ = prune_obsolete_releases(root, &slots);
     }
     Ok(Some(slots))
 }
@@ -1525,15 +1607,11 @@ mod tests {
 
         activate_bundle(&root, &previous, "r2o-previous", "mipsel").unwrap();
         let slots = activate_bundle(&root, &current, "r2o-current", "mipsel").unwrap();
-        cleanup_releases(&root).unwrap();
         let old = root.join("releases/r2o-previous");
         let archive = old.join(rollback_archive::ARCHIVE);
         assert!(old.join("builds").is_dir());
         assert!(!archive.exists());
-        let router = root.join("releases/r2o-current/router");
-        fs::create_dir(&router).unwrap();
-        fs::write(router.join("rollback-xz"), rollback_archive::FORMAT).unwrap();
-        crate::compact_install_rollback(&root).unwrap();
+        rollback_archive::compact_fixture(&root, "r2o-previous").unwrap();
         assert!(!old.join("builds").exists());
         assert!(old.join("router/controller-applets").is_file());
         let packed = fs::read(&archive).unwrap();
@@ -1630,7 +1708,7 @@ mod tests {
 
         restore_update_slots(&root, "r2o-trial", &before).unwrap();
         assert_eq!(read_install_slots(&root).unwrap(), Some(before));
-        cleanup_releases(&root).unwrap();
+        discard_unreferenced_releases(&root).unwrap();
         assert!(root.join("releases/r2o-first").exists());
         assert!(root.join("releases/r2o-second").exists());
         assert!(!root.join("releases/r2o-trial").exists());
@@ -2004,5 +2082,45 @@ mod tests {
         ));
         assert!(!temp.0.join("escaped").exists());
         assert!(read_install_slots(&root).unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reuses_a_matching_binary_and_preserves_the_old_inode_on_changes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = TestDir::new();
+        let old = temp.0.join("old");
+        let same = temp.0.join("same");
+        let different = temp.0.join("different");
+        let original = vec![42; 40 * 1024];
+        fs::write(&old, &original).unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            read_or_reuse_binary(&mut original.as_slice(), &old, &same, original.len() as u64)
+                .unwrap()
+        );
+        assert_eq!(
+            fs::metadata(&same).unwrap().ino(),
+            fs::metadata(&old).unwrap().ino()
+        );
+
+        let mut replacement = original.clone();
+        replacement[35 * 1024] = 7;
+        assert!(
+            read_or_reuse_binary(
+                &mut replacement.as_slice(),
+                &old,
+                &different,
+                replacement.len() as u64
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            fs::metadata(&different).unwrap().ino(),
+            fs::metadata(&old).unwrap().ino()
+        );
+        assert_eq!(fs::read(old).unwrap(), original);
+        assert_eq!(fs::read(different).unwrap(), replacement);
     }
 }

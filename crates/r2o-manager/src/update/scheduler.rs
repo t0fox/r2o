@@ -51,6 +51,9 @@ pub fn run_update_schedule(
     default_auto: bool,
 ) -> Result<(), UpdateError> {
     set_auto_update(root, default_auto)?;
+    if let Err(error) = lifecycle::finish_legacy_update(root) {
+        eprintln!("r2o-manager: очистка старого слота: {error}");
+    }
     let log_path = root.join("log/update-scheduler.log");
     let mut children: Vec<Child> = Vec::new();
     loop {

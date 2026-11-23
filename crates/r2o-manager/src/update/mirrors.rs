@@ -1,7 +1,12 @@
 use super::*;
 
-pub(super) fn cache_path(root: &Path, digest: &str) -> Result<PathBuf, UpdateError> {
-    let directory = root.join("state/update-download");
+pub(super) fn cache_path(root: &Path, asset: &crate::ReleaseAsset) -> Result<PathBuf, UpdateError> {
+    let disk = root.join("state/update-download");
+    let directory = if fs::read_dir(&disk).is_ok_and(|mut entries| entries.next().is_some()) {
+        disk
+    } else {
+        archive_ram_directory(root, asset.bytes.unwrap_or(0)).unwrap_or(disk)
+    };
     match fs::create_dir(&directory) {
         Ok(()) => {
             #[cfg(unix)]
@@ -18,7 +23,19 @@ pub(super) fn cache_path(root: &Path, digest: &str) -> Result<PathBuf, UpdateErr
         }
         Err(error) => return Err(error.into()),
     }
-    let archive = directory.join(digest);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(&directory)?;
+        if meta.uid() != unsafe { libc::geteuid() }
+            || !directory.starts_with(root) && meta.mode() & 0o077 != 0
+        {
+            return Err(
+                io::Error::other("посторонний владелец или права каталога загрузки").into(),
+            );
+        }
+    }
+    let archive = directory.join(&asset.sha256);
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         if entry.path() != archive && entry.file_type()?.is_file() {
@@ -31,6 +48,42 @@ pub(super) fn cache_path(root: &Path, digest: &str) -> Result<PathBuf, UpdateErr
         }
     }
     Ok(archive)
+}
+
+#[cfg(target_os = "linux")]
+fn archive_ram_directory(root: &Path, size: u64) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    use std::os::fd::AsRawFd;
+    let directory = Path::new("/tmp");
+    let file = File::open(directory).ok()?;
+    let mut data = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::fstatfs(file.as_raw_fd(), data.as_mut_ptr()) } != 0
+        || unsafe { data.assume_init() }.f_type as u64 != 0x0102_1994
+    {
+        return None;
+    }
+    let text = fs::read_to_string("/proc/meminfo").ok()?;
+    let available = text
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("MemAvailable:")?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })?
+        .saturating_mul(1024);
+    if size == 0 || size > available / 8 || available.saturating_sub(size) < 64 * 1024 * 1024 {
+        return None;
+    }
+    require_space(directory, size + 1024 * 1024).ok()?;
+    let digest = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
+    Some(directory.join(format!("r2o-update-download-{digest}")))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn archive_ram_directory(_root: &Path, _size: u64) -> Option<PathBuf> {
+    None
 }
 
 pub(super) struct Route {
@@ -180,13 +233,13 @@ pub(super) fn routes(
     Ok(routes)
 }
 
-pub(super) fn metadata(
-    routes: &[Route],
+pub(super) fn metadata<'a>(
+    routes: &'a [Route],
     url: &str,
     body: &Path,
     signature: &Path,
     expected: &crate::ReleaseManifest,
-) -> Result<(Vec<u8>, Vec<u8>), UpdateError> {
+) -> Result<(Vec<u8>, Vec<u8>, &'a Route), UpdateError> {
     let mut last = catalog::invalid("манифест недоступен");
     for route in routes {
         let result = (|| {
@@ -204,7 +257,7 @@ pub(super) fn metadata(
                     "манифест отличается от подписанного каталога",
                 ));
             }
-            Ok((bytes, sig))
+            Ok((bytes, sig, route))
         })();
         let _ = fs::remove_file(body);
         let _ = fs::remove_file(signature);
@@ -223,7 +276,7 @@ pub(super) fn archive(
     asset: &crate::ReleaseAsset,
     root: &Path,
     state: &mut Value,
-    preferred: Option<&str>,
+    metadata_source: &Route,
 ) -> Result<(), UpdateError> {
     let total = asset
         .bytes
@@ -242,43 +295,25 @@ pub(super) fn archive(
         fs::remove_file(destination)?;
         existing = 0;
     }
-    require_space(root, total - existing + expanded + 1024 * 1024)?;
-    let mut order = std::thread::scope(|scope| {
-        let attempts: Vec<_> = routes
+    let reserve = expanded + 1024 * 1024;
+    if destination.starts_with(root) {
+        require_space(root, total - existing + reserve)?;
+    } else {
+        require_space(root, reserve)?;
+        require_space(
+            destination.parent().expect("каталог загрузки"),
+            total - existing,
+        )?;
+    }
+    // Источник манифеста уже ответил по HTTPS. Начинаем загрузку сразу.
+    let order = std::iter::once(metadata_source).chain(
+        routes
             .iter()
-            .map(|route| {
-                let request = route.url(url);
-                let result = scope.spawn(move || {
-                    let start = Instant::now();
-                    let available = download_rust(
-                        &request,
-                        destination,
-                        total,
-                        "7",
-                        &[],
-                        RequestKind::Probe(total),
-                    )
-                    .is_ok();
-                    (!available, start.elapsed(), route)
-                });
-                result
-            })
-            .collect();
-        attempts
-            .into_iter()
-            .map(|handle| handle.join().expect("проба источника"))
-            .collect::<Vec<_>>()
-    });
-    order.sort_by_key(|(failed, elapsed, route)| {
-        (
-            preferred.is_none_or(|source| source != route.name),
-            *failed,
-            *elapsed,
-        )
-    });
+            .filter(|route| !std::ptr::eq(*route, metadata_source)),
+    );
     let mut attempts = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(600);
-    for (_, _, route) in order {
+    for route in order {
         for _ in 0..2 {
             if read_cancel(root)? {
                 return Err(cancelled());

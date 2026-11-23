@@ -7,7 +7,7 @@ description = "Signed release verification and lifecycle manager for r2o"
 [dependencies]
 base64 = "0.22"
 flate2 = "1.1"
-lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "encoder", "xz"] }
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz"] }
 ring = "0.17"
 r2k-core = { path = "../r2k-core" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -19,6 +19,9 @@ webpki-roots = "0.26"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+lzma-rust2 = { version = "0.24", default-features = false, features = ["encoder"] }
 
 [lib]
 name = "r2o_manager"

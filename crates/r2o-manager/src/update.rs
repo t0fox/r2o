@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::{Command, Stdio};
@@ -347,7 +347,7 @@ fn stage_update_in(
     let signature_path = work.join("latest.json.sig");
     state["last_release"] = json!(target.release_id);
     let routes = mirrors::routes(target, source)?;
-    let (manifest_bytes, signature) =
+    let (manifest_bytes, signature, metadata_source) =
         mirrors::metadata(&routes, &url, &manifest_path, &signature_path, target)?;
     let public_key = decode_public_key(PUBLIC_KEY)?;
     let manifest = verify_manifest(&manifest_bytes, &signature, &public_key)?;
@@ -389,7 +389,7 @@ fn stage_update_in(
         "{DOWNLOAD_URL}/{}/r2o-{architecture}.tar.gz",
         manifest.release_id
     );
-    let archive_path = mirrors::cache_path(root, &target.assets[architecture].sha256)?;
+    let archive_path = mirrors::cache_path(root, &target.assets[architecture])?;
     state["phase"] = json!("download");
     write_state(root, state)?;
     mirrors::archive(
@@ -399,7 +399,7 @@ fn stage_update_in(
         &target.assets[architecture],
         root,
         state,
-        source,
+        metadata_source,
     )?;
     let _ = fs::remove_file(root.join("state/update-transfer.json"));
     state["phase"] = json!("verify");
@@ -412,8 +412,12 @@ fn stage_update_in(
         &signature,
         &public_key,
         architecture,
-    )?;
+    );
     let _ = fs::remove_file(&archive_path);
+    if let Some(directory) = archive_path.parent() {
+        let _ = fs::remove_dir(directory);
+    }
+    let prepared = prepared?;
     state["phase"] = json!("stage");
     write_state(root, state)?;
     let layout = (|| {
@@ -682,6 +686,29 @@ fn cleanup_stale_update_work_dirs(root: &Path) {
             let _ = fs::remove_dir_all(&path);
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Ok(entries) = fs::read_dir(root.join("state")) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let parts = name.to_str().and_then(|name| {
+                name.strip_prefix(".update-")?
+                    .strip_suffix(".json")?
+                    .split_once('-')
+            });
+            if let Some((pid, sequence)) = parts
+                && let Ok(pid) = pid.parse::<u32>()
+                && pid > 0
+                && sequence.parse::<usize>().is_ok()
+                && matches!(
+                    Path::new("/proc").join(pid.to_string()).try_exists(),
+                    Ok(false)
+                )
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 impl Drop for UpdateLock {
@@ -763,7 +790,6 @@ struct HttpHead {
 enum RequestKind<'a> {
     Metadata,
     Redirect,
-    Probe(u64),
     Archive {
         total: u64,
         root: &'a Path,
@@ -796,29 +822,46 @@ fn download_rust(
                 "перенаправление на недопустимый хост {host}"
             )));
         }
-        let addresses = if let Some(addresses) = override_map.get(host.as_str()) {
-            (*addresses).to_vec()
-        } else {
-            resolve_download_host(&host)?
-        };
+        let overridden = override_map.get(host.as_str()).copied();
+        let addresses =
+            overridden.map_or_else(|| local_download_addresses(&host), |ips| ips.to_vec());
         let mut last_error = None;
         let mut next_url = None;
-        for address in addresses.into_iter().take(4) {
-            match fetch_https(
-                &host,
-                &path,
-                address,
-                destination,
-                max_bytes,
-                deadline,
-                kind,
-            ) {
-                Ok(Some(location)) => {
-                    next_url = Some(resolve_redirect(&current, &host, &location, &initial_host)?);
-                    break;
+        let mut tried = Vec::new();
+        for use_fallback in [false, true] {
+            if use_fallback && (overridden.is_some() || Instant::now() >= deadline) {
+                break;
+            }
+            let candidates = if use_fallback {
+                resolve_download_host(&host)?
+            } else {
+                addresses.clone()
+            };
+            for address in candidates.into_iter().take(4) {
+                if tried.contains(&address) {
+                    continue;
                 }
-                Ok(None) => return Ok(None),
-                Err(error) => last_error = Some(error),
+                tried.push(address);
+                match fetch_https(
+                    &host,
+                    &path,
+                    address,
+                    destination,
+                    max_bytes,
+                    deadline,
+                    kind,
+                ) {
+                    Ok(Some(location)) => {
+                        next_url =
+                            Some(resolve_redirect(&current, &host, &location, &initial_host)?);
+                        break;
+                    }
+                    Ok(None) => return Ok(None),
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            if next_url.is_some() {
+                break;
             }
         }
         if let Some(next) = next_url {
@@ -959,7 +1002,6 @@ fn fetch_https(
     };
     let range = match kind {
         RequestKind::Archive { .. } if offset > 0 => format!("Range: bytes={offset}-\r\n"),
-        RequestKind::Probe(total) => format!("Range: bytes=0-{}\r\n", total.min(16 * 1024) - 1),
         _ => String::new(),
     };
     let request = format!(
@@ -1016,18 +1058,6 @@ fn receive_response(
             if offset > 0 && offset < total && range_matches(&parsed, offset, total - 1, total) =>
         {
             total - offset
-        }
-        RequestKind::Probe(total) => {
-            let probe = total.min(16 * 1024);
-            if range_matches(&parsed, 0, probe - 1, total)
-                || parsed.status == 200 && parsed.content_length == Some(total) && !parsed.chunked
-            {
-                copy_exact(stream, &mut io::sink(), probe, probe, deadline)?;
-                return Ok(None);
-            }
-            return Err(
-                io::Error::other("источник вернул неверный ответ на пробный диапазон").into(),
-            );
         }
         _ => {
             return Err(UpdateError::Download(format!(
@@ -1535,22 +1565,52 @@ fn resolve_download_overrides(url: &str) -> Result<Vec<(String, Vec<Ipv4Addr>)>,
 }
 
 fn resolve_download_host(host: &str) -> Result<Vec<Ipv4Addr>, UpdateError> {
+    let addresses =
+        query_download_addresses(host, DNS_RESOLVERS.map(|dns| IpAddr::V4(dns.address)));
+    if addresses.is_empty() {
+        return Err(UpdateError::Download(format!(
+            "выбранные DNS не вернули IPv4-адрес для {host}"
+        )));
+    }
+    Ok(addresses)
+}
+
+fn local_download_addresses(host: &str) -> Vec<Ipv4Addr> {
+    let config = fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    let servers = config.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()? != "nameserver" {
+            return None;
+        }
+        fields.next()?.parse::<IpAddr>().ok()
+    });
+    // DNS указывает адрес. Доверие к серверу и выпуску дают TLS и подписи.
+    query_download_addresses(host, servers.take(2))
+}
+
+fn query_download_addresses(
+    host: &str,
+    servers: impl IntoIterator<Item = IpAddr>,
+) -> Vec<Ipv4Addr> {
     let mut addresses = Vec::new();
-    for resolver in DNS_RESOLVERS {
+    for server in servers {
         let id = NEXT_DNS_ID.fetch_add(1, Ordering::Relaxed);
         let Ok(query) = build_a_query(id, host) else {
             continue;
         };
-        let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
+        let bind = if server.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let Ok(socket) = UdpSocket::bind(bind) else {
             continue;
         };
         if socket.set_read_timeout(Some(DOWNLOAD_DNS_TIMEOUT)).is_err()
             || socket
                 .set_write_timeout(Some(DOWNLOAD_DNS_TIMEOUT))
                 .is_err()
-            || socket
-                .connect(SocketAddr::from((resolver.address, 53)))
-                .is_err()
+            || socket.connect(SocketAddr::from((server, 53))).is_err()
             || socket.send(&query).is_err()
         {
             continue;
@@ -1567,12 +1627,7 @@ fn resolve_download_host(host: &str) -> Result<Vec<Ipv4Addr>, UpdateError> {
             }
         }
     }
-    if addresses.is_empty() {
-        return Err(UpdateError::Download(format!(
-            "выбранные DNS не вернули IPv4-адрес для {host}"
-        )));
-    }
-    Ok(addresses)
+    addresses
 }
 
 fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, UpdateError> {
@@ -1663,9 +1718,14 @@ fn write_json(root: &Path, name: &str, state: &Value) -> Result<(), UpdateError>
     fs::create_dir_all(parent)?;
     let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(".update-{}-{sequence}.json", std::process::id()));
-    let bytes = serde_json::to_vec(state).map_err(|error| io::Error::other(error.to_string()))?;
+    let mut bytes =
+        serde_json::to_vec(state).map_err(|error| io::Error::other(error.to_string()))?;
     if name == "update.json" && bytes.len() >= 16 * 1024 - 1 {
         return Err(io::Error::other("состояние обновления превышает 16 КиБ").into());
+    }
+    bytes.push(b'\n');
+    if read_bounded(&path, bytes.len() as u64).is_ok_and(|old| old == bytes) {
+        return Ok(());
     }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -1677,7 +1737,6 @@ fn write_json(root: &Path, name: &str, state: &Value) -> Result<(), UpdateError>
     let result = (|| {
         let mut file = options.open(&temporary)?;
         file.write_all(&bytes)?;
-        file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, &path)?;
         crate::install::sync_directory(parent)?;

@@ -137,7 +137,8 @@ def run(work, manager, panel, public):
         code, reply = request(f"/api/control/{action}", "POST")
         (work / "continue").touch()
         installed = wait_for(update, lambda value: value.get("phase") == "commit", 20)
-        assert installed["current"] == expected and installed["previous"] == NEXT, installed
+        assert installed["current"] == expected and installed["previous"] is None, installed
+        wait_for(lambda: list((root / "releases").iterdir()), lambda slots: [slot.name for slot in slots] == [expected])
         assert installed["last_ok"] and installed["history"][-1]["healthy"], installed
         assert config.read_bytes() == b"MODE=observe\n"
         assert catalog.read_bytes() == b'{"schema":1,"boxes":[],"note":"panel-restart-fixture"}\n'

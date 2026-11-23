@@ -58,7 +58,7 @@ if [ -f /audit/reboot-test ]; then
         commit-recorded)
             [ "$(slot)" = r2o-base ] && grep -q '"committed":true' "$journal"
             expected_current=r2o-base
-            expected_previous=r2o-next
+            expected_previous=-
             ;;
         *) [ "$(slot)" = r2o-base ] && [ -s "$journal" ] ;;
     esac || exit 1
@@ -91,7 +91,7 @@ if [ -f /audit/reboot-test ]; then
         setup_network
         "$manager" update-install --root "$root" --service /audit/adapter.sh --release "$target" --source github
         [ "$(slot)" = "$target" ]
-        [ "$(sed -n '3p' "$root/release-slots")" = r2o-next ]
+        [ "$(sed -n '3p' "$root/release-slots")" = - ]
         user_data_kept
         printf 'R2O_RETRY_OK\\n'
     fi
