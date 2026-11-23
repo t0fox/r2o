@@ -438,7 +438,13 @@ spawn_component() {
     logfile=$3
     shift 3
     component_running "$component" "$pidfile" && return 0
-    stop_component "$component" "$pidfile"
+    case "$pidfile" in
+        "$DP4_PID"|"$DP6_PID"|"$CT4_PID"|"$CT6_PID")
+            # engine_stop уже очистил старые экземпляры перед запуском пары.
+            # Общий поиск по имени здесь остановит уже запущенное семейство.
+            rm -f "$pidfile" || return 1 ;;
+        *) stop_component "$component" "$pidfile" ;;
+    esac
     [ -x "$MANAGER" ] || die "нет executable manager $MANAGER"
     # shellcheck disable=SC2016 # this code is deliberately evaluated by the child shell
     start-stop-daemon -S -b -m -p "$pidfile" -x /bin/sh -- \
