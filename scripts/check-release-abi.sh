@@ -12,8 +12,8 @@ flags=
 attributes=
 case "$abi" in
     mipsel)
-        cpu=mipsel; class=32; endian=little; machine='MIPS R3000'
-        prefix=/usr/mipsel-linux-gnu; loader=/lib/ld.so.1 ;;
+        cpu=mipsel; class=32; endian=little; machine='MIPS R3000'; model=24Kc
+        flags=mips32r2; attributes='FP ABI: Soft float' ;;
     mipsel-openwrt-musl)
         cpu=mipsel; class=32; endian=little; machine='MIPS R3000'; flags=mips32r2
         loader=/lib/ld-musl-mipsel-sf.so.1

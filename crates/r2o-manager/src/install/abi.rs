@@ -17,7 +17,7 @@ pub(super) fn validate_bundle_abi(bundle: &Path, abi: &str) -> Result<(), Instal
 
 fn check_elf(file: &mut File, abi: &str) -> io::Result<()> {
     let (bits, endian, machine, loader): (u8, u8, u16, Option<&[u8]>) = match abi {
-        "mipsel" => (1, 1, 8, Some(b"/lib/ld.so.1\0")),
+        "mipsel" => (1, 1, 8, None),
         "mipsel-openwrt-musl" => (1, 1, 8, Some(b"/lib/ld-musl-mipsel-sf.so.1\0")),
         "aarch64-openwrt-musl" => (2, 1, 183, None),
         "armv5-musleabi" | "armv7-openwrt-musl" | "armv7-musleabi" => (1, 1, 40, None),
@@ -55,7 +55,9 @@ fn check_elf(file: &mut File, abi: &str) -> io::Result<()> {
         decode(&header[48..52])
     };
     let flags_ok = match abi {
-        "mipsel-openwrt-musl" | "mips-openwrt-musl" => flags & 0xf000_0000 == 0x7000_0000,
+        "mipsel" | "mipsel-openwrt-musl" | "mips-openwrt-musl" => {
+            flags & 0xf000_0000 == 0x7000_0000
+        }
         "mips64el-musl" => flags & 0xf000_0000 == 0x8000_0000,
         "armv7-openwrt-musl" => flags & 0x400 != 0,
         "armv5-musleabi" | "armv7-musleabi" => flags & 0xff00_0400 == 0x0500_0000,
@@ -124,6 +126,29 @@ fn check_elf(file: &mut File, abi: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keenetic_requires_static_mips32r2() {
+        let path = std::env::temp_dir().join(format!("r2o-keenetic-abi-{}", std::process::id()));
+        let mut bytes = [0u8; 100];
+        bytes[..7].copy_from_slice(b"\x7fELF\x01\x01\x01");
+        bytes[18..20].copy_from_slice(&8u16.to_le_bytes());
+        bytes[28..32].copy_from_slice(&52u32.to_le_bytes());
+        bytes[36..40].copy_from_slice(&0x7000_0000u32.to_le_bytes());
+        bytes[42..44].copy_from_slice(&32u16.to_le_bytes());
+        bytes[44..46].copy_from_slice(&1u16.to_le_bytes());
+        bytes[52..56].copy_from_slice(&1u32.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+        assert!(check_elf(&mut File::open(&path).unwrap(), "mipsel").is_ok());
+
+        bytes[52..56].copy_from_slice(&3u32.to_le_bytes());
+        bytes[56..60].copy_from_slice(&84u32.to_le_bytes());
+        bytes[68..72].copy_from_slice(&13u32.to_le_bytes());
+        bytes[84..97].copy_from_slice(b"/lib/ld.so.1\0");
+        fs::write(&path, bytes).unwrap();
+        assert!(check_elf(&mut File::open(&path).unwrap(), "mipsel").is_err());
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn abi_check_refuses_wrong_machine_and_wrong_loader() {

@@ -7,6 +7,7 @@ STABLE=1.98.0
 ABI=${ABI:?не задан ABI сборки}
 case "$ABI" in
     armv7-musleabi) TARGET=armv7-unknown-linux-musleabi; ZIG_TARGET=arm-linux-musleabi; ZIG_CPU=generic+v7a ;;
+    mipsel) TARGET=mipsel-unknown-linux-musl; ZIG_TARGET=mipsel-linux-musleabi; ZIG_CPU=mips32r2+soft_float ;;
     mips-openwrt-musl) TARGET=mips-unknown-linux-musl; ZIG_TARGET=mips-linux-musleabi; ZIG_CPU=mips32r2+soft_float ;;
     mips64el-musl) TARGET=mips64el-unknown-linux-muslabi64; ZIG_TARGET=mips64el-linux-muslabi64; ZIG_CPU=mips64r2 ;;
     x86_64-musl) TARGET=x86_64-unknown-linux-musl; ZIG_TARGET=x86_64-linux-musl; ZIG_CPU=x86_64 ;;
@@ -27,7 +28,7 @@ export "CARGO_TARGET_${cargo_target_env}_LINKER=$cc"
 export "CARGO_TARGET_${cargo_target_env}_RUSTFLAGS=-Ctarget-feature=+crt-static -Clink-self-contained=no -Crelocation-model=static"
 export CARGO_PROFILE_RELEASE_PANIC=abort
 case "$ABI" in
-    mips-openwrt-musl|mips64el-musl)
+    mipsel|mips-openwrt-musl|mips64el-musl)
         if ! rustup component list --toolchain "$NIGHTLY" --installed 2>/dev/null | grep -qx rust-src; then
             rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src
         fi

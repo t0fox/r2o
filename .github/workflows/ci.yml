@@ -43,6 +43,8 @@ jobs:
           shellcheck -S warning -s sh router/S99r2o router/S99r2o.shim router/openwrt-init
       - name: Проверить передачу артефактов из CI в Release
         run: python3 -B scripts/test-ci-release-artifacts.py
+      - name: Проверить закреплённые суммы установщика
+        run: python3 -B scripts/bootstrap-pins.py
       - name: Проверить форматирование Rust
         run: cargo fmt --all --check
 
@@ -275,10 +277,10 @@ jobs:
       matrix:
         include:
           - abi: mipsel
-            target: mipsel-unknown-linux-gnu
-            script: scripts/build-mipsel.sh
-            packages: gcc-mipsel-linux-gnu binutils zstd curl
-            apt_cache_key: r2o-apt-ubuntu-24.04-mipsel-cross-v2
+            target: mipsel-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            apt_cache_key: ''
             sdk_archive: ''
             sdk_sha256: ''
             rust_target: ''
