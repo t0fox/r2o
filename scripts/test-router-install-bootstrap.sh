@@ -161,8 +161,16 @@ EOF
 cat > "$MOCK/start-stop-daemon" <<'EOF'
 #!/bin/sh
 case " $* " in *' -t '*) exit 88 ;; esac
-while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+executable=
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    case "$1" in -x) executable=$2; shift ;; esac
+    shift
+done
 shift
+exec "$executable" "$@"
+EOF
+cat > "$MOCK/sh" <<'EOF'
+#!/bin/sh
 exec /bin/sh "$@"
 EOF
 cat > "$MOCK/opkg" <<'EOF'

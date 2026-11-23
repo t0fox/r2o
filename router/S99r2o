@@ -166,6 +166,26 @@ fi
 say() { echo "r2o: $*"; }
 die() { say "$*" >&2; exit 1; }
 
+select_command_shell() {
+    # PATH выше предпочитает Entware. /bin/sh в Keenetic — NDM wrapper,
+    # который при -c не передаёт позиционные аргументы дочерней оболочке.
+    COMMAND_SHELL=$(command -v sh) || return 1
+    "$COMMAND_SHELL" -c '[ "$#" -eq 1 ] && [ "$1" = r2o-shell-probe ]' r2o-shell r2o-shell-probe || {
+        say "оболочка $COMMAND_SHELL не сохраняет аргументы -c; проверьте установку Entware/BusyBox" >&2
+        return 1
+    }
+}
+
+spawn_logged() {
+    command_pidfile=$1
+    command_log=$2
+    shift 2
+    select_command_shell || return 1
+    # shellcheck disable=SC2016 # Эти переменные раскрывает дочерняя оболочка.
+    start-stop-daemon -S -b -m -p "$command_pidfile" -x "$COMMAND_SHELL" -- \
+        -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-spawn "$command_log" "$@"
+}
+
 ppe_call() {
     if [ "${1:-}" = status ]; then
         R2O_PPE_CONFIG="$CONF" \
@@ -450,9 +470,7 @@ spawn_component() {
         printf 'r2o: %s: не удалось открыть журнал запуска %s\n' "$component" "$logfile" >&2
         return 1
     fi
-    # shellcheck disable=SC2016 # this code is deliberately evaluated by the child shell
-    start-stop-daemon -S -b -m -p "$pidfile" -x /bin/sh -- \
-        -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-spawn "$logfile" \
+    spawn_logged "$pidfile" "$logfile" \
         "$MANAGER" exec --root "$ROOT" --component "$component" -- "$@" || {
             printf 'r2o: %s: start-stop-daemon завершился с кодом %s\n' "$component" "$?" >&2
             return 1
@@ -802,9 +820,7 @@ meta_dns_scheduler_start() {
     # останавливаются только процессы с --meta-dns-scheduler.
     meta_dns_scheduler_stop
     [ -x "$MANAGER" ] || return 1
-    start-stop-daemon -S -b -m -p "$META_DNS_PID" -x /bin/sh -- \
-        -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-spawn \
-        "$LOG/instagram-dns-scheduler.log" \
+    spawn_logged "$META_DNS_PID" "$LOG/instagram-dns-scheduler.log" \
         "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --meta-dns-scheduler ||
         return 1
     attempt=0
@@ -1027,8 +1043,7 @@ rt_proxy_start() {
         set -- "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- \
             --rt-proxy --listen=:"$RT_PROXY_PORT" --timeout=15m --so-mark="$rt_mark"
     fi
-    start-stop-daemon -S -b -m -p "$RT_PROXY_PID" -x /bin/sh -- \
-        -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-rt "$RT_PROXY_LOG" "$@" || return 1
+    spawn_logged "$RT_PROXY_PID" "$RT_PROXY_LOG" "$@" || return 1
     rt_attempt=0
     while [ "$rt_attempt" -lt 30 ]; do
         rt_proxy_running && break

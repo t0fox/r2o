@@ -317,13 +317,26 @@ nft_queue_check() {
     printf 'table inet r2o_probe_%s {\n chain probe {\n  queue num 65535 bypass\n }\n}\n' "$$" | nft -c -f -
 }
 
+select_command_shell() {
+    COMMAND_SHELL=/bin/sh
+    if [ "$PLATFORM" = keenetic ]; then
+        # /bin/sh в Keenetic — NDM wrapper: после -c он теряет $0 и аргументы.
+        # Запускаем непосредственно shell из того же Entware, что и opkg.
+        COMMAND_SHELL=${ENTWARE_OPKG%/*}/sh
+    fi
+    [ -x "$COMMAND_SHELL" ] || die "не найдена оболочка запуска $COMMAND_SHELL; проверьте установку Entware/BusyBox"
+    "$COMMAND_SHELL" -c '[ "$#" -eq 1 ] && [ "$1" = r2o-shell-probe ]' r2o-shell r2o-shell-probe ||
+        die "оболочка $COMMAND_SHELL не сохраняет аргументы -c; проверьте установку Entware/BusyBox"
+}
+
 check_datapath() {
     probe_binary=$1
     [ "$mode" != off ] || return 0
     [ -f "$probe_binary" ] && [ ! -L "$probe_binary" ] ||
         die "не найден datapath для $ARCH: $probe_binary"
+    select_command_shell
     # Те же флаги start-stop-daemon, что у службы, но с отдельными PID и журналом.
-    if start-stop-daemon -S -b -m -p "$TMP/preflight.pid" -x /bin/sh -- -c '
+    if start-stop-daemon -S -b -m -p "$TMP/preflight.pid" -x "$COMMAND_SHELL" -- -c '
         "$1" --offline-self-check >"$2/datapath-probe.log" 2>&1
         printf "%s\n" "$?" >"$2/datapath-probe.done"
     ' sh "$probe_binary" "$TMP"; then :; else
