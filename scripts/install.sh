@@ -323,7 +323,11 @@ fetch_one() (
     [ ! -t 1 ] || progress=--progress-bar
     rm -f "$2"
     # Старые версии curl не ограничивают HTTP-поток неизвестного размера.
-    ulimit -f "$((($3 + 511) / 512))" 2>/dev/null || true
+    # Системный лимит действует и на stderr, поэтому оставляем место для диагностики.
+    file_blocks=$((($3 + 511) / 512))
+    [ "$file_blocks" -ge 128 ] || file_blocks=128
+    ulimit -c 0 2>/dev/null || true
+    ulimit -f "$file_blocks" 2>/dev/null || true
     curl -q -fL "$progress" --globoff --proto '=https' --proto-redir '=https' \
         --connect-timeout 8 --max-time "$4" --max-redirs 5 --max-filesize "$3" \
         -o "$2" -- "$1" &&

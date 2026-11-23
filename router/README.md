@@ -7,8 +7,8 @@
 
 ## Установка через SSH
 
-Подключитесь к роутеру по SSH как `root` и вставьте целиком блок для
-[OpenWrt](../README.md#openwrt) или [Keenetic с Entware](../README.md#keenetic-с-entware).
+Подключитесь к роутеру по SSH как `root` и выполните
+[универсальную команду установки](../README.md#установка-по-ssh).
 
 Установщик распознаёт ABI OpenWrt `mipsel-openwrt-musl`,
 `aarch64-openwrt-musl`, `armv7-openwrt-musl`, `armv5-musleabi`, а также
@@ -208,3 +208,15 @@ R2O, не ссылки и не пользовательские журналы. 
 под общей блокировкой поиска, а затем запускает службы снова, если они работали.
 
 Проверка на физическом Keenetic или OpenWrt пока не записана.
+
+## Установка из локальных файлов
+
+Скопируйте на роутер установщик из проверенной копии репозитория, а также
+подписанный манифест, его подпись и архив для вашего ABI из одного выпуска.
+
+```sh
+R2O_LOCAL_MANIFEST=/tmp/latest.json \
+R2O_LOCAL_SIGNATURE=/tmp/latest.json.sig \
+R2O_LOCAL_ARCHIVE=/tmp/r2o-aarch64-openwrt-musl.tar.gz \
+sh /tmp/install.sh
+```

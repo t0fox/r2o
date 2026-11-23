@@ -140,44 +140,24 @@ Telegram **не требует собственного VPS или WARP**. Го�
 
 ### Установка по SSH
 
-Подключитесь к роутеру по SSH как `root` и вставьте целиком один блок для
-своей системы.
-
-#### OpenWrt
+Подключитесь по SSH как `root` и вставьте одну строку. Она одинакова для OpenWrt и Keenetic с Entware.
 
 ```sh
-(
-    if ! command -v curl >/dev/null 2>&1 ||
-        { [ ! -s /etc/ssl/cert.pem ] && [ ! -s /etc/ssl/certs/ca-certificates.crt ]; }; then
-        if command -v apk >/dev/null 2>&1; then
-            apk update && apk add curl ca-bundle || exit 1
-        else
-            opkg update && opkg install curl ca-bundle || exit 1
-        fi
-    fi
-    installer=$(mktemp /tmp/r2o-bootstrap.XXXXXX) || exit 1
-    trap 'rm -f "$installer"' EXIT
-    curl -fsSL --proto '=https' --proto-redir '=https' -o "$installer" \
-        'https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh' &&
-        sh "$installer"
-)
+(apk -U add curl ca-bundle || (opkg update && opkg install curl ca-bundle)) && r2o=$(curl -qfsS https://t0fox.github.io/r2o/get) && sh -c "$r2o"
 ```
 
-#### Keenetic с Entware
+Для доступа через зеркало задайте `R2O_GITHUB_MIRRORS` в окружении до установки.
+Можно указать до четырёх доверенных HTTPS-адресов через пробел.
+Поддерживаются префиксы `https://proxy.example/` и шаблоны
+`https://proxy.example/get/{url}` или `https://proxy.example/get?url={encoded_url}`.
+Фоновое обновление и панель используют эту переменную из `/opt/r2o/config`.
 
-```sh
-(
-    export PATH="/opt/bin:/opt/sbin:$PATH"
-    if [ ! -x /opt/bin/curl ] || [ ! -s /opt/etc/ssl/certs/ca-certificates.crt ]; then
-        /opt/bin/opkg update && /opt/bin/opkg install curl ca-bundle || exit 1
-    fi
-    installer=$(mktemp /tmp/r2o-bootstrap.XXXXXX) || exit 1
-    trap 'rm -f "$installer"' EXIT
-    /opt/bin/curl -fsSL --proto '=https' --proto-redir '=https' -o "$installer" \
-        'https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh' &&
-        sh "$installer"
-)
-```
+Короткий адрес отдаёт стартовый сценарий с GitHub Pages по HTTPS.
+При первом запуске GitHub Pages должен быть доступен. Сценарий сверяет SHA-256
+`bootstrap.sh`, а bootstrap проверяет
+SHA-256 `install.sh`. Для обоих можно использовать настроенное зеркало.
+При изменении `install.sh` обновите его закреплённую сумму командой
+`python3 scripts/bootstrap-pins.py --write`.
 
 Установщик сам определяет платформу и ABI, **доустанавливает недостающие
 зависимости** (`openssl-util` и модули NFQUEUE/conntrack)
@@ -190,14 +170,7 @@ Telegram **не требует собственного VPS или WARP**. Го�
 Установка, повторный запуск и откат идут через `router/install.sh` и
 `r2o-manager`.
 
-Если GitHub недоступен с роутера, используйте локальные файлы:
-
-```sh
-R2O_LOCAL_MANIFEST=/tmp/latest.json \
-R2O_LOCAL_SIGNATURE=/tmp/latest.json.sig \
-R2O_LOCAL_ARCHIVE=/tmp/r2o-aarch64-openwrt-musl.tar.gz \
-sh /tmp/install.sh
-```
+При недоступности GitHub Pages можно [установить выпуск из локальных файлов](router/README.md#установка-из-локальных-файлов).
 
 Перед обновлением рекомендуется сохранить `/opt/r2o/config` и
 `/opt/r2o/state/catalog.json`: конфигурация и найденные стратегии хранятся
@@ -220,7 +193,7 @@ sh /tmp/install.sh
 | `r2o-i686-musl.tar.gz` | i686 musl |
 | `r2o-powerpc64-musl.tar.gz` | PowerPC64 musl |
 | `r2o-riscv64-musl.tar.gz` | RISC-V 64 musl |
-| `r2o-mipsel.tar.gz` | GNU/Linux MIPS32 LE |
+| `r2o-mipsel.tar.gz` | Keenetic / Entware MIPS32r2 LE soft-float, статический musl |
 
 Архив содержит **набор исполняемых файлов и роутерные сценарии**, а не один
 универсальный бинарник. Размер `tar.gz` не равен размеру установленного выпуска.
