@@ -435,7 +435,7 @@ show_failed_install_logs() {
     log_dir=$ROOT/log
     shown=0
     if [ -d "$log_dir" ] && [ ! -L "$log_dir" ]; then
-        for file in "$log_dir/r2o-datapath.log" "$log_dir/r2o-datapath4.log" "$log_dir/r2o-datapath6.log"; do
+        for file in "$log_dir"/r2o-datapath.log "$log_dir"/r2o-datapath[46].log; do
             [ -s "$file" ] && [ ! -L "$file" ] || continue
             printf 'r2o: журнал запуска %s (последние 80 строк, до отката):\n' "$file" >&2
             tail -n 80 "$file" >&2 || true
@@ -492,6 +492,14 @@ cleanup_incomplete_first_install() {
         [ -f "$partial" ] && [ ! -L "$partial" ] || continue
         rm -f "$partial"
     done
+    log_dir=$ROOT/log
+    if [ -d "$log_dir" ] && [ ! -L "$log_dir" ]; then
+        for file in "$log_dir"/r2o-datapath.log "$log_dir"/r2o-datapath[46].log; do
+            [ -f "$file" ] && [ ! -L "$file" ] || continue
+            rm -f "$file"
+        done
+        rmdir "$log_dir" 2>/dev/null || true
+    fi
     rmdir "$ROOT" 2>/dev/null || true
     say 'удалены файлы незавершённой первой установки; зависимости системы сохранены'
 }
