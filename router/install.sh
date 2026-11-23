@@ -112,7 +112,12 @@ if [ -e "$NDM_DIR" ] || [ -L "$NDM_DIR" ]; then
     INSTALL_NDM_HOOK=1
 fi
 
-if [ -f /etc/openwrt_release ] || [ "${R2O_PLATFORM:-}" = openwrt ]; then
+PLATFORM=${R2O_PLATFORM:-}
+if [ -z "$PLATFORM" ] && [ -f "${R2O_OPENWRT_RELEASE:-/etc/openwrt_release}" ] &&
+    ! { [ -d /opt/etc/ndm ] && [ -x /opt/bin/opkg ]; }; then
+    PLATFORM=openwrt
+fi
+if [ "$PLATFORM" = openwrt ]; then
     if [ -L "$OPENWRT_INIT_DIR" ] || [ ! -d "$OPENWRT_INIT_DIR" ]; then
         echo "каталог служб OpenWrt должен быть обычным каталогом: $OPENWRT_INIT_DIR" >&2
         exit 2
@@ -220,7 +225,7 @@ if [ "$INSTALL_NDM_HOOK" = 1 ]; then
     echo "r2o: установлен NDM hook в $NDM_HOOK"
 fi
 
-if [ -f /etc/openwrt_release ] || [ "${R2O_PLATFORM:-}" = openwrt ]; then
+if [ "$PLATFORM" = openwrt ]; then
     OPENWRT_TMP=$OPENWRT_INIT_DIR/.r2o.new.$$
     cp "$BUNDLE/router/openwrt-init" "$OPENWRT_TMP"
     chmod 0755 "$OPENWRT_TMP"

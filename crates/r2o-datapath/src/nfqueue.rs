@@ -1,7 +1,7 @@
 use crate::netlink::{
     MessageIter, NF_ACCEPT, NF_DROP, NFQNL_CFG_CMD_BIND, NFQNL_CFG_CMD_PF_BIND,
-    NFQNL_CFG_CMD_UNBIND, config_command, config_params, config_params_with_owner, kernel_error,
-    verdict, verdict_payload,
+    NFQNL_CFG_CMD_UNBIND, config_command, config_params, config_params_with_owner, config_status,
+    kernel_error, verdict, verdict_payload,
 };
 use std::cell::Cell;
 use std::io;
@@ -171,29 +171,7 @@ impl QueueSocket {
                 "некорректные параметры NFQUEUE",
             ));
         }
-        let raw_fd = unsafe {
-            libc::socket(
-                libc::AF_NETLINK,
-                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-                crate::netlink::NETLINK_NETFILTER,
-            )
-        };
-        if raw_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-        let mut local: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
-        local.nl_family = libc::AF_NETLINK as libc::sa_family_t;
-        let rc = unsafe {
-            libc::bind(
-                fd.as_raw_fd(),
-                &local as *const libc::sockaddr_nl as *const libc::sockaddr,
-                std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let fd = Self::open_fd()?;
         if receive_buffer > 0 {
             match set_receive_buffer(fd.as_raw_fd(), receive_buffer) {
                 Ok(effective) if effective < receive_buffer => eprintln!(
@@ -485,17 +463,63 @@ impl QueueSocket {
         Ok(())
     }
 
+    fn open_fd() -> io::Result<OwnedFd> {
+        let raw_fd = unsafe {
+            libc::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                crate::netlink::NETLINK_NETFILTER,
+            )
+        };
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let mut local: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        local.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+        let rc = unsafe {
+            libc::bind(
+                fd.as_raw_fd(),
+                &local as *const libc::sockaddr_nl as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(fd)
+    }
+
+    pub fn check_kernel() -> io::Result<()> {
+        let fd = Self::open_fd()?;
+        // Запрос CONFIG без атрибутов не регистрирует семейства и не меняет очереди.
+        for (index, queue) in (u16::MAX - 3..=u16::MAX).rev().enumerate() {
+            let sequence = index as u32 + 1;
+            send_to_kernel(fd.as_raw_fd(), &config_status(queue, sequence))?;
+            match Self::await_ack(fd.as_raw_fd(), sequence) {
+                Err(error) if error.raw_os_error() == Some(libc::EPERM) => continue,
+                // Новое ядро подтверждает поддержку CONFIG ответом «очередь не существует».
+                Err(error) if error.raw_os_error() == Some(libc::ENODEV) => return Ok(()),
+                result => return result,
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "ядро не разрешило запрос NFQUEUE (нужен CAP_NET_ADMIN или все пробные номера заняты)",
+        ))
+    }
+
     fn configure(&mut self, message: &[u8]) -> io::Result<()> {
         let sequence = u32::from_ne_bytes(message[8..12].try_into().expect("netlink header"));
         send_to_kernel(self.fd.as_raw_fd(), message)?;
-        self.await_ack(sequence)
+        Self::await_ack(self.fd.as_raw_fd(), sequence)
     }
 
-    fn await_ack(&self, sequence: u32) -> io::Result<()> {
+    fn await_ack(fd: RawFd, sequence: u32) -> io::Result<()> {
         Self::await_ack_with(sequence, |bytes| {
             loop {
                 let mut descriptor = libc::pollfd {
-                    fd: self.fd.as_raw_fd(),
+                    fd: fd,
                     events: libc::POLLIN,
                     revents: 0,
                 };
@@ -510,7 +534,7 @@ impl QueueSocket {
                 if ready == 0 {
                     return Ok(None);
                 }
-                return recv_once(self.fd.as_raw_fd(), bytes).map(Some);
+                return recv_once(fd, bytes).map(Some);
             }
         })
     }

@@ -27,7 +27,10 @@ ip6t() { ip6tables -w "$@" 2>/dev/null || ip6tables "$@" 2>/dev/null; }
 # S99r2o — он экспортирует R2O_FW; удаление зовёт без него, тогда по системе.
 FW=${R2O_FW:-}
 if [ -z "$FW" ]; then
-    if [ -f "${R2O_OPENWRT_RELEASE:-/etc/openwrt_release}" ] && command -v nft >/dev/null 2>&1; then
+    if command -v nft >/dev/null 2>&1 && { [ "${R2O_PLATFORM:-}" = openwrt ] || {
+        [ -z "${R2O_PLATFORM:-}" ] && [ -f "${R2O_OPENWRT_RELEASE:-/etc/openwrt_release}" ] &&
+            ! { [ -d /opt/etc/ndm ] && [ -x /opt/bin/opkg ]; }
+    }; }; then
         FW=nft
     else
         FW=iptables

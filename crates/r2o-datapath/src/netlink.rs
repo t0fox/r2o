@@ -238,6 +238,17 @@ pub fn verdict_payload(
     Some(message)
 }
 
+pub(crate) fn config_status(queue: u16, sequence: u32) -> Vec<u8> {
+    let mut message = header(
+        queue,
+        message_type(NFQNL_MSG_CONFIG),
+        NLM_F_REQUEST | NLM_F_ACK,
+        sequence,
+    );
+    finish(&mut message);
+    message
+}
+
 pub fn config_command(queue: u16, sequence: u32, command: u8, protocol_family: u16) -> Vec<u8> {
     let mut message = header(
         queue,
@@ -409,6 +420,17 @@ mod tests {
             &params[52..56],
             &(NFQA_CFG_F_FAIL_OPEN | NFQA_CFG_F_GSO | NFQA_CFG_F_UID_GID).to_be_bytes()
         );
+    }
+
+    #[test]
+    fn kernel_probe_requests_an_ack_without_configuring_a_queue() {
+        let bytes = config_status(65535, 7);
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(bytes[..4], 20_u32.to_ne_bytes());
+        assert_eq!(bytes[4..6], message_type(NFQNL_MSG_CONFIG).to_ne_bytes());
+        assert_eq!(bytes[6..8], (NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
+        assert_eq!(bytes[8..12], 7_u32.to_ne_bytes());
+        assert_eq!(bytes[18..20], 65535_u16.to_be_bytes());
     }
 
     #[test]

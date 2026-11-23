@@ -19,6 +19,10 @@ set -eu
 output=
 url=
 head=0
+if [ "${1:-}" = --version ]; then
+    [ "${TEST_MISSING_BOOTSTRAP:-0}" = 0 ] || [ -e "$R2O_TEST_INSTALLED/curl" ]
+    exit $?
+fi
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -o|--max-filesize|--connect-timeout|--max-time|--proto|--proto-redir|--retry|--retry-delay)
@@ -98,9 +102,15 @@ EOF
 cat > "$MOCK/apk" <<'EOF'
 #!/bin/sh
 set -eu
+if [ "${1:-}" = -U ]; then shift; fi
 case "${1:-}" in
     update) printf 'update\n' >> "$R2O_TEST_PACKAGE_LOG" ;;
-    add) shift; printf '%s\n' "$*" >> "$R2O_TEST_PACKAGE_LOG" ;;
+    add)
+        shift
+        printf '%s\n' "$*" >> "$R2O_TEST_PACKAGE_LOG"
+        for pkg do
+            case "$pkg" in --*) ;; *) touch "$R2O_TEST_INSTALLED/$pkg" ;; esac
+        done ;;
     del) printf 'del %s\n' "$2" >> "$R2O_TEST_PACKAGE_LOG" ;;
     *) exit 2 ;;
 esac
@@ -110,16 +120,112 @@ cat > "$MOCK/modprobe" <<'EOF'
 set -eu
 module=${1:?}
 printf '%s\n' "$module" >> "$R2O_TEST_MODULE_LOG"
+case "$module" in
+    nfnetlink_queue)
+        [ "${TEST_NO_NFQUEUE:-0}" = 0 ]
+        [ -e "$R2O_TEST_INSTALLED/kmod-nfnetlink-queue" ] || [ "${TEST_ENTWARE_KERNEL:-0}" = 1 ]
+        : > "$R2O_NFQUEUE_STATUS_FILE" ;;
+    nft_queue) [ -e "$R2O_TEST_INSTALLED/kmod-nft-queue" ] ;;
+    nf_conntrack_netlink)
+        [ -e "$R2O_TEST_INSTALLED/kmod-nf-conntrack-netlink" ] || [ "${TEST_ENTWARE_KERNEL:-0}" = 1 ] ;;
+    xt_NFQUEUE)
+        printf 'NFQUEUE\n' > "$R2O_PROC_DIR/net/ip_tables_targets" ;;
+esac
 mkdir -p "$R2O_SYS_MODULE_DIR/$module"
-if [ "$module" = nfnetlink_queue ]; then
-    : > "$R2O_NFQUEUE_STATUS_FILE"
-fi
 EOF
-for tool in start-stop-daemon ip nft; do
-    printf '#!/bin/sh\nexit 0\n' > "$MOCK/$tool"
-done
-chmod 0755 "$MOCK/curl" "$MOCK/id" "$MOCK/uname" "$MOCK/df" "$MOCK/apk" "$MOCK/modprobe" \
-    "$MOCK/start-stop-daemon" "$MOCK/ip" "$MOCK/nft"
+cat > "$MOCK/nft" <<'EOF'
+#!/bin/sh
+set -eu
+case "$*" in
+    --version) exit 0 ;;
+    '-c -f -')
+        grep -q 'queue num 65535 bypass' || exit 2
+        [ -d "$R2O_SYS_MODULE_DIR/nft_queue" ] ;;
+    *) exit 88 ;;
+esac
+EOF
+cat > "$MOCK/conntrack" <<'EOF'
+#!/bin/sh
+case "$1" in
+    -V) exit 0 ;;
+    -C) [ -d "$R2O_SYS_MODULE_DIR/nf_conntrack_netlink" ] ;;
+    *) exit 88 ;;
+esac
+EOF
+cat > "$MOCK/openssl" <<'EOF'
+#!/bin/sh
+if [ "$1" = version ] && [ "${TEST_MISSING_BOOTSTRAP:-0}" = 1 ] &&
+    [ ! -e "$R2O_TEST_INSTALLED/openssl-util" ]; then exit 1; fi
+exec /usr/bin/openssl "$@"
+EOF
+cat > "$MOCK/start-stop-daemon" <<'EOF'
+#!/bin/sh
+case " $* " in *' -t '*) exit 88 ;; esac
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+shift
+exec /bin/sh "$@"
+EOF
+cat > "$MOCK/opkg" <<'EOF'
+#!/bin/sh
+set -eu
+case "$1" in
+    print-architecture) printf 'arch all 1\narch %s 100\n' "${TEST_ENTWARE_ARCH:-mipsel-3.4_kn}" ;;
+    update) printf 'opkg update\n' >> "$R2O_TEST_PACKAGE_LOG" ;;
+    install)
+        shift
+        printf 'opkg %s\n' "$*" >> "$R2O_TEST_PACKAGE_LOG"
+        for pkg do
+            case "$pkg" in kmod*) [ "${TEST_OPENWRT_OPKG:-0}" = 1 ] || exit 89 ;; esac
+            touch "$R2O_TEST_INSTALLED/$pkg"
+        done ;;
+    *) exit 2 ;;
+esac
+EOF
+cat > "$MOCK/iptables" <<'EOF'
+#!/bin/sh
+set -eu
+case "$*" in
+    -V|'-t mangle -S PREROUTING'|'-t nat -S OUTPUT')
+        [ "${TEST_NEED_IPTABLES:-0}" = 0 ] || [ -e "$R2O_TEST_INSTALLED/iptables" ] ;;
+    '-j NFQUEUE --queue-num 65535 --queue-bypass --help')
+        [ "${TEST_NEED_IPT_QUEUE:-0}" = 0 ] || [ -e "$R2O_TEST_INSTALLED/iptables-mod-nfqueue" ] ;;
+    *) exit 88 ;;
+esac
+EOF
+cat > "$MOCK/ip6tables" <<'EOF'
+#!/bin/sh
+printf 'IPv6\n' >> "$R2O_TEST_PROBES"
+[ "$*" != '-t nat -S OUTPUT' ] || exit 88
+[ "${TEST_DISABLE_IP6TABLES:-0}" = 0 ]
+EOF
+cat > "$MOCK/ipset" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$*" = --version ] || [ "$*" = 'list -n' ] || exit 88
+[ "${TEST_NEED_IPSET:-0}" = 0 ] || [ -e "$R2O_TEST_INSTALLED/ipset" ]
+EOF
+printf '#!/bin/sh\nexit 0\n' > "$MOCK/ip"
+cat > "$MOCK/dmesg" <<'EOF'
+#!/bin/sh
+[ "${TEST_KERNEL_FAILURE:-0}" = 1 ] || exit 1
+printf '%s\n' 'unrelated kernel record' 'Out of memory: Killed process 1234 (r2o-datapath)'
+EOF
+chmod 0755 "$MOCK/"*
+
+cat > "$FIXTURE/builds/r2o-datapath-linux-mipsel-openwrt-musl" <<'EOF'
+#!/bin/sh
+case "$1" in
+    --help) printf '  --runtime-preflight\n' ;;
+    --offline-self-check)
+        if [ "${TEST_DATAPATH_FAIL:-0}" != 0 ]; then
+            printf '%s\n' 'R2O_TEST_DATAPATH_CHILD_STDERR' >&2
+            exit "$TEST_DATAPATH_FAIL"
+        fi ;;
+    --runtime-preflight) printf '%s %s\n' "$2" "$3" >> "$R2O_TEST_PROBES" ;;
+    *) exit 2 ;;
+esac
+EOF
+chmod 0755 "$FIXTURE/builds/r2o-datapath-linux-mipsel-openwrt-musl"
 
 cat > "$FIXTURE/builds/r2o-manager-linux-mipsel-openwrt-musl" <<'EOF'
 #!/bin/sh
@@ -127,6 +233,7 @@ set -eu
 command_name=$1
 shift
 case "$command_name" in
+    --version) exit 0 ;;
     update-install)
         printf 'update-install %s\nmirrors %s\n' "$*" "${R2O_GITHUB_MIRRORS:-}" >> "$R2O_TEST_MANAGER_LOG"
         ;;
@@ -192,7 +299,17 @@ cp "$ROOT/router/install.sh" "$FIXTURE/router/install.sh"
 cp "$ROOT/router/uninstall.sh" "$FIXTURE/router/uninstall.sh"
 cp "$ROOT/router/select-panel-ip.sh" "$FIXTURE/router/select-panel-ip.sh"
 cp "$ROOT/router/r2o-firewall-fw3-include.sh" "$FIXTURE/router/r2o-firewall-fw3-include.sh"
-printf '#!/bin/sh\ncase "${1:-}" in start) [ "${R2O_TEST_START_FAIL:-0}" != 1 ] ;; *) exit 0 ;; esac\n' > "$FIXTURE/router/S99r2o.shim"
+cat > "$FIXTURE/router/S99r2o.shim" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = start ] && [ "${R2O_TEST_START_FAIL:-0}" = 1 ]; then
+    if [ "${TEST_KERNEL_FAILURE:-0}" = 0 ]; then
+        mkdir -p "$R2O_DIR/log"
+        printf '%s\n' 'R2O_TEST_SERVICE_STDERR' > "$R2O_DIR/log/r2o-datapath.log"
+        printf '%s\n' 'R2O_TEST_CONTROLLER_STDERR' > "$R2O_DIR/log/r2o-controller4.log"
+    fi
+    exit 37
+fi
+EOF
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/S99r2o"
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/001-r2o.sh"
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/r2o-ppe-deoffload.sh"
@@ -216,6 +333,7 @@ printf '{\n  "assets": [\n    {\n      "name": "r2o-mipsel-openwrt-musl.tar.gz",
     "$ARCHIVE_SIZE" > "$FIXTURE/release-api.json"
 
 sed -e "s|^PATH=.*|PATH=$MOCK:/opt/bin:/opt/sbin:/opt/usr/bin:/opt/usr/sbin:/usr/bin:/usr/sbin:/bin:/sbin|" \
+    -e "s|^SYSTEM_PATH=.*|SYSTEM_PATH=$MOCK:/usr/sbin:/usr/bin:/sbin:/bin|" \
     -e "s|PUBLIC_KEY_B64='[^']*'|PUBLIC_KEY_B64='$PUBLIC_KEY_B64'|" "$ROOT/scripts/install.sh" \
     > "$TEMP/install.sh" || fail 'scripts/install.sh is missing'
 grep -Fqx "PUBLIC_KEY_B64='$PUBLIC_KEY_B64'" "$TEMP/install.sh" || fail 'test public key was not pinned in the bootstrap copy'
@@ -229,11 +347,19 @@ new_case() {
     cp -R "$FIXTURE/." "$CASE/fixtures/"
     : > "$CASE/fetch.log"
     : > "$CASE/manager.log"
+    : > "$CASE/packages.log"
+    : > "$CASE/probes.log"
+    mkdir "$CASE/installed"
 }
 
 run_install() {
     R2O_OPENWRT_RELEASE="${TEST_OPENWRT_RELEASE:-$CASE/openwrt_release}" \
     R2O_MEMINFO_FILE="$CASE/meminfo" \
+    R2O_ENTWARE_OPKG="$MOCK/opkg" \
+    R2O_NDM_PLATFORM_DIR="${TEST_NDM_MARKER:-$CASE/no-ndm}" \
+    R2O_PROC_DIR="$CASE/proc" \
+    R2O_TEST_PROBES="$CASE/probes.log" \
+    R2O_TEST_INSTALLED="$CASE/installed" \
     R2O_DIR="$CASE/opt/r2o" \
     R2O_INIT_DIR="$CASE/opt/etc/init.d" \
     R2O_NDM_DIR="$CASE/opt/etc/ndm/netfilter.d" \
@@ -334,36 +460,114 @@ grep -qx nfnetlink_queue "$CASE/modules.log" || fail 'nfnetlink_queue module was
 grep -qx nft_queue "$CASE/modules.log" || fail 'nft_queue module was not loaded'
 [ -f "$CASE/proc/net/netfilter/nfnetlink_queue" ] || fail 'NFQUEUE status did not appear after module load'
 
-cp "$TEMP/install.sh" "$TEMP/install.saved"
-sed '/bootstrap="\$bootstrap /s/command -v \(openssl\|curl\)/false \1/' \
-    "$TEMP/install.saved" > "$TEMP/install.sh"
 for outcome in success failure; do
     new_case "temporary-apk-$outcome"
     if [ "$outcome" = success ]; then
-        run_install > "$CASE/out" 2>&1 ||
+        TEST_MISSING_BOOTSTRAP=1 run_install > "$CASE/out" 2>&1 ||
             { cat "$CASE/out" >&2; fail 'bootstrap with temporary APK dependencies failed'; }
     else
         dd if=/dev/zero of="$CASE/fixtures/latest.json.sig" bs=64 count=1 2>/dev/null
-        if run_install > "$CASE/out" 2>&1; then fail 'damaged signature was accepted'; fi
+        if TEST_MISSING_BOOTSTRAP=1 run_install > "$CASE/out" 2>&1; then fail 'damaged signature was accepted'; fi
     fi
     helper=$(awk '$1 == "--virtual" && $3 == "openssl-util" && $4 == "curl" { print $2 }' "$CASE/packages.log")
     case "$helper" in .r2o-bootstrap-*) ;; *) fail 'bootstrap dependencies are not temporary' ;; esac
     grep -Fqx "del $helper" "$CASE/packages.log" || fail 'temporary APK group was left installed'
-    grep -Eq '^(ca-bundle )?kmod-nfnetlink-queue ' "$CASE/packages.log" || fail 'runtime modules are not separate'
+    if [ "$outcome" = success ]; then
+        grep -Eq '^kmod-nfnetlink-queue ' "$CASE/packages.log" || fail 'runtime modules are not separate'
+    else
+        ! grep -q 'kmod-' "$CASE/packages.log" || fail 'runtime dependencies installed before signature verification'
+    fi
 done
-mv "$TEMP/install.saved" "$TEMP/install.sh"
 
 new_case unsupported-keenetic-softfloat
-cat > "$MOCK/opkg" <<'EOF'
-#!/bin/sh
-[ "${1:-}" = print-architecture ] || exit 2
-printf 'arch all 1\narch armv7sf-k3.2 100\n'
-EOF
-chmod 0755 "$MOCK/opkg"
-TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" run_install > "$CASE/out" 2>&1 && fail 'Keenetic soft-float ABI was mapped to hard-float R2O'
-rm -f "$MOCK/opkg"
+if TEST_ENTWARE_ARCH=armv7sf-k3.2 TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" run_install > "$CASE/out" 2>&1; then
+    fail 'Keenetic soft-float ABI was mapped to hard-float R2O'
+fi
 grep -q 'неподдерживаем' "$CASE/out" || fail 'incompatible Keenetic ABI failure was not explained'
 [ ! -s "$CASE/fetch.log" ] || fail 'release network was touched for incompatible Keenetic ABI'
+
+prepare_entware_fixture() {
+    for component in manager datapath; do
+        mv "$CASE/fixtures/builds/r2o-$component-linux-mipsel-openwrt-musl" "$CASE/fixtures/builds/r2o-$component-linux-mipsel"
+    done
+    sign_fixture mipsel
+}
+
+sign_fixture() {
+    signed="$CASE/fixtures/r2o-$1.tar.gz"
+    tar -czf "$signed" -C "$CASE/fixtures" builds router
+    signed_sha=$(sha256sum "$signed" | awk '{print $1}')
+    printf '{"release_id":"r2o-bootstrap-test","version":"1","notes":"","assets":{"%s":{"sha256":"%s"}}}\n' \
+        "$1" "$signed_sha" > "$CASE/fixtures/latest.json"
+    openssl pkeyutl -sign -inkey "$TEMP/test-key.pem" -rawin -in "$CASE/fixtures/latest.json" -out "$CASE/fixtures/latest.json.sig"
+}
+
+run_entware() {
+    R2O_LOCAL_MANIFEST="$CASE/fixtures/latest.json" \
+    R2O_LOCAL_ARCHIVE="$CASE/fixtures/r2o-mipsel.tar.gz" \
+        run_install
+}
+
+new_case clean-openwrt-opkg
+mv "$MOCK/apk" "$TEMP/apk"
+TEST_OPENWRT_OPKG=1 run_install > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'clean OpenWrt failed with native opkg'; }
+mv "$TEMP/apk" "$MOCK/apk"
+grep -q '^opkg .*kmod-nfnetlink-queue' "$CASE/packages.log" || fail 'OpenWrt opkg did not install kernel dependencies'
+grep -Fxq 'apply 1' "$CASE/probes.log" || fail 'datapath did not check IPv6-enabled configuration'
+
+new_case openwrt-missing-iptables-nfqueue-extension
+printf '%s\n' 'FW_BACKEND=iptables' >> "$CASE/fixtures/router/config.default"
+sign_fixture mipsel-openwrt-musl
+TEST_NEED_IPT_QUEUE=1 R2O_LOCAL_MANIFEST="$CASE/fixtures/latest.json" \
+    R2O_LOCAL_ARCHIVE="$CASE/fixtures/r2o-mipsel-openwrt-musl.tar.gz" run_install > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'OpenWrt could not install its NFQUEUE extension'; }
+grep -q '^iptables-mod-nfqueue$' "$CASE/packages.log" || fail 'OpenWrt did not repair its iptables NFQUEUE extension'
+
+new_case clean-keenetic
+prepare_entware_fixture
+TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 run_entware > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'clean Keenetic installation did not start'; }
+[ -f "$CASE/opt/etc/ndm/netfilter.d/001-r2o.sh" ] || fail 'Keenetic did not install the NDM hook'
+[ ! -e "$CASE/etc/init.d/r2o" ] || fail 'Keenetic installed an OpenWrt init script'
+grep -Fxq 'apply 1' "$CASE/probes.log" || fail 'Keenetic failed to check IPv6 without optional NAT6'
+
+new_case clean-keenetic-ported-with-ipv4-only
+mkdir "$CASE/ndm"
+printf '%s\n' "  IPV6_ENABLED='0' # Только IPv4" >> "$CASE/fixtures/router/config.default"
+prepare_entware_fixture
+TEST_NDM_MARKER="$CASE/ndm" TEST_ENTWARE_KERNEL=1 TEST_NEED_IPTABLES=1 TEST_NEED_IPSET=1 \
+    TEST_DISABLE_IP6TABLES=1 run_entware > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'clean Keenetic Ported install did not repair partial dependencies'; }
+grep -q 'платформа: keenetic; ABI: mipsel-3.4_kn -> mipsel' "$CASE/out" || fail 'Keenetic Ported used OpenWrt platform'
+grep -q '^opkg .*ipset' "$CASE/packages.log" || fail 'Entware did not install ipset'
+grep -q '^opkg .*iptables' "$CASE/packages.log" || fail 'Entware did not install iptables'
+! grep -q 'kmod' "$CASE/packages.log" || fail 'Entware tried to install kernel modules'
+grep -Fxq 'apply 0' "$CASE/probes.log" || fail 'datapath did not check IPv4-only'
+! grep -q IPv6 "$CASE/probes.log" || fail 'IPv4-only configuration touched ip6tables'
+[ ! -e "$CASE/etc/init.d/r2o" ] || fail 'Keenetic Ported installed an OpenWrt init script'
+
+new_case keenetic-without-nfqueue
+prepare_entware_fixture
+if TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_NO_NFQUEUE=1 run_entware > "$CASE/out" 2>&1; then
+    fail 'Keenetic without NFQUEUE was activated'
+fi
+grep -q 'NFQUEUE недоступен.*modprobe nfnetlink_queue' "$CASE/out" || fail 'missing NFQUEUE did not show the firmware command'
+[ ! -s "$CASE/manager.log" ] || fail 'missing NFQUEUE was checked after activation'
+! grep -q 'kmod' "$CASE/packages.log" || fail 'Entware tried to repair firmware with kernel packages'
+
+new_case insufficient-memory
+sed -i 's/^MemAvailable:.*/MemAvailable: 7000 kB/' "$CASE/meminfo"
+if run_install > "$CASE/out" 2>&1; then fail 'low-memory installation continued'; fi
+grep -q 'освободите память' "$CASE/out" || fail 'missing memory diagnostics'
+[ ! -s "$CASE/packages.log" ] && [ ! -s "$CASE/fetch.log" ] || fail 'packages were touched before the memory check'
+
+new_case datapath-failed-to-start
+if TEST_DATAPATH_FAIL=7 run_install > "$CASE/out" 2>&1; then fail 'broken datapath was activated'; fi
+grep -q 'datapath не запустился через start-stop-daemon.*код 7' "$CASE/out" || fail 'launcher failure status was not shown'
+grep -qx 'R2O_TEST_DATAPATH_CHILD_STDERR' "$CASE/out" || fail 'datapath stderr was not printed'
+[ ! -s "$CASE/manager.log" ] || fail 'broken datapath was checked after activation'
+[ -z "$(ls -A "$CASE/tmp")" ] || fail 'broken datapath left temporary logs on the router'
 
 new_case insufficient-flash
 TEST_FREE_KB=100 run_install > "$CASE/out" 2>&1 && fail 'install continued with insufficient flash'
@@ -423,6 +627,24 @@ grep -Fq 'R2O_TEST_SPLIT_FAILURE_BEFORE_ROLLBACK' "$CASE/out" ||
 grep -q 'kmod-nft-queue' "$CASE/packages.log" || fail 'failed install removed or skipped its system NFQUEUE dependency'
 grep -q 'kmod-nfnetlink-queue' "$CASE/packages.log" || fail 'failed install removed or skipped its NFQUEUE core package'
 
+new_case failed-service-start-after-activation
+if R2O_TEST_START_FAIL=1 run_install > "$CASE/out" 2>&1; then
+    fail 'a failed service start was accepted'
+fi
+grep -q 'установщик выпуска завершился ошибкой (код 37)' "$CASE/out" || fail 'service exit status was not shown'
+grep -qx 'R2O_TEST_SERVICE_STDERR' "$CASE/out" || fail 'datapath startup stderr was not shown'
+grep -qx 'R2O_TEST_CONTROLLER_STDERR' "$CASE/out" || fail 'controller startup stderr was not shown'
+[ ! -e "$CASE/opt/r2o" ] || fail 'service startup failure did not remove the new installation'
+[ -z "$(ls -A "$CASE/tmp")" ] || fail 'service startup failure left temporary logs'
+
+new_case kernel-killed-the-service-before-it-could-log
+if R2O_TEST_START_FAIL=1 TEST_KERNEL_FAILURE=1 run_install > "$CASE/out" 2>&1; then
+    fail 'a service killed before logging was accepted'
+fi
+grep -Fq 'Out of memory: Killed process 1234 (r2o-datapath)' "$CASE/out" || fail 'kernel cause was not shown'
+! grep -Fq 'unrelated kernel record' "$CASE/out" || fail 'unrelated kernel messages were shown'
+[ ! -e "$CASE/opt/r2o" ] || fail 'failed first install left an active slot'
+
 new_case interrupted-install
 R2O_OPENWRT_RELEASE="$CASE/openwrt_release" \
 R2O_MEMINFO_FILE="$CASE/meminfo" \
@@ -435,6 +657,9 @@ R2O_TEST_FIXTURES="$CASE/fixtures" \
 R2O_TEST_FETCH_LOG="$CASE/fetch.log" \
 R2O_TEST_MANAGER_LOG="$CASE/manager.log" \
 R2O_TEST_PACKAGE_LOG="$CASE/packages.log" \
+R2O_TEST_INSTALLED="$CASE/installed" \
+R2O_TEST_PROBES="$CASE/probes.log" \
+R2O_PROC_DIR="$CASE/proc" \
 R2O_TEST_MODULE_LOG="$CASE/modules.log" \
 R2O_TEST_SERVICE_LOG="$CASE/services.log" \
 R2O_NFQUEUE_STATUS_FILE="$CASE/proc/net/netfilter/nfnetlink_queue" \
@@ -494,7 +719,8 @@ install_count=$(grep -c '^install-local ' "$CASE/manager.log")
 printf '#!/bin/sh\nexit 31\n' > "$CASE/opt/r2o/releases/r2o-bootstrap-test/router/install.sh"
 chmod 0755 "$CASE/opt/r2o/releases/r2o-bootstrap-test/router/install.sh"
 fetch_count=$(wc -l < "$CASE/fetch.log")
-R2O_GITHUB_MIRRORS=https://example.test/ run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'repeat install did not complete'; }
+TEST_DATAPATH_FAIL=7 R2O_GITHUB_MIRRORS=https://example.test/ run_install > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'repeat install did not reach the updater with a broken old datapath'; }
 [ "$(wc -l < "$CASE/fetch.log")" -eq "$fetch_count" ] || fail 'bootstrap downloaded before calling the Rust updater'
 grep -q '^update-install --root .* --service ' "$CASE/manager.log" || fail 'Rust updater was not invoked'
 grep -Fxq 'mirrors https://example.test/' "$CASE/manager.log" || fail 'Rust updater did not inherit the mirror'

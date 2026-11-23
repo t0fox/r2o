@@ -184,7 +184,10 @@ fi
 case "$BACKEND" in
     nft|iptables) ;;
     auto)
-        if command -v nft >/dev/null 2>&1 && { [ -f /etc/openwrt_release ] || [ "${R2O_PLATFORM:-}" = openwrt ]; }; then
+        if command -v nft >/dev/null 2>&1 && { [ "${R2O_PLATFORM:-}" = openwrt ] || {
+            [ -z "${R2O_PLATFORM:-}" ] && [ -f "${R2O_OPENWRT_RELEASE:-/etc/openwrt_release}" ] &&
+                ! { [ -d /opt/etc/ndm ] && [ -x /opt/bin/opkg ]; }
+        }; }; then
             BACKEND=nft
         else
             BACKEND=iptables

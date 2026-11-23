@@ -3,7 +3,7 @@
 # the pinned Ed25519 manifest signature and its archive SHA-256 are verified.
 set -eu
 
-PATH=/opt/bin:/opt/sbin:/opt/usr/bin:/opt/usr/sbin:/usr/bin:/usr/sbin:/bin:/sbin:${PATH:-}
+PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}
 export PATH
 
 REPO=t0fox/r2o
@@ -11,6 +11,10 @@ LATEST=https://github.com/$REPO/releases/latest/download
 RELEASE_API=https://api.github.com/repos/$REPO/releases/tags
 PUBLIC_KEY_B64='MCowBQYDK2VwAyEAx2b2eh9ZlnOOzizkMWUMNHdDIJNcIc4fO4i1psTUESc='
 OPENWRT_RELEASE=${R2O_OPENWRT_RELEASE:-/etc/openwrt_release}
+ENTWARE_OPKG=${R2O_ENTWARE_OPKG:-/opt/bin/opkg}
+SYSTEM_PATH=/usr/sbin:/usr/bin:/sbin:/bin
+NDM_MARKER=${R2O_NDM_PLATFORM_DIR:-/opt/etc/ndm}
+export LC_ALL=C
 MEMINFO=${R2O_MEMINFO_FILE:-/proc/meminfo}
 ROOT=${R2O_DIR:-/opt/r2o}
 INIT_DIR=${R2O_INIT_DIR:-/opt/etc/init.d}
@@ -18,7 +22,8 @@ NDM_DIR=${R2O_NDM_DIR:-/opt/etc/ndm/netfilter.d}
 OPENWRT_INIT_DIR=${R2O_OPENWRT_INIT_DIR:-/etc/init.d}
 RUNTIME_DIR=${R2O_RUNTIME_DIR:-/tmp/r2o}
 TMP_BASE=${TMPDIR:-/tmp}
-NFQUEUE_STATUS_FILE=${R2O_NFQUEUE_STATUS_FILE:-/proc/net/netfilter/nfnetlink_queue}
+PROC_DIR=${R2O_PROC_DIR:-/proc}
+NFQUEUE_STATUS_FILE=${R2O_NFQUEUE_STATUS_FILE:-$PROC_DIR/net/netfilter/nfnetlink_queue}
 MODULE_DIR=${R2O_SYS_MODULE_DIR:-/sys/module}
 MAX_ARCHIVE_BYTES=67108864
 MAX_EXPANDED_KB=24576
@@ -47,7 +52,7 @@ cleanup() {
     [ -z "$TMP" ] || rm -rf "$TMP" 2>/dev/null || true
     [ -z "$DISK_TMP" ] || rm -rf "$DISK_TMP" 2>/dev/null || true
     if [ -n "$BOOTSTRAP_APK" ]; then
-        apk del "$BOOTSTRAP_APK" >/dev/null ||
+        "$APK" del "$BOOTSTRAP_APK" >/dev/null ||
             say "не удалось удалить временные зависимости $BOOTSTRAP_APK"
     fi
 }
@@ -99,28 +104,26 @@ map_keenetic_arch() {
 
 detect_platform_and_arch() {
     distribution_arch=
-    if [ -f "$OPENWRT_RELEASE" ]; then
+    if [ -f "$OPENWRT_RELEASE" ] && ! { [ -d "$NDM_MARKER" ] && [ -x "$ENTWARE_OPKG" ]; }; then
         PLATFORM=openwrt
+        APK=$(PATH=$SYSTEM_PATH command -v apk || true)
+        OPKG=$(PATH=$SYSTEM_PATH command -v opkg || true)
         distribution_arch=$(sed -n 's/^DISTRIB_ARCH=//p' "$OPENWRT_RELEASE" | head -n 1 | sed "s/['\"]//g")
         if [ -z "$distribution_arch" ]; then
-            if command -v apk >/dev/null 2>&1; then
-                distribution_arch=$(apk --print-arch 2>/dev/null | head -n 1 || true)
-            elif command -v opkg >/dev/null 2>&1; then
-                distribution_arch=$(opkg print-architecture 2>/dev/null | awk '$1 == "arch" && $2 != "all" { if ($3 + 0 >= priority) { priority=$3 + 0; arch=$2 } } END { print arch }')
+            if [ -n "$APK" ]; then
+                distribution_arch=$("$APK" --print-arch 2>/dev/null | head -n 1 || true)
+            elif [ -n "$OPKG" ]; then
+                distribution_arch=$("$OPKG" print-architecture 2>/dev/null | awk '$1 == "arch" && $2 != "all" { if ($3 + 0 >= priority) { priority=$3 + 0; arch=$2 } } END { print arch }')
             else
                 distribution_arch=$(uname -m 2>/dev/null || true)
             fi
         fi
         map_openwrt_arch "$distribution_arch" || die "неподдерживаемая архитектура OpenWrt: ${distribution_arch:-не определена}"
-    elif [ -d /opt/etc/ndm ] || [ -x /opt/bin/opkg ] || command -v opkg >/dev/null 2>&1; then
+    elif [ -x "$ENTWARE_OPKG" ]; then
         PLATFORM=keenetic
-        if [ -x /opt/bin/opkg ]; then
-            package_arch=$(/opt/bin/opkg print-architecture 2>/dev/null | awk '$1 == "arch" && $2 != "all" && $2 != "noarch" { if ($3 + 0 >= priority) { priority=$3 + 0; arch=$2 } } END { print arch }')
-        elif command -v opkg >/dev/null 2>&1; then
-            package_arch=$(opkg print-architecture 2>/dev/null | awk '$1 == "arch" && $2 != "all" && $2 != "noarch" { if ($3 + 0 >= priority) { priority=$3 + 0; arch=$2 } } END { print arch }')
-        else
-            package_arch=
-        fi
+        APK=
+        OPKG=$ENTWARE_OPKG
+        package_arch=$("$OPKG" print-architecture 2>/dev/null | awk '$1 == "arch" && $2 != "all" && $2 != "noarch" { if ($3 + 0 >= priority) { priority=$3 + 0; arch=$2 } } END { print arch }')
         if [ -n "$package_arch" ]; then
             distribution_arch=$package_arch
         else
@@ -177,118 +180,258 @@ memory_available_kb() {
     echo "$memory_value"
 }
 
-install_dependencies() {
-    missing=
+check_install_resources() {
+    minimum_flash=$DEPENDENCY_RESERVE_KB
+    [ -n "$CURRENT_RELEASE" ] || minimum_flash=$((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB))
+    [ "$(free_kb "$STORAGE_PATH")" -ge "$minimum_flash" ] ||
+        die "нужно не менее $minimum_flash КиБ места во flash для выпуска и зависимостей"
+    [ "$(memory_available_kb)" -ge "$RAM_RESERVE_KB" ] ||
+        die "для установки нужно не менее $RAM_RESERVE_KB КиБ свободной RAM; освободите память и повторите запуск"
+}
+
+install_packages() {
+    [ "$#" -gt 0 ] || return 0
+    check_install_resources
+    say "устанавливаю зависимости: $*"
+    if [ -n "$APK" ]; then
+        "$APK" -U add "$@" || die "apk не установил зависимости. Проверьте репозитории своей прошивки и выполните: $APK update && $APK add $*"
+    elif [ -n "$OPKG" ]; then
+        [ "${opkg_index_ready:-0}" = 1 ] || "$OPKG" update ||
+            die "opkg не обновил индекс. Проверьте сеть и репозитории, затем выполните: $OPKG update"
+        opkg_index_ready=1
+        "$OPKG" install "$@" || die "opkg не установил зависимости. Проверьте репозитории и выполните: $OPKG install $*"
+    else
+        die "не найден штатный apk/opkg. Восстановите менеджер пакетов прошивки и установите: $*"
+    fi
+}
+
+install_bootstrap_dependencies() {
     bootstrap=
-    command -v openssl >/dev/null 2>&1 || bootstrap="$bootstrap openssl-util"
-    # curl нужен не только для удобства: BusyBox wget на OpenWrt часто не
-    # умеет HTTPS-редирект GitHub latest и падает на latest.json.
-    command -v curl >/dev/null 2>&1 || bootstrap="$bootstrap curl"
+    openssl version >/dev/null 2>&1 || bootstrap="$bootstrap openssl-util"
+    curl --version >/dev/null 2>&1 || bootstrap="$bootstrap curl"
     have_ca=0
     for ca_file in /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates.crt /opt/etc/ssl/certs/ca-certificates.crt; do
         [ ! -s "$ca_file" ] || have_ca=1
     done
-    [ "$have_ca" -eq 1 ] || missing="$missing ca-bundle"
-    nfqueue_module=
-    conntrack_module=
-    if [ "$PLATFORM" = openwrt ]; then
-        if { [ "$backend" = nft ] || { [ "$backend" = auto ] && command -v nft >/dev/null 2>&1; }; }; then
-            nfqueue_package='kmod-nfnetlink-queue kmod-nft-queue'
-            nfqueue_module=nft_queue
-        else
-            nfqueue_package='kmod-nfnetlink-queue kmod-ipt-nfqueue'
-            nfqueue_module=xt_NFQUEUE
-        fi
-        if [ ! -d "$MODULE_DIR/nfnetlink_queue" ] \
-            || [ ! -d "$MODULE_DIR/$nfqueue_module" ] \
-            || [ ! -e "$NFQUEUE_STATUS_FILE" ]; then
-            missing="$missing $nfqueue_package"
-        fi
-        # Без ctnetlink датапат не видит молчание TCP/QUIC: подозрений нет,
-        # панель остаётся пустой. Это обязательная зависимость наблюдения.
-        if [ ! -d "$MODULE_DIR/nf_conntrack_netlink" ]; then
-            missing="$missing kmod-nf-conntrack-netlink"
-            conntrack_module=nf_conntrack_netlink
-        fi
-    fi
-    [ -n "$missing$bootstrap" ] || return 0
-    [ "$(free_kb "$STORAGE_PATH")" -ge "$((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB))" ] ||
-        die "для зависимостей и выпуска нужно не менее $((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB)) КиБ свободной flash"
-    [ "$(memory_available_kb)" -ge 8192 ] || die 'нужно не менее 8 МиБ свободной RAM для установки зависимостей'
-    say "проверяю недостающие зависимости:$missing$bootstrap"
-    if [ "$PLATFORM" = openwrt ] && command -v apk >/dev/null 2>&1; then
-        apk update || die 'не удалось обновить индекс apk'
-        if [ -n "$missing" ]; then
-            apk add $missing || die "не удалось установить зависимости через apk:$missing"
-        fi
-        if [ -n "$bootstrap" ]; then
-            # Менеджер выпуска использует собственный TLS и проверку подписи.
+    if [ "$have_ca" -eq 0 ]; then install_packages ca-bundle; fi
+    if [ -n "$bootstrap" ]; then
+        # На OpenWrt с apk эти пакеты нужны только до передачи управления менеджеру.
+        # shellcheck disable=SC2086
+        if [ -n "$APK" ]; then
             BOOTSTRAP_APK=".r2o-bootstrap-$$"
-            apk add --virtual "$BOOTSTRAP_APK" $bootstrap ||
-                die "не удалось установить временные зависимости через apk:$bootstrap"
+            install_packages --virtual "$BOOTSTRAP_APK" $bootstrap
+        else
+            install_packages $bootstrap
         fi
-    elif [ "$PLATFORM" = openwrt ] && command -v opkg >/dev/null 2>&1; then
-        opkg update && opkg install $missing $bootstrap || die "не удалось установить зависимости через opkg:$missing$bootstrap"
-    elif [ -x /opt/bin/opkg ]; then
-        /opt/bin/opkg update && /opt/bin/opkg install $missing $bootstrap || die "не удалось установить зависимости через Entware opkg:$missing$bootstrap"
+    fi
+    openssl version >/dev/null || die 'openssl не запускается; переустановите openssl-util'
+    curl --version >/dev/null || die 'curl не запускается; переустановите curl'
+}
+
+runtime_config() {
+    config_path=$1
+    if [ -e "$config_path" ] || [ -L "$config_path" ]; then
+        [ -f "$config_path" ] && [ ! -L "$config_path" ] || die "небезопасный файл конфигурации $config_path"
+    fi
+    mode=$(runtime_value MODE apply)
+    backend=$(runtime_value FW_BACKEND auto)
+    ipv6_enabled=$(runtime_value IPV6_ENABLED 1)
+    telegram_enabled=$(runtime_value TG_ENABLED 0)
+    telegram_mode=$(runtime_value TG_MODE local)
+    case "$mode" in off|observe|apply) ;; *) die "неверный MODE: $mode" ;; esac
+    case "$backend" in
+        auto)
+            backend=iptables
+            if [ "$PLATFORM" = openwrt ] && command -v nft >/dev/null 2>&1; then backend=nft; fi ;;
+        nft|iptables) ;;
+        *) die "неверный FW_BACKEND: $backend" ;;
+    esac
+    case "$ipv6_enabled" in 0|1) ;; *) die "неверный IPV6_ENABLED: $ipv6_enabled" ;; esac
+    case "$telegram_enabled" in 0|no) telegram_enabled=0 ;; 1|yes) telegram_enabled=1 ;; *) die "неверный TG_ENABLED: $telegram_enabled" ;; esac
+    [ "$telegram_mode" = local ] || telegram_enabled=0
+}
+
+runtime_value() {
+    value=
+    if [ -f "$config_path" ]; then
+        value=$(sed -n "s/^[[:space:]]*$1=//p" "$config_path" | tail -n 1 |
+            sed "s/[[:space:]]#.*//; s/[[:space:]]*$//; s/['\"]//g")
+    fi
+    printf '%s\n' "${value:-$2}"
+}
+
+need_runtime_tool() {
+    tool=$1
+    package=$2
+    shift 2
+    if ! "$tool" "$@" >/dev/null 2>&1; then
+        case " $runtime_packages " in *" $package "*) ;; *) runtime_packages="$runtime_packages $package" ;; esac
+    fi
+}
+
+runtime_failure() {
+    tool=$1
+    package=$2
+    shift 2
+    if ! "$tool" "$@" > /dev/null 2>"$TMP/runtime-probe.err"; then
+        cat "$TMP/runtime-probe.err" >&2
+        if [ -n "$APK" ]; then
+            die "$tool: проверка $* не прошла. Проверьте прошивку и пакеты: $APK fix $package"
+        elif [ -n "$OPKG" ]; then
+            die "$tool: проверка $* не прошла. Проверьте поддержку в прошивке и пакет: $OPKG install --force-reinstall $package"
+        else
+            die "$tool: проверка $* не прошла. Установите штатный пакет $package"
+        fi
+    fi
+}
+
+try_module() {
+    modprobe "$1" >/dev/null 2>&1 && return 0
+    [ "$PLATFORM" = keenetic ] || return 0
+    firmware_modules=${R2O_MODULES_DIR:-/lib/modules}
+    kernel=$(uname -r)
+    module_file=$firmware_modules/$1.ko
+    if [ ! -f "$module_file" ] && [ -d "$firmware_modules/$kernel" ]; then
+        module_file=$(find "$firmware_modules/$kernel" -type f -name "$1.ko" | head -n 1)
+    fi
+    # Только модули прошивки роутера. Entware поставляет программы, а не ядро Keenetic.
+    if [ -f "$module_file" ]; then insmod "$module_file" >/dev/null 2>&1 || true; fi
+}
+
+nfqueue_core_ready() { [ -r "$NFQUEUE_STATUS_FILE" ]; }
+
+nfqueue_rule_ready() {
+    if [ "$backend" = nft ]; then
+        # Транзакция nft -c проверяется ядром без фиксации правил.
+        nft_queue_check
     else
-        die "нет штатного менеджера пакетов для установки:$missing"
+        # Для backend iptables-nft ядро использует выражение nft_queue.
+        case "$(iptables -V 2>/dev/null)" in
+            *nf_tables*) nft_queue_check ;;
+            *) grep -qw NFQUEUE "$PROC_DIR/net/ip_tables_targets" || [ -d "$MODULE_DIR/xt_NFQUEUE" ] ;;
+        esac
     fi
-    command -v openssl >/dev/null 2>&1 || die 'openssl отсутствует после установки зависимостей'
-    if [ -n "$nfqueue_module" ]; then
-        command -v modprobe >/dev/null 2>&1 || die 'для загрузки модулей NFQUEUE нужна команда modprobe'
-        modprobe nfnetlink_queue || die 'не удалось загрузить модуль nfnetlink_queue после установки kmod-пакета'
-        modprobe "$nfqueue_module" || die "не удалось загрузить модуль $nfqueue_module после установки kmod-пакета"
-        [ -e "$NFQUEUE_STATUS_FILE" ] || die "после загрузки модулей NFQUEUE отсутствует $NFQUEUE_STATUS_FILE"
+}
+
+nft_queue_check() {
+    printf 'table inet r2o_probe_%s {\n chain probe {\n  queue num 65535 bypass\n }\n}\n' "$$" | nft -c -f -
+}
+
+check_datapath() {
+    probe_binary=$1
+    [ "$mode" != off ] || return 0
+    [ -f "$probe_binary" ] && [ ! -L "$probe_binary" ] ||
+        die "не найден datapath для $ARCH: $probe_binary"
+    # Те же флаги start-stop-daemon, что у службы, но с отдельными PID и журналом.
+    if start-stop-daemon -S -b -m -p "$TMP/preflight.pid" -x /bin/sh -- -c '
+        "$1" --offline-self-check >"$2/datapath-probe.log" 2>&1
+        printf "%s\n" "$?" >"$2/datapath-probe.done"
+    ' sh "$probe_binary" "$TMP"; then :; else
+        die "start-stop-daemon не запустил проверку datapath (код $?). Проверьте пакет busybox: ${OPKG:+$OPKG install --force-reinstall busybox}${APK:+$APK fix busybox}"
     fi
-    if [ -n "$conntrack_module" ]; then
-        command -v modprobe >/dev/null 2>&1 || die 'для ctnetlink нужна команда modprobe'
-        modprobe "$conntrack_module" || die "не удалось загрузить модуль $conntrack_module после установки kmod-пакета"
-        [ -d "$MODULE_DIR/$conntrack_module" ] ||
-            die "после загрузки отсутствует модуль $conntrack_module — наблюдение молчания не заработает"
+    for _ in 1 2 3 4 5; do
+        [ ! -s "$TMP/datapath-probe.done" ] || break
+        sleep 1
+    done
+    probe_status=$(cat "$TMP/datapath-probe.done" 2>/dev/null || true)
+    if [ "$probe_status" != 0 ]; then
+        [ ! -s "$TMP/datapath-probe.log" ] || tail -n 80 "$TMP/datapath-probe.log" >&2
+        if [ -n "$probe_status" ]; then
+            die "datapath не запустился через start-stop-daemon для $ARCH (код $probe_status): $probe_binary. Проверьте ABI и параметры монтирования командой mount"
+        fi
+        die "datapath не завершил проверку запуска для $ARCH за 5 с: $probe_binary. Проверьте журнал ядра командой dmesg"
+    fi
+    # Старые подписанные выпуски проверяются системными пробами выше.
+    if "$probe_binary" --help > "$TMP/datapath-help" 2>/dev/null &&
+        grep -Fq -- --runtime-preflight "$TMP/datapath-help"; then
+        "$probe_binary" --runtime-preflight "$mode" "$ipv6_enabled" ||
+            die "ядро или права запуска datapath не прошли проверку; $remedy"
     fi
 }
 
 check_runtime_dependencies() {
-    command -v start-stop-daemon >/dev/null 2>&1 || die 'нужен start-stop-daemon из системного BusyBox или Entware'
-    backend=auto
-    ipv6_enabled=1
-    telegram_enabled=1
-    if [ -e "$ROOT/config" ] || [ -L "$ROOT/config" ]; then
-        [ ! -L "$ROOT/config" ] && [ -f "$ROOT/config" ] || die "конфигурация должна быть обычным файлом: $ROOT/config"
-        backend=$(sed -n 's/^FW_BACKEND=//p' "$ROOT/config" | head -n 1 | sed "s/['\"]//g")
-        ipv6_enabled=$(sed -n 's/^IPV6_ENABLED=//p' "$ROOT/config" | head -n 1 | sed "s/['\"]//g")
-        telegram_enabled=$(sed -n 's/^TG_ENABLED=//p' "$ROOT/config" | head -n 1 | sed "s/['\"]//g")
-        [ -n "$backend" ] || backend=auto
-        [ -n "$ipv6_enabled" ] || ipv6_enabled=1
-        [ -n "$telegram_enabled" ] || telegram_enabled=1
+    [ "$mode" != off ] || return 0
+    runtime_packages=
+    ipt_package=iptables
+    ip6t_package=iptables
+    ipt_queue_package=iptables
+    if [ "$PLATFORM" = openwrt ]; then
+        ipt_package=iptables-zz-legacy
+        ip6t_package=ip6tables-zz-legacy
+        ipt_queue_package=iptables-mod-nfqueue
     fi
-    case "$backend" in auto|nft|iptables) ;; *) die "неподдерживаемый FW_BACKEND в $ROOT/config: $backend" ;; esac
-    case "$ipv6_enabled" in 0|1) ;; *) die "неверный IPV6_ENABLED в $ROOT/config: $ipv6_enabled" ;; esac
-    case "$telegram_enabled" in 0|1) ;; *) die "неверный TG_ENABLED в $ROOT/config: $telegram_enabled" ;; esac
+    # Реальный запуск проверяется отдельно, без необязательного флага -t у BusyBox.
+    command -v start-stop-daemon >/dev/null 2>&1 || runtime_packages=busybox
+    need_runtime_tool ip ip-full -4 -o addr show scope global
+    need_runtime_tool conntrack conntrack -V
+    if [ "$backend" = nft ]; then
+        need_runtime_tool nft nftables-nojson --version
+    else
+        need_runtime_tool iptables "$ipt_package" -V
+        if [ "$ipv6_enabled" -eq 1 ]; then need_runtime_tool ip6tables "$ip6t_package" -V; fi
+        if [ "$telegram_enabled" -eq 1 ]; then need_runtime_tool ipset ipset --version; fi
+    fi
+    # shellcheck disable=SC2086
+    install_packages $runtime_packages
+
+    if [ "$backend" = nft ]; then
+        rule_module=nft_queue
+        rule_package=kmod-nft-queue
+    else
+        if ! iptables -j NFQUEUE --queue-num 65535 --queue-bypass --help >/dev/null 2>&1; then
+            install_packages "$ipt_queue_package"
+        fi
+        case "$(iptables -V 2>/dev/null)" in
+            *nf_tables*)
+                rule_module=nft_queue
+                rule_package=kmod-nft-queue
+                nft --version >/dev/null 2>&1 || install_packages nftables-nojson ;;
+            *) rule_module=xt_NFQUEUE; rule_package=kmod-ipt-nfqueue ;;
+        esac
+    fi
+    nfqueue_core_ready || try_module nfnetlink_queue
+    nfqueue_rule_ready >/dev/null 2>&1 || try_module "$rule_module"
+    conntrack -C >/dev/null 2>&1 || try_module nf_conntrack_netlink
+    if [ "$backend" = iptables ] && [ "$telegram_enabled" -eq 1 ]; then
+        ipset list -n >/dev/null 2>&1 || try_module ip_set
+    fi
 
     if [ "$PLATFORM" = openwrt ]; then
-        case "$backend" in
-            nft) command -v nft >/dev/null 2>&1 || die 'для FW_BACKEND=nft нужна команда nft'; return 0 ;;
-            auto) command -v nft >/dev/null 2>&1 && return 0 ;;
-        esac
-    elif [ "$backend" = nft ]; then
-        command -v nft >/dev/null 2>&1 || die 'для FW_BACKEND=nft нужна команда nft'
-        if [ "$telegram_enabled" = 1 ]; then
-            command -v iptables >/dev/null 2>&1 || die 'Telegram на Keenetic требует iptables'
-            [ "$ipv6_enabled" = 0 ] || command -v ip6tables >/dev/null 2>&1 || die 'Telegram и IPv6 требуют ip6tables'
-            command -v ipset >/dev/null 2>&1 || die 'для Telegram с iptables нужен ipset'
+        kernel_packages=
+        nfqueue_core_ready || kernel_packages="$kernel_packages kmod-nfnetlink-queue"
+        nfqueue_rule_ready >/dev/null 2>&1 || kernel_packages="$kernel_packages $rule_package"
+        conntrack -C >/dev/null 2>&1 || kernel_packages="$kernel_packages kmod-nf-conntrack-netlink"
+        if [ "$backend" = iptables ] && [ "$telegram_enabled" -eq 1 ] &&
+            ! ipset list -n >/dev/null 2>&1; then
+            kernel_packages="$kernel_packages kmod-ipt-ipset"
         fi
-        return 0
+        if [ -n "$kernel_packages" ]; then
+            # shellcheck disable=SC2086
+            install_packages $kernel_packages
+            nfqueue_core_ready || try_module nfnetlink_queue
+            nfqueue_rule_ready >/dev/null 2>&1 || try_module "$rule_module"
+            conntrack -C >/dev/null 2>&1 || try_module nf_conntrack_netlink
+        fi
+        remedy="${APK:-$OPKG} install kmod-nfnetlink-queue $rule_package kmod-nf-conntrack-netlink"
+        [ -z "$APK" ] || remedy="$APK add kmod-nfnetlink-queue $rule_package kmod-nf-conntrack-netlink"
+    else
+        remedy="проверьте компоненты ядра прошивки командой: modprobe nfnetlink_queue; modprobe $rule_module; modprobe nf_conntrack_netlink"
     fi
-    command -v iptables >/dev/null 2>&1 || die 'для NFQUEUE и Telegram нужен iptables или OpenWrt nft'
-    if [ "$ipv6_enabled" = 1 ] && ! command -v ip6tables >/dev/null 2>&1; then
-        [ "$telegram_enabled" = 0 ] || die 'для Telegram и IPv6 требуется ip6tables'
-        say 'ip6tables недоступна; служба NFQUEUE будет работать в IPv4-only режиме'
-    fi
-    if [ "$telegram_enabled" = 1 ] \
-        && { [ "$PLATFORM" != openwrt ] || ! command -v nft >/dev/null 2>&1; }; then
-        command -v ipset >/dev/null 2>&1 || die 'для Telegram с iptables нужен ipset'
+
+    runtime_failure ip ip-full -4 -o addr show scope global
+    nfqueue_core_ready || die "NFQUEUE недоступен: $NFQUEUE_STATUS_FILE не читается; $remedy"
+    nfqueue_rule_ready || die "цель NFQUEUE для $backend недоступна; $remedy"
+    conntrack -C >/dev/null || die "ядро не отвечает на conntrack -C; $remedy"
+    if [ "$backend" = iptables ]; then
+        runtime_failure iptables "$ipt_queue_package" -j NFQUEUE --queue-num 65535 --queue-bypass --help
+        runtime_failure iptables "$ipt_package" -t mangle -S PREROUTING
+        if [ "$ipv6_enabled" -eq 1 ]; then
+            runtime_failure ip6tables "$ip6t_package" -t mangle -S PREROUTING
+        fi
+        if [ "$telegram_enabled" -eq 1 ]; then
+            runtime_failure iptables "$ipt_package" -t nat -S OUTPUT
+            runtime_failure ipset ipset list -n
+        fi
     fi
 }
 
@@ -435,7 +578,7 @@ show_failed_install_logs() {
     log_dir=$ROOT/log
     shown=0
     if [ -d "$log_dir" ] && [ ! -L "$log_dir" ]; then
-        for file in "$log_dir"/r2o-datapath.log "$log_dir"/r2o-datapath[46].log; do
+        for file in "$log_dir"/r2o-datapath*.log "$log_dir"/r2o-controller*.log; do
             [ -s "$file" ] && [ ! -L "$file" ] || continue
             printf 'r2o: журнал запуска %s (последние 80 строк, до отката):\n' "$file" >&2
             tail -n 80 "$file" >&2 || true
@@ -443,7 +586,12 @@ show_failed_install_logs() {
         done
     fi
     if [ "$shown" -eq 0 ]; then
-        echo 'r2o: журналы datapath отсутствуют или пусты; процесс мог завершиться до записи ошибки' >&2
+        kernel_log=$(dmesg 2>/dev/null | grep -E 'r2o-(datapath|controller|manager)' | tail -n 12)
+        if [ -n "$kernel_log" ]; then
+            printf 'r2o: журналы запуска пусты. Последние сообщения ядра о R2O:\n%s\n' "$kernel_log" >&2
+        else
+            echo 'r2o: datapath и controller не записали ошибок запуска; если процесс завершился сразу, проверьте журнал ядра: dmesg' >&2
+        fi
     fi
 }
 
@@ -494,7 +642,8 @@ cleanup_incomplete_first_install() {
     done
     log_dir=$ROOT/log
     if [ -d "$log_dir" ] && [ ! -L "$log_dir" ]; then
-        for file in "$log_dir"/r2o-datapath.log "$log_dir"/r2o-datapath[46].log; do
+        for file in "$log_dir"/r2o-datapath.log "$log_dir"/r2o-datapath[46].log \
+            "$log_dir"/r2o-controller.log "$log_dir"/r2o-controller[46].log; do
             [ -f "$file" ] && [ ! -L "$file" ] || continue
             rm -f "$file"
         done
@@ -507,7 +656,10 @@ cleanup_incomplete_first_install() {
 on_exit() {
     exit_code=$1
     trap - EXIT HUP INT TERM
-    if [ "$exit_code" -ne 0 ]; then rollback_failed_install || true; fi
+    if [ "$exit_code" -ne 0 ] && [ "$INSTALL_STARTED" -eq 1 ]; then
+        show_failed_install_logs || true
+        rollback_failed_install || true
+    fi
     cleanup
     exit "$exit_code"
 }
@@ -531,24 +683,21 @@ find "$STORAGE_PATH" -maxdepth 1 -type d -name '.r2o-install.*' -mmin +60 \
     -exec rm -rf {} + 2>/dev/null || true
 detect_platform_and_arch
 release_from_slots
+check_install_resources
 if [ -n "$CURRENT_RELEASE" ]; then
     [ -z "$LOCAL_MANIFEST" ] || die 'локальный пакет предназначен для чистой установки'
     [ "$(cat "$ROOT/releases/$CURRENT_RELEASE/router/update-schema" 2>/dev/null)" = R2O-STATE-1 ] ||
         die 'обнаружена legacy-установка; для новой схемы нужна чистая установка базового выпуска'
     [ -x "$ROOT/r2o-manager" ] && [ ! -L "$ROOT/r2o-manager" ] ||
         die 'менеджер установленного выпуска недоступен'
+    runtime_config "${R2O_CONFIG:-$ROOT/config}"
+    check_runtime_dependencies
     cleanup
     trap - EXIT HUP INT TERM
-    R2O_DIR=$ROOT exec "$ROOT/r2o-manager" update-install --root "$ROOT" --service "$INIT_DIR/S99r2o"
+    R2O_DIR=$ROOT R2O_PLATFORM=$PLATFORM exec "$ROOT/r2o-manager" update-install --root "$ROOT" --service "$INIT_DIR/S99r2o"
 fi
 if [ -e "$ROOT" ] || [ -L "$ROOT" ]; then ROOT_PREEXISTED=1; fi
-check_runtime_dependencies
-
-# The package staging area can need a second copy while the existing manager
-# commits it. Check that lower bound before installing any missing dependency.
-[ "$(free_kb "$STORAGE_PATH")" -ge "$((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB))" ] ||
-        die "нужно не менее $((MAX_EXPANDED_KB + DEPENDENCY_RESERVE_KB)) КиБ места во flash для выпуска и зависимостей"
-install_dependencies
+install_bootstrap_dependencies
 command -v tar >/dev/null 2>&1 || die 'не найдена команда tar'
 command -v awk >/dev/null 2>&1 || die 'не найдена команда awk'
 command -v df >/dev/null 2>&1 || die 'не найдена команда df'
@@ -729,17 +878,33 @@ done
     die "нужен базовый выпуск универсального обновлятора"
 [ -x "$BUNDLE/builds/r2o-manager-linux-$ARCH" ] || die "менеджер выпуска $ARCH не исполняемый"
 
-if [ "$PLATFORM" = keenetic ] && [ "$ARCH" = mipsel ] &&
-    ! "$BUNDLE/builds/r2o-manager-linux-$ARCH" --version >/dev/null; then
-    die "выпуск $TARGET_RELEASE не запускается на Keenetic MIPS. Нужна статическая сборка R2O для Entware"
+manager=$BUNDLE/builds/r2o-manager-linux-$ARCH
+datapath=$BUNDLE/builds/r2o-datapath-linux-$ARCH
+"$manager" --version >/dev/null || die "менеджер выпуска $TARGET_RELEASE не запускается для $ARCH"
+if [ -f "${R2O_CONFIG:-$ROOT/config}" ] || [ -L "${R2O_CONFIG:-$ROOT/config}" ]; then
+    runtime_config "${R2O_CONFIG:-$ROOT/config}"
+else
+    # Для чистой установки читаем те же настройки и перенос D2K, что применит router/install.sh.
+    set -- --root "$TMP/preflight-config" --defaults "$BUNDLE/router/config.default"
+    donor=${R2O_DONOR_CONFIG:-/opt/d2k/config}
+    if [ -f "$donor" ]; then set -- "$@" --donor-config "$donor"; fi
+    mkdir "$TMP/preflight-config"
+    "$manager" config-init "$@" >/dev/null || die 'не удалось подготовить конфигурацию для проверки зависимостей'
+    runtime_config "$TMP/preflight-config/config"
 fi
+check_runtime_dependencies
+check_datapath "$datapath"
+# Пакеты могут занять место, отведённое для следующего слота.
+[ "$(free_kb "$STORAGE_PATH")" -ge "$exact_flash_need" ] ||
+    die "после установки зависимостей не хватает места для релиза и отката ($exact_flash_need КиБ)"
+[ "$(memory_available_kb)" -ge "$RAM_RESERVE_KB" ] ||
+    die "после установки зависимостей не хватает RAM ($RAM_RESERVE_KB КиБ)"
 
 INSTALL_STARTED=1
 say "устанавливаю подписанный выпуск $TARGET_RELEASE"
-run_router_install "$BUNDLE" "$TARGET_RELEASE" || {
-    show_failed_install_logs
-    die 'установщик выпуска завершился ошибкой'
-}
+if run_router_install "$BUNDLE" "$TARGET_RELEASE"; then :; else
+    die "установщик выпуска завершился ошибкой (код $?)"
+fi
 CURRENT_RELEASE=$(sed -n '2p' "$ROOT/release-slots" 2>/dev/null || true)
 [ "$CURRENT_RELEASE" = "$TARGET_RELEASE" ] || die 'менеджер не активировал проверенный выпуск'
 INSTALL_STARTED=0

@@ -1533,8 +1533,40 @@ mod app {
         Ok(())
     }
 
+    fn runtime_preflight(args: &[String]) -> Result<(), Box<dyn Error>> {
+        let (mode, ipv6) = match args {
+            [mode, ipv6]
+                if matches!(mode.as_str(), "apply" | "observe")
+                    && matches!(ipv6.as_str(), "0" | "1") =>
+            {
+                (mode, ipv6 == "1")
+            }
+            _ => return Err(invalid("нужны --runtime-preflight apply|observe 0|1")),
+        };
+        QueueSocket::check_kernel().map_err(|error| invalid(format!("NFQUEUE: {error}")))?;
+        if !R2oConntrackClient::open_unprobed().is_some_and(|mut socket| socket.r2o_probe(200)) {
+            return Err(invalid("conntrack: ядро не подтвердило запрос ctnetlink"));
+        }
+        if mode == "apply" {
+            RawSocket::open(libc::AF_INET, 1, None)
+                .map_err(|error| invalid(format!("IPv4 raw socket: {error}")))?;
+            if ipv6 {
+                RawSocket::open(libc::AF_INET6, 1, None)
+                    .map_err(|error| invalid(format!("IPv6 raw socket: {error}")))?;
+            }
+        }
+        println!("r2o-datapath: ядро подтвердило NFQUEUE и conntrack");
+        Ok(())
+    }
+
     pub fn run() -> Result<(), Box<dyn Error>> {
         let arguments = r2o_thread_arguments();
+        if arguments
+            .first()
+            .is_some_and(|arg| arg == "--runtime-preflight")
+        {
+            return runtime_preflight(&arguments[1..]);
+        }
         if arguments
             .iter()
             .any(|argument| argument == "--help" || argument == "-h")
@@ -4667,6 +4699,7 @@ mod app {
   --control-wire v22|v48  профиль управляющего провода (по умолчанию v48)
   --control-release-id ID release ID в приветствии v22 (по умолчанию сборочный)
   --check            проверить формат и поддерживаемый режим плана
+  --runtime-preflight apply|observe 0|1  проверка ядра без изменения правил
   --version          версия
   --help             эта справка
 

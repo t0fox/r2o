@@ -446,17 +446,33 @@ spawn_component() {
         *) stop_component "$component" "$pidfile" ;;
     esac
     [ -x "$MANAGER" ] || die "нет executable manager $MANAGER"
+    if ! ( : >> "$logfile" ); then
+        printf 'r2o: %s: не удалось открыть журнал запуска %s\n' "$component" "$logfile" >&2
+        return 1
+    fi
     # shellcheck disable=SC2016 # this code is deliberately evaluated by the child shell
     start-stop-daemon -S -b -m -p "$pidfile" -x /bin/sh -- \
         -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-spawn "$logfile" \
-        "$MANAGER" exec --root "$ROOT" --component "$component" -- "$@" || return 1
+        "$MANAGER" exec --root "$ROOT" --component "$component" -- "$@" || {
+            printf 'r2o: %s: start-stop-daemon завершился с кодом %s\n' "$component" "$?" >&2
+            return 1
+        }
     attempt=0
     while [ "$attempt" -lt 50 ]; do
         component_running "$component" "$pidfile" && return 0
         attempt=$((attempt + 1))
         sleep 0.1 2>/dev/null || sleep 1
     done
-    say "$component не запустился; см. $logfile"
+    if IFS= read -r start_pid 2>/dev/null < "$pidfile"; then
+        start_exe=$(process_path "$pidfile" || true)
+        if [ -n "$start_exe" ]; then
+            say "$component не запустился: PID $start_pid исполняет $start_exe; журнал: $logfile" >&2
+        else
+            say "$component не запустился: процесс PID $start_pid завершился или недоступен в $PROC; журнал: $logfile" >&2
+        fi
+    else
+        say "$component не запустился: start-stop-daemon не записал PID в $pidfile; журнал: $logfile" >&2
+    fi
     return 1
 }
 

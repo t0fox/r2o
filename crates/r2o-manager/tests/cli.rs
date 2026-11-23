@@ -766,6 +766,7 @@ case "$1" in
             exec sleep 90
         fi
         if [ -e '{dir}/fail-base' ] && [ "$(sed -n '2p' '{root}/release-slots')" = r2o-base ]; then
+            printf '%s\n' 'ошибка запуска нового datapath' >> '{root}/log/r2o-datapath.log'
             exit 1
         fi
         ;;
@@ -868,8 +869,14 @@ esac
     );
     assert!(!root.join("state/update-pending.json").exists());
 
+    fs::create_dir_all(root.join("log")).unwrap();
+    fs::write(root.join("log/r2o-datapath.log"), "старый запуск\n").unwrap();
     fs::write(temp.0.join("fail-base"), []).unwrap();
-    assert!(!invoke(&args).status.success());
+    let failed_start = invoke(&args);
+    assert!(!failed_start.status.success());
+    let diagnostics = String::from_utf8_lossy(&failed_start.stderr);
+    assert!(diagnostics.contains("ошибка запуска нового datapath"));
+    assert!(!diagnostics.contains("старый запуск"));
     assert_eq!(
         r2o_manager::read_install_slots(&root)
             .unwrap()

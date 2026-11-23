@@ -3,7 +3,7 @@ set -eu
 set -f
 
 # Контрольную сумму этого файла закрепляет сценарий GitHub Pages.
-INSTALL_SHA256='1899dd21f7a9671a840e1d26576ab2a6e614d2c010a1eb6d8380d3ac0006c0d9'
+INSTALL_SHA256='88542e4c1203126b5c28617ae68a1ed3cceef151f30974d78545b63373247c2e'
 source_url=https://raw.githubusercontent.com/t0fox/r2o/${R2O_BOOTSTRAP_REF:-main}/scripts/install.sh
 export PATH="/opt/bin:/opt/sbin:$PATH"
 # Прямой GitHub первым, затем резервные HTTPS-зеркала с проверкой SHA-256.
@@ -11,15 +11,15 @@ export PATH="/opt/bin:/opt/sbin:$PATH"
 : "${R2O_GITHUB_MIRRORS:=https://ghfast.top/ https://ghproxy.net/ https://gh-proxy.com/}"
 export R2O_GITHUB_MIRRORS
 
-if ! command -v curl >/dev/null 2>&1; then
-    if [ -f "${R2O_OPENWRT_RELEASE:-/etc/openwrt_release}" ]; then
+if ! curl --version >/dev/null 2>&1; then
+    if [ -x /opt/bin/opkg ] && { [ -d /opt/etc/ndm ] || [ ! -f "${R2O_OPENWRT_RELEASE:-/etc/openwrt_release}" ]; }; then
+        /opt/bin/opkg update && /opt/bin/opkg install curl ca-bundle || exit 1
+    elif [ -f "${R2O_OPENWRT_RELEASE:-/etc/openwrt_release}" ]; then
         if command -v apk >/dev/null 2>&1; then
             apk update && apk add curl ca-bundle || exit 1
         else
             opkg update && opkg install curl ca-bundle || exit 1
         fi
-    elif [ -x /opt/bin/opkg ]; then
-        /opt/bin/opkg update && /opt/bin/opkg install curl ca-bundle || exit 1
     else
         echo 'r2o: нужен OpenWrt или Keenetic с установленным Entware' >&2
         exit 1

@@ -1,7 +1,17 @@
 use super::*;
+use std::io::{Seek, SeekFrom};
 use std::process::{Command, Stdio};
 
 const JOURNAL: &str = "update-pending.json";
+const STARTUP_LOGS: [&str; 6] = [
+    "r2o-datapath.log",
+    "r2o-datapath4.log",
+    "r2o-datapath6.log",
+    "r2o-controller.log",
+    "r2o-controller4.log",
+    "r2o-controller6.log",
+];
+const STARTUP_LOG_LIMIT: u64 = 8 * 1024;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +128,40 @@ fn health(root: &Path, adapter: &Path, target: &str) -> Result<(), UpdateError> 
             return Err(io::Error::other("службы не прошли проверку готовности").into());
         }
         std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn startup_log_size(path: &Path) -> Option<u64> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    metadata.is_file().then(|| metadata.len())
+}
+
+fn report_failed_start(root: &Path, offsets: [u64; STARTUP_LOGS.len()]) {
+    let log_dir = root.join("log");
+    let mut stderr = io::stderr().lock();
+    for (name, offset) in STARTUP_LOGS.into_iter().zip(offsets) {
+        let path = log_dir.join(name);
+        let Some(size) = startup_log_size(&path) else {
+            continue;
+        };
+        // При ротации новый файл может начинаться с нулевого смещения.
+        let start = if size < offset { 0 } else { offset };
+        let start = start.max(size.saturating_sub(STARTUP_LOG_LIMIT));
+        if size == start {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let result = File::open(path).and_then(|mut file| {
+            file.seek(SeekFrom::Start(start))?;
+            file.take(size - start).read_to_end(&mut bytes)
+        });
+        if result.is_ok() && !bytes.is_empty() {
+            let _ = writeln!(
+                stderr,
+                "r2o: {name}, ошибка запуска до отката:\n{}",
+                String::from_utf8_lossy(&bytes).trim_end()
+            );
+        }
     }
 }
 
@@ -328,6 +372,7 @@ pub fn run_router_update(
         save(root, &tx)?;
     }
 
+    let mut startup_log_offsets = None;
     let outcome: Result<Value, UpdateError> = (|| {
         {
             let _lock = UpdateLock::acquire(root)?;
@@ -338,6 +383,10 @@ pub fn run_router_update(
         }
         service(root, adapter, "update-stop")?;
         let activated = activate_staged_update(root)?;
+        let log_dir = root.join("log");
+        startup_log_offsets = Some(
+            STARTUP_LOGS.map(|name| startup_log_size(&log_dir.join(name)).unwrap_or_default()),
+        );
         service(root, adapter, "update-start")?;
         health(root, adapter, &tx.target)?;
         let _lock = UpdateLock::acquire(root)?;
@@ -349,6 +398,9 @@ pub fn run_router_update(
     match outcome {
         Ok(result) => Ok(result),
         Err(error) if pending(root)?.is_some_and(|tx| !tx.committed) => {
+            if let Some(offsets) = startup_log_offsets {
+                report_failed_start(root, offsets);
+            }
             recover_running(root, adapter, &tx, &error.to_string())?;
             health(root, adapter, &tx.old)?;
             Err(error)

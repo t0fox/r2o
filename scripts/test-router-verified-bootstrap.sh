@@ -25,6 +25,7 @@ while [ "$#" -gt 1 ]; do
     esac
 done
 case "$1" in
+    --version) exit 0 ;;
     https://t0fox.github.io/r2o/get)
         cat "$R2O_BOOTSTRAP_TEST/get"
         exit
