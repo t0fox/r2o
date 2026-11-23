@@ -88,12 +88,11 @@ impl RawSocket {
         }
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let one: libc::c_int = 1;
-        let (level, option) = if family == libc::AF_INET {
-            (libc::IPPROTO_IP, libc::IP_HDRINCL)
-        } else {
-            (libc::IPPROTO_IPV6, libc::IPV6_HDRINCL)
-        };
-        set_option(fd.as_raw_fd(), level, option, &one)?;
+        if family == libc::AF_INET {
+            set_option(fd.as_raw_fd(), libc::IPPROTO_IP, libc::IP_HDRINCL, &one)?;
+        }
+        // Для IPv6 Linux включает заголовок при создании сокета IPPROTO_RAW,
+        // в том числе в ядрах без отдельной опции IPV6_HDRINCL.
         if let Some(mark) = r2o_raw_mark_option(mark) {
             set_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark)?;
         }

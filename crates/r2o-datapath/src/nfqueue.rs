@@ -1,6 +1,7 @@
 use crate::netlink::{
-    MessageIter, NF_ACCEPT, NF_DROP, NFQNL_CFG_CMD_BIND, NFQNL_CFG_CMD_UNBIND, config_command,
-    config_params, config_params_with_owner, kernel_error, verdict, verdict_payload,
+    MessageIter, NF_ACCEPT, NF_DROP, NFQNL_CFG_CMD_BIND, NFQNL_CFG_CMD_PF_BIND,
+    NFQNL_CFG_CMD_UNBIND, config_command, config_params, config_params_with_owner, kernel_error,
+    verdict, verdict_payload,
 };
 use std::cell::Cell;
 use std::io;
@@ -243,6 +244,20 @@ impl QueueSocket {
                 fail_open,
             );
             socket.configure(&params)?;
+        }
+        // Linux 3.4 отдельно регистрирует обработчик NFQUEUE для каждого
+        // семейства. EEXIST означает, что этот обработчик уже зарегистрирован.
+        // Новые ядра подтверждают команду без действий.
+        let bind_family = config_command(
+            0,
+            socket.next_sequence(),
+            NFQNL_CFG_CMD_PF_BIND,
+            protocol_family,
+        );
+        if let Err(error) = socket.configure(&bind_family)
+            && error.raw_os_error() != Some(libc::EEXIST)
+        {
+            return Err(error);
         }
         // C ставит SO_TIMESTAMP сразу после открытия очереди и не считает
         // отказ смертельным.

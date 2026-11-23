@@ -27,6 +27,7 @@ pub const NFQA_CFG_MASK: u16 = 4;
 pub const NFQA_CFG_FLAGS: u16 = 5;
 pub const NFQNL_CFG_CMD_BIND: u8 = 1;
 pub const NFQNL_CFG_CMD_UNBIND: u8 = 2;
+pub const NFQNL_CFG_CMD_PF_BIND: u8 = 3;
 pub const NFQNL_COPY_PACKET: u8 = 2;
 pub const NFQA_CFG_F_FAIL_OPEN: u32 = 1;
 pub const NFQA_CFG_F_GSO: u32 = 1 << 2;
@@ -381,6 +382,10 @@ mod tests {
         assert_eq!(&command[18..20], &[0, 1]);
         assert_eq!(&command[20..24], &[8, 0, NFQA_CFG_CMD as u8, 0]);
         assert_eq!(&command[24..28], &[NFQNL_CFG_CMD_BIND, 0, 0, 2]);
+
+        let bind_ipv6 = config_command(0, 4, NFQNL_CFG_CMD_PF_BIND, libc::AF_INET6 as u16);
+        assert_eq!(&bind_ipv6[18..20], &[0, 0]);
+        assert_eq!(&bind_ipv6[24..28], &[3, 0, 0, 10]);
 
         let params = config_params(1, 4, 0xffff, 1024, true);
         assert_eq!(params.len(), 56);
