@@ -1,0 +1,86 @@
+@font-face {
+  font-family: Unbounded;
+  src: url("./unbounded.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  background: #070a0c;
+  color: #e7ecef;
+  font-family: Unbounded, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  position: relative;
+  min-height: 100svh;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    radial-gradient(ellipse at 37% 44%, #153335 0%, transparent 46%),
+    radial-gradient(ellipse at 69% 45%, #2d2017 0%, transparent 42%),
+    #070a0c;
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(#7fd0d412 1px, transparent 1px),
+    linear-gradient(90deg, #7fd0d412 1px, transparent 1px);
+  background-size: clamp(24px, 4.2vw, 80px) clamp(24px, 4.2vw, 80px);
+  mask-image: radial-gradient(ellipse 75% 55% at 50% 38%, #000 8%, transparent 80%);
+}
+
+.floor {
+  position: absolute;
+  inset: 58% 10% 17%;
+  background:
+    radial-gradient(ellipse at 35% 35%, #7fd0d42e, transparent 36%),
+    radial-gradient(ellipse at 69% 35%, #d7a45b25, transparent 37%);
+  filter: blur(clamp(14px, 3vw, 56px));
+}
+
+canvas, .still {
+  position: absolute;
+  pointer-events: none;
+}
+
+canvas {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  visibility: hidden;
+}
+
+.still {
+  top: 43%;
+  left: 50%;
+  width: clamp(138px, 34vmin, 430px);
+  height: auto;
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(0 0 36px #7fd0d441);
+}
+
+.has-webgl canvas { visibility: visible; }
+.has-webgl .still { visibility: hidden; }
+
+h1 {
+  position: absolute;
+  inset: calc(44% + min(18vw, 22vh) + clamp(18px, 3vmin, 60px)) 0 auto;
+  margin: 0;
+  text-align: center;
+  font-size: clamp(2rem, 5.2vmin, 5rem);
+  font-weight: 650;
+  letter-spacing: .17em;
+  text-indent: .17em;
+  text-shadow: 0 2px 32px #7fd0d43d;
+}
+
+@media (max-height: 480px) {
+  h1 { inset-block-start: 79%; font-size: clamp(1rem, 5.5vmin, 2rem); }
+}

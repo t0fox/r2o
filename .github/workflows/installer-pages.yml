@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     paths:
+      - docs/installer/**
+      - crates/r2o-panel/assets/favicon.svg
+      - crates/r2o-panel/assets/fonts/unbounded-latin.woff2
+      - crates/r2o-panel/assets/fonts/OFL-unbounded.txt
       - scripts/bootstrap-pins.py
       - scripts/bootstrap.sh
       - scripts/install.sh
@@ -32,17 +36,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      # GitHub Pages заменяет весь сайт при публикации. Сохраняем опубликованный снимок.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: b270b3a7595af6cc46f9cdfb66daf57528ce7b50
-          sparse-checkout: docs/progress
-          path: previously-published
-          persist-credentials: false
       - name: Подготовить короткий адрес установки
         run: |
           mkdir site
-          cp -a previously-published/docs/progress/. site/
+          cp -a docs/installer/. site/
+          cp crates/r2o-panel/assets/favicon.svg site/mark.svg
+          cp crates/r2o-panel/assets/fonts/unbounded-latin.woff2 site/unbounded.woff2
+          cp crates/r2o-panel/assets/fonts/OFL-unbounded.txt site/OFL-unbounded.txt
           python3 -B scripts/bootstrap-pins.py --pages "$GITHUB_SHA" site/get
           sh -n site/get
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
