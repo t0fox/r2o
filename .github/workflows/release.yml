@@ -142,7 +142,7 @@ jobs:
     needs: [plan, package]
     if: ${{ !inputs.validate_only }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     environment: r2o-signing
     permissions:
       actions: read
@@ -194,9 +194,10 @@ jobs:
           old_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
           old_catalog="$RUNNER_TEMP/previous-catalog.json"
           published="$RUNNER_TEMP/published-update-tags.txt"
-          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
-            --jq '.[] | select(.draft == false and .prerelease == false) |
-              select(any(.assets[]; .name == "latest.json.sig")) | .tag_name' > "$published"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > "$RUNNER_TEMP/releases-before.json"
+          python3 -B scripts/release_retention.py before "$old_tag" \
+            "$RUNNER_TEMP/releases-before.json" > "$published"
           case "$old_tag" in
             r2o-20261122-1125-6b5c711-45017277844-1)
               printf '{"format":1,"releases":[]}\n' > "$old_catalog"
@@ -270,3 +271,30 @@ jobs:
             aws --endpoint-url "$R2O_R2_ENDPOINT" s3 cp --only-show-errors \
               --cache-control no-cache "$RUNNER_TEMP/r2-latest" "s3://$R2O_R2_BUCKET/latest"
           fi
+      - name: Ротация опубликованных выпусков (последние 15)
+        id: retention
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          test "$latest" = "$RELEASE_ID"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > "$RUNNER_TEMP/releases-after.json"
+          # The downloaded catalog was signature-verified before publication.
+          # Refuse deletion if any of its releases would be removed.
+          python3 -B scripts/release_retention.py after "$RELEASE_ID" \
+            "$RUNNER_TEMP/releases-after.json" "$RUNNER_TEMP/published-release/catalog.json" \
+            > "$RUNNER_TEMP/prune-releases.tsv"
+          while IFS=$'\t' read -r id tag; do
+            test -n "$id" && test -n "$tag" || continue
+            echo "Pruning release $tag ($id)"
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+            sleep 1
+            if ! gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag"; then
+              echo "::warning::Не удалось удалить тег старого выпуска $tag"
+            fi
+            sleep 1
+          done < "$RUNNER_TEMP/prune-releases.tsv"
+      - name: Сообщить о сбое ротации
+        if: ${{ steps.retention.outcome == 'failure' }}
+        run: echo "::warning::Релиз опубликован, но ротация не завершена; следующая публикация повторит очистку"

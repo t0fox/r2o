@@ -112,6 +112,7 @@ jobs:
         run: |
           sh scripts/test-package-release.sh
           python3 -B scripts/test-update-catalog.py
+          python3 -B scripts/test-release-retention.py
       - name: Проверить сценарии обновления и службы роутера
         run: |
           set -euo pipefail
