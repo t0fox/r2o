@@ -153,8 +153,10 @@ with tempfile.TemporaryDirectory(prefix="r2o-legacy-rt-test.") as tmp:
         }
         return router, root, journal, env
 
-    def run(env, error=None):
-        result = subprocess.run(["sh", helper], env=env, capture_output=True, text=True, timeout=25)
+    def run(env, error=None, command=None):
+        result = subprocess.run(
+            command or ["sh", helper], env=env, capture_output=True, text=True, timeout=25
+        )
         if error:
             assert result.returncode and error in result.stderr, result.stderr
         else:
@@ -175,6 +177,30 @@ with tempfile.TemporaryDirectory(prefix="r2o-legacy-rt-test.") as tmp:
     (router / "fail-save").touch()
     (root / "config").write_text("TG_ENABLED=1\nR2O_RT_PROXY=1\nR2O_RT_CUSTOM=owner\n")
     (journal / "dnsmasq.conf").touch()
+    bundle = router / "bundle"
+    (bundle / "router").mkdir(parents=True)
+    (bundle / "builds").mkdir()
+    init = router / "init"
+    ndm_hooks = router / "ndm-hooks"
+    ndm_hooks.mkdir()
+    env.update(R2O_INIT_DIR=str(init), R2O_NDM_DIR=str(ndm_hooks), R2O_PLATFORM="keenetic")
+    for adapter in ("001-r2o.sh", "config.default", "r2o-firewall-fw3-include.sh",
+                    "r2o-ppe-deoffload.sh", "select-panel-ip.sh", helper.name):
+        shutil.copy2(helper.parent / adapter, bundle / "router" / adapter)
+    shim = bundle / "router/S99r2o.shim"
+    shim.write_text("#!/bin/sh\nexit 0\n")
+    manager = bundle / "builds/r2o-manager-linux-mipsel"
+    manager.write_text("""#!/bin/sh
+set -eu
+case "$1" in
+    install-local) printf 'R2O-RELEASE-SLOTS-1\\nr2o-next\\n-\\n' >"$R2O_DIR/release-slots" ;;
+    config-init) printf '{"created":false,"state_dir":"%s/state","donor_state_dir":null}\\n' "$R2O_DIR" ;;
+    *) exit 2 ;;
+esac
+""")
+    for executable in (shim, manager, bundle / "router" / helper.name):
+        executable.chmod(0o755)
+    install = ["sh", helper.parent / "install.sh", bundle, "r2o-next", "mipsel"]
     binary = root / "releases/old/builds/r2o-telegram-linux-mipsel"
     binary.parent.mkdir(parents=True)
     shutil.copy2(proc, binary)
@@ -187,11 +213,14 @@ with tempfile.TemporaryDirectory(prefix="r2o-legacy-rt-test.") as tmp:
     try:
         rt, telegram, dns, owner = processes
         (root / "run/r2o-rt-proxy.pid").write_text(str(telegram.pid))
-        run(env, "flash write failed")
+        run(env, "flash write failed", install)
+        assert not (root / "release-slots").exists() and not any(ndm_hooks.iterdir())
         assert rt.poll() is None and dns.poll() is None
         assert (journal / "owned.tsv").exists() and (router / "iptables-data").exists()
         (router / "fail-save").unlink()
-        run(env)
+        run(env, command=install)
+        assert (root / "release-slots").read_text().splitlines()[1] == "r2o-next"
+        assert (ndm_hooks / "001-r2o.sh").read_bytes() == (helper.parent / "001-r2o.sh").read_bytes()
         rt.wait(5)
         dns.wait(5)
         assert telegram.poll() is None and owner.poll() is None
