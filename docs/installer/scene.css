@@ -20,6 +20,7 @@ main {
   min-height: 100svh;
   overflow: hidden;
   isolation: isolate;
+  touch-action: pinch-zoom;
   background:
     radial-gradient(ellipse at 37% 44%, #153335 0%, transparent 46%),
     radial-gradient(ellipse at 69% 45%, #2d2017 0%, transparent 42%),
@@ -68,6 +69,7 @@ canvas {
 
 .has-webgl canvas { visibility: visible; }
 .has-webgl .still { visibility: hidden; }
+.has-webgl h1 { opacity: 0; }
 
 h1 {
   position: absolute;

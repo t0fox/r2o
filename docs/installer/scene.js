@@ -2,57 +2,30 @@ const canvas = document.querySelector("canvas");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 const vertex = `
-  attribute vec3 home;
-  attribute vec3 flight;
-  attribute vec3 detail;
-  uniform vec4 scene;
-  uniform vec2 pointer;
-  uniform float repel;
+  attribute vec3 position;
+  attribute vec4 detail;
+  uniform vec3 scene;
   varying vec3 tint;
   varying float opacity;
   varying float byteValue;
 
   void main() {
     float time = scene.x;
-    float phase = mod(time, 12.);
     float seed = detail.x;
     float path = detail.y;
-    float delay = seed * .64;
-    float outward = smoothstep(2.35 + delay, 4.90 + delay, phase);
-    float inward = smoothstep(6.10 + delay, 10.95 + delay, phase);
-    float spread = outward * (1. - inward);
-    vec3 drift = vec3(sin(time * 1.16 + seed * 58.), cos(time * .91 + seed * 107.),
-      sin(time * 1.28 + seed * 91.));
-    vec3 turn = vec3(-flight.y, flight.x * .55, sin(path * 32.));
-    vec3 p = home + flight * spread + turn * sin(phase * .91 + seed * 9.) * spread * .23
-      + drift * (.012 + spread * .095);
-
-    vec2 delta = p.xy - pointer;
-    float distance = length(delta);
-    float force = pow(max(0., 1. - distance / .59), 1.35) * repel;
-    p.xy += delta / max(.022, distance) * force * .29;
-    p.z += force * .30;
-
-    float angle = -.12 + sin(time * .43) * .31;
-    float tilt = -.12 + cos(time * .5) * .11;
-    float ca = cos(angle), sa = sin(angle), ct = cos(tilt), st = sin(tilt);
-    p = vec3(ca * p.x + sa * p.z, p.y, ca * p.z - sa * p.x);
-    p = vec3(p.x, ct * p.y - st * p.z, ct * p.z + st * p.y);
-
-    float depth = 3.75 / (3.75 - p.z);
-    float framing = min(scene.y * .74, 1.05);
-    gl_Position = vec4(p.xy * vec2(framing / scene.y, framing) * depth + vec2(0., .11), -.24 * p.z, 1.);
-    gl_PointSize = clamp(scene.z * (.62 + detail.z * .88) * depth, 1., scene.w);
+    float depth = 3.75 / (3.75 - position.z);
+    gl_Position = vec4(position.xy, -.24 * position.z, 1.);
+    gl_PointSize = clamp(scene.y * (.58 + detail.z * .86) * depth, 1., scene.z);
 
     vec3 cool = vec3(.50, .82, .83);
     vec3 warm = vec3(.84, .64, .36);
-    vec3 base = mix(cool, warm, smoothstep(-.22, .38, home.x));
+    vec3 base = mix(cool, warm, smoothstep(-.22, .38, detail.w));
     // Фаза штриха определяется исходной позицией. Она не сбрасывается при разлёте.
     float wave = pow(max(0., cos(6.283185 * (path - time / 7.5))), 22.);
     float shimmer = .5 + .5 * sin(time * (1.7 + seed * 3.) + seed * 71.);
-    tint = mix(base, vec3(.91, .99, .97), wave * .79 + force * .14);
+    tint = mix(base, vec3(.91, .99, .97), wave * .79);
     opacity = clamp(.28 + detail.z * .45 + wave * .42 + shimmer * .14
-      + p.z * .10 - spread * .08, 0., 1.);
+      + position.z * .10, 0., 1.);
     float beat = floor(time * (4.5 + seed * 3.2) + seed * 53.);
     byteValue = floor(fract(seed * 397.31 + beat * .61803399) * 256.);
   }
@@ -118,7 +91,13 @@ function makeParticles() {
     state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
     return state / 4294967296;
   };
-  const points = [];
+  const particles = [];
+  const details = [];
+  const point = (x, y, phase, size = 1) => {
+    const seed = random();
+    particles.push({ x, y, z: (random() - .5) * .22, seed: seed * 97, dx: 0, dy: 0, vx: 0, vy: 0 });
+    details.push(seed, phase, random() * size, x);
+  };
   const segments = [];
   let perimeter = 0;
   for (let i = 0; i < outline.length; i++) {
@@ -136,15 +115,30 @@ function makeParticles() {
       const width = (random() + random() - 1) * 3.3;
       const px = (x + dx * along + dy / length * width - 20) / 17;
       const py = (20 - y - dy * along + dx / length * width) / 17;
-      const z = (random() - .5) * .24;
-      const velocity = random() * .49 + .20;
-      const fx = px * velocity + (random() - .5) * 1.12;
-      const fy = py * velocity + (random() - .5) * 1.50;
-      const fz = (random() - .5) * 1.56;
-      points.push(px, py, z, fx, fy, fz, random(), (start + along * length) / perimeter, random());
+      point(px, py, (start + along * length) / perimeter);
     }
   }
-  return new Float32Array(points);
+
+  const word = document.createElement("canvas");
+  word.width = 128;
+  word.height = 44;
+  const pen = word.getContext("2d", { willReadFrequently: true });
+  if (pen) {
+    pen.font = "650 34px Unbounded, sans-serif";
+    pen.textAlign = "center";
+    pen.textBaseline = "middle";
+    [..."R2O"].forEach((letter, i) => pen.fillText(letter, 24 + i * 40, 23));
+    const mask = pen.getImageData(0, 0, word.width, word.height).data;
+    for (let y = 0; y < word.height; y += 2) {
+      for (let x = 0; x < word.width; x += 3) {
+        if (mask[(y * word.width + x) * 4 + 3] > 170) {
+          point((x - 64) / 168, -.63 + (22 - y) / 168, .30 + x / 256, .80);
+        }
+      }
+    }
+  }
+
+  return { particles, details: new Float32Array(details) };
 }
 
 function start() {
@@ -167,42 +161,92 @@ function start() {
   if (!gl.getProgramParameter(program, gl.LINK_STATUS) || !makeAtlas(gl)) return;
   gl.useProgram(program);
 
-  const data = makeParticles();
-  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-  for (const [name, offset] of [["home", 0], ["flight", 12], ["detail", 24]]) {
+  const { particles, details } = makeParticles();
+  const positions = new Float32Array(particles.length * 3);
+  const setup = (name, size, data, usage) => {
+    const buffer = gl.createBuffer();
     const location = gl.getAttribLocation(program, name);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data, usage);
     gl.enableVertexAttribArray(location);
-    gl.vertexAttribPointer(location, 3, gl.FLOAT, false, 36, offset);
-  }
+    gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
+    return buffer;
+  };
+  setup("detail", 4, details, gl.STATIC_DRAW);
+  const buffer = setup("position", 3, positions, gl.DYNAMIC_DRAW);
   gl.enable(gl.BLEND);
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.clearColor(0, 0, 0, 0);
 
   const scene = gl.getUniformLocation(program, "scene");
-  const pointer = gl.getUniformLocation(program, "pointer");
-  const repel = gl.getUniformLocation(program, "repel");
   const limit = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1];
   const startAt = performance.now();
-  let frame = 0, push = 0, target = 0, x = 0, y = 0;
+  let frame = 0, previous = startAt, width = 0, height = 0, cursor = null, sweep = null;
 
   function draw(now) {
     frame = 0;
     if (gl.isContextLost()) return;
-    const seconds = reducedMotion.matches ? 0 : (now - startAt) / 1000;
-    const aspect = canvas.width / canvas.height;
-    const size = Math.max(12, Math.min(canvas.width, canvas.height) * .020);
-    push += (target - push) * .16;
+    const still = reducedMotion.matches;
+    const seconds = still ? 0 : (now - startAt) / 1000;
+    const dt = Math.min(.05, Math.max(0, (now - previous) / 1000));
+    previous = now;
+    const movement = still ? null : sweep;
+    sweep = null;
+    const scale = Math.min(width * .74, height * 1.05) / 2;
+    const radius = Math.min(58, Math.max(28, Math.min(width, height) * .066));
+    const angle = -.10 + Math.sin(seconds * .43) * .16;
+    const tilt = -.09 + Math.cos(seconds * .5) * .06;
+    const ca = Math.cos(angle), sa = Math.sin(angle), ct = Math.cos(tilt), st = Math.sin(tilt);
+    const damping = Math.exp(-8 * dt);
+
+    particles.forEach((p, i) => {
+      const x = p.x + Math.sin(seconds * 1.15 + p.seed) * .007;
+      const y = p.y + Math.cos(seconds * .91 + p.seed) * .007;
+      const z = p.z + Math.sin(seconds * 1.21 - p.seed) * .025;
+      const turnedZ = ca * z - sa * x;
+      const depth = ct * turnedZ + st * y;
+      const zoom = scale * 3.75 / (3.75 - depth);
+      const sx = width / 2 + (ca * x + sa * z) * zoom;
+      const sy = height * .445 - (ct * y - st * turnedZ) * zoom;
+
+      if (movement) {
+        const { from, to } = movement;
+        const vx = to.x - from.x, vy = to.y - from.y;
+        const dx = sx + p.dx - from.x, dy = sy + p.dy - from.y;
+        const along = Math.max(0, Math.min(1, (dx * vx + dy * vy) / Math.max(1, vx * vx + vy * vy)));
+        const ax = dx - vx * along, ay = dy - vy * along;
+        const distance = Math.hypot(ax, ay);
+        if (distance < radius) {
+          const force = (1 - distance / radius) ** 1.45 * (150 + radius * 5);
+          const direction = p.seed;
+          p.vx += (distance > 1 ? ax / distance : Math.cos(direction)) * force;
+          p.vy += (distance > 1 ? ay / distance : Math.sin(direction)) * force;
+        }
+      }
+      if (still) {
+        p.dx = p.dy = p.vx = p.vy = 0;
+      } else {
+        p.vx = (p.vx - p.dx * 29 * dt) * damping;
+        p.vy = (p.vy - p.dy * 29 * dt) * damping;
+        p.dx += p.vx * dt;
+        p.dy += p.vy * dt;
+      }
+      positions[i * 3] = (sx + p.dx) * 2 / width - 1;
+      positions[i * 3 + 1] = 1 - (sy + p.dy) * 2 / height;
+      positions[i * 3 + 2] = depth;
+    });
+
     gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.uniform4f(scene, seconds, aspect, size, limit);
-    gl.uniform2f(pointer, x, y);
-    gl.uniform1f(repel, reducedMotion.matches ? 0 : push);
-    gl.drawArrays(gl.POINTS, 0, data.length / 9);
-    if (!document.hidden && !reducedMotion.matches) frame = requestAnimationFrame(draw);
+    gl.uniform3f(scene, seconds, Math.max(12, Math.min(canvas.width, canvas.height) * .020), limit);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, positions);
+    gl.drawArrays(gl.POINTS, 0, particles.length);
+    if (!document.hidden && !still) frame = requestAnimationFrame(draw);
   }
 
   function resize() {
-    const { clientWidth: width, clientHeight: height } = canvas;
+    width = canvas.clientWidth;
+    height = canvas.clientHeight;
     if (!width || !height || gl.isContextLost()) return;
     const density = Math.min(devicePixelRatio, 3840 / width, 2160 / height);
     canvas.width = Math.round(width * density);
@@ -213,15 +257,20 @@ function start() {
   }
 
   const stage = canvas.parentElement;
-  stage.addEventListener("pointermove", event => {
+  function disturb(event) {
     const rect = canvas.getBoundingClientRect();
-    const aspect = rect.width / rect.height;
-    const scale = Math.min(aspect * .74, 1.05);
-    x = ((event.clientX - rect.left) * 2 / rect.width - 1) * aspect / scale;
-    y = (1 - (event.clientY - rect.top) * 2 / rect.height - .11) / scale;
-    target = 1;
+    const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    sweep = { from: sweep?.from ?? cursor ?? point, to: point };
+    cursor = point;
+  }
+  stage.addEventListener("pointerdown", event => {
+    cursor = null;
+    disturb(event);
   }, { passive: true });
-  stage.addEventListener("pointerleave", () => { target = 0; });
+  stage.addEventListener("pointermove", disturb, { passive: true });
+  for (const event of ["pointerleave", "pointercancel", "pointerup"]) {
+    stage.addEventListener(event, () => { cursor = null; }, { passive: true });
+  }
   window.addEventListener("resize", resize);
   reducedMotion.addEventListener("change", resize);
   document.addEventListener("visibilitychange", resize);
@@ -233,4 +282,9 @@ function start() {
   document.documentElement.classList.add("has-webgl");
 }
 
+try {
+  await document.fonts.load("650 34px Unbounded");
+} catch {
+  // Маска надписи может использовать системный шрифт.
+}
 start();
