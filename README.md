@@ -138,25 +138,35 @@ Telegram **не требует собственного VPS или WARP**. Го�
 
 **Требования:** права `root`, OpenWrt 24/25 или Keenetic с Entware, поддержка NFQUEUE и подходящего firewall, достаточно места в `/opt` и памяти для нескольких Rust-процессов. Для OpenWrt предусмотрен системный `procd`-адаптер, а компонентами управляет `/opt/etc/init.d/S99r2o`.
 
-### Одна команда
+### Установка по SSH
 
-Подключитесь по SSH как `root` и выполните:
+Подключитесь по SSH как `root`. На Keenetic с чистым Entware сначала установите
+`curl` и корневые сертификаты. Штатный `wget` Keenetic может не поддерживать HTTPS.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
+export PATH="/opt/bin:/opt/sbin:$PATH"
+/opt/bin/opkg update && /opt/bin/opkg install curl ca-bundle
 ```
 
-Если `curl` ещё нет:
+На OpenWrt без `curl` установите его командой `apk update && apk add curl ca-bundle`
+или `opkg update && opkg install curl ca-bundle` в зависимости от менеджера пакетов.
+Скачайте установщик и запустите его после успешной загрузки.
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
+(
+    installer=$(mktemp /tmp/r2o-bootstrap.XXXXXX) || exit 1
+    trap 'rm -f "$installer"' EXIT
+    curl -fsSL --proto '=https' --proto-redir '=https' -o "$installer" \
+        'https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh' &&
+        sh "$installer"
+)
 ```
 
 Установщик сам определяет платформу и ABI, **доустанавливает недостающие
-зависимости** (`curl`, `ca-bundle`, `openssl-util`, NFQUEUE/conntrack-модули)
-через `apk`, `opkg` или Entware, показывает прогресс загрузки архива и проверяет
+зависимости** (`openssl-util` и модули NFQUEUE/conntrack)
+через штатный менеджер пакетов, показывает прогресс загрузки архива и проверяет
 закреплённую Ed25519-подпись манифеста и SHA-256 архива **до распаковки и
-запуска кода**. Отдельно ставить `curl`, `ca-bundle` или NFQUEUE-пакеты не нужно.
+запуска кода**.
 
 При нехватке flash установщик выбирает безопасный staging в flash или tmpfs с
 резервом RAM; если не помещается слот для отката, он завершится до активации.

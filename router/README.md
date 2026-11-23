@@ -8,17 +8,9 @@
 ## Установка через SSH
 
 Подключитесь к OpenWrt или Keenetic с установленным Entware как `root` и
-выполните:
-
-```sh
-wget -qO- https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
-```
-
-Если `curl` уже установлен:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
-```
+следуйте [инструкции по установке через SSH](../README.md#установка-по-ssh).
+Для чистого Entware инструкция включает установку `curl` и сертификатов через
+`/opt/bin/opkg` до загрузки сценария по HTTPS.
 
 Установщик распознаёт ABI OpenWrt `mipsel-openwrt-musl`,
 `aarch64-openwrt-musl`, `armv7-openwrt-musl`, `armv5-musleabi`, а также
@@ -95,8 +87,8 @@ firewall для событий `nat` и `mangle`; при удалении неи
 firewall. Его состояние отображается в `status`.
 
 Остановить службы можно командой `/opt/etc/init.d/S99r2o stop`; команда
-`restart` запускает их снова. Для полного удаления запустите от `root` ту же
-bootstrap-команду, что используется для установки:
+`restart` запускает их снова. Для полного удаления запустите сценарий удаления
+от `root`:
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/t0fox/r2o/main/scripts/uninstall.sh | sh
