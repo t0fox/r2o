@@ -22,3 +22,23 @@ router/* text eol=lf
 crates/r2o-controller/tests/fixtures/r2o-rx-volume-hcaptcha-split2-c.txt text eol=lf
 crates/r2o-controller/tests/fixtures/r2o-rx-volume-hcaptcha-split5-c.txt text eol=lf
 crates/r2o-controller/tests/fixtures/r2o-rx-volume-longname-c.txt text eol=lf
+
+# GitHub Linguist: show the Rust core and shell integration in language statistics.
+# C reference implementations, differential tests and test fixtures.
+crates/*/tests/**/*.c -linguist-detectable
+crates/*/tests/**/*.h -linguist-detectable
+scripts/**/*.c -linguist-detectable
+scripts/**/*.h -linguist-detectable
+
+# Web panel assets and browser tests.
+crates/r2o-panel/assets/*.js -linguist-detectable
+crates/r2o-panel/assets/*.css -linguist-detectable
+crates/r2o-panel/assets/*.html -linguist-detectable
+crates/r2o-panel/tests/*.cjs -linguist-detectable
+
+# UI prototypes, installer documentation and development tooling.
+prototype/panel/** -linguist-detectable
+docs/installer/** -linguist-detectable
+scripts/**/*.py -linguist-detectable
+tools/**/*.py -linguist-detectable
+tools/**/*.mjs -linguist-detectable
