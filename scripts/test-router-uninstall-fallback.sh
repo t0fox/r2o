@@ -13,6 +13,12 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+# В аварийной установке нет соседних адаптеров из рабочего checkout.
+# Отдельная копия проверяет удаление по PID без доступа к firewall хоста;
+# ошибки DNS/firewall ниже задаются адаптерами самого активного выпуска.
+UNINSTALL=$TEMP/uninstall.sh
+cp "$ROOT/router/uninstall.sh" "$UNINSTALL"
+
 install_root=$TEMP/r2o
 mkdir -p "$install_root/releases/test/router" "$install_root/run" "$TEMP/init" "$TEMP/openwrt-init"
 printf 'R2O-RELEASE-SLOTS-1\ntest\n' > "$install_root/release-slots"
@@ -23,7 +29,7 @@ printf '%s\n' "$sleep_pid" > "$install_root/run/r2o-datapath4.pid"
 env R2O_INIT_DIR="$TEMP/init" R2O_OPENWRT_INIT_DIR="$TEMP/openwrt-init" \
     R2O_OPENWRT_RELEASE="$TEMP/missing-openwrt-release" \
     R2O_RUNTIME_DIR="$TEMP/r2o-runtime" R2O_NDM_DIR="$TEMP/ndm" \
-    sh "$ROOT/router/uninstall.sh" --root "$install_root" --yes
+    sh "$UNINSTALL" --root "$install_root" --yes
 
 [ ! -e "$install_root" ] || { echo "uninstall оставил каталог установки" >&2; exit 1; }
 if kill -0 "$sleep_pid" 2>/dev/null; then
@@ -49,7 +55,7 @@ printf '%s\n' "$sleep_pid" > "$install_root/run/r2o-rt-proxy.pid"
 if env R2O_INIT_DIR="$TEMP/init" R2O_OPENWRT_INIT_DIR="$TEMP/openwrt-init" \
     R2O_OPENWRT_RELEASE="$TEMP/missing-openwrt-release" \
     R2O_RUNTIME_DIR="$TEMP/r2o-runtime" R2O_NDM_DIR="$TEMP/ndm" \
-    sh "$ROOT/router/uninstall.sh" --root "$install_root" --yes > "$TEMP/blocked.log" 2>&1; then
+    sh "$UNINSTALL" --root "$install_root" --yes > "$TEMP/blocked.log" 2>&1; then
     echo 'uninstall удалил установку после ошибки очистки DNS' >&2
     exit 1
 fi
@@ -69,7 +75,7 @@ chmod 0755 "$install_root/releases/test/router/r2o-rt-firewall.sh"
 if env R2O_INIT_DIR="$TEMP/init" R2O_OPENWRT_INIT_DIR="$TEMP/openwrt-init" \
     R2O_OPENWRT_RELEASE="$TEMP/missing-openwrt-release" \
     R2O_RUNTIME_DIR="$TEMP/r2o-runtime" R2O_NDM_DIR="$TEMP/ndm" \
-    sh "$ROOT/router/uninstall.sh" --root "$install_root" --yes > "$TEMP/firewall-blocked.log" 2>&1; then
+    sh "$UNINSTALL" --root "$install_root" --yes > "$TEMP/firewall-blocked.log" 2>&1; then
     echo 'uninstall проигнорировал ошибку очистки firewall' >&2; exit 1
 fi
 kill -0 "$sleep_pid" || { echo 'uninstall остановил процесс до очистки firewall' >&2; exit 1; }
@@ -79,7 +85,7 @@ cat "$TEMP/firewall-fixed" > "$install_root/releases/test/router/r2o-rt-firewall
 env R2O_INIT_DIR="$TEMP/init" R2O_OPENWRT_INIT_DIR="$TEMP/openwrt-init" \
     R2O_OPENWRT_RELEASE="$TEMP/missing-openwrt-release" \
     R2O_RUNTIME_DIR="$TEMP/r2o-runtime" R2O_NDM_DIR="$TEMP/ndm" \
-    sh "$ROOT/router/uninstall.sh" --root "$install_root" --yes
+    sh "$UNINSTALL" --root "$install_root" --yes
 [ ! -e "$install_root" ] || { echo 'повторный uninstall сохранил очищенную установку' >&2; exit 1; }
 if kill -0 "$sleep_pid" 2>/dev/null; then
     echo 'повторный uninstall не остановил процесс' >&2; exit 1
