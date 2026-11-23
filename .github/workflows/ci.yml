@@ -104,8 +104,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Собрать бинарники для сценариев роутера
         run: cargo build --locked --release --package r2o-manager --bin r2o-manager --package r2o-controller --bin r2o-controller --package r2o-telegram --bin r2o-telegram
-      - name: Проверить TLS и параллельные соединения RuTracker
-        run: python3 -B scripts/test-rt-proxy-live.py --binary target/release/r2o-telegram --output "${RUNNER_TEMP}/rt-proxy-live"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # версия v7.1.0
         with:
           node-version: '24'

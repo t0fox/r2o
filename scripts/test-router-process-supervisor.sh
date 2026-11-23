@@ -40,8 +40,6 @@ run_init() {
     R2O_CONFIG=$CONFIG \
     R2O_RUNTIME_DIR=$RUNTIME \
     R2O_FIREWALL=$FIREWALL \
-    R2O_RT_FIREWALL=$FIREWALL \
-    R2O_RT_DNS=$FIREWALL \
     R2O_MANAGER=$TEMP/missing-manager \
     R2O_LOG_MAINTENANCE=$TEMP/missing-log \
     R2O_FIREWALL_WATCHDOG=$TEMP/missing-watchdog \

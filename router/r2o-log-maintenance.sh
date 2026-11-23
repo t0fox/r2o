@@ -69,7 +69,7 @@ tick() {
     for name in r2o-datapath.log r2o-controller.log \
                 r2o-datapath4.log r2o-datapath6.log \
                 r2o-controller4.log r2o-controller6.log \
-                panel.log telegram.log rt-proxy.log lists-update.log update-scheduler.log \
+                panel.log telegram.log lists-update.log update-scheduler.log \
                 instagram-dns.log instagram-dns-scheduler.log; do
         rotate_one "$LOG/$name"
     done

@@ -31,8 +31,7 @@ printf '%s\n' \
     router/r2o-firewall.sh \
     router/r2o-firewall-fw3-include.sh \
     router/r2o-tg-firewall.sh \
-    router/r2o-rt-firewall.sh \
-    router/r2o-rt-dns.sh \
+    router/r2o-remove-legacy-rt.sh \
     router/r2o-update-scheduler.sh \
     router/r2o-log-maintenance.sh \
     router/r2o-telegram-watchdog.sh \
@@ -63,7 +62,7 @@ assert asset["sha256"] == digest
 assert asset["bytes"] == os.stat(sys.argv[2]).st_size
 with tarfile.open(sys.argv[2]) as package:
     assert asset["expanded"] == sum(item.size for item in package if item.isfile())
-    for name in ("router/r2o-rt-firewall.sh", "router/r2o-rt-dns.sh"):
+    for name in ("router/r2o-remove-legacy-rt.sh",):
         item = package.getmember(name)
         assert item.isfile() and item.mode == 0o755, name
 assert manifest["metadata"]["format"] == 2

@@ -26,7 +26,6 @@ printf 'retained-tail\n' >> "$install_root/log/panel.log"
 head -c 4096 /dev/zero | tr '\000' m > "$install_root/log/instagram-dns.log"
 head -c 4096 /dev/zero | tr '\000' n > "$install_root/log/instagram-dns-scheduler.log"
 head -c 4096 /dev/zero | tr '\000' l > "$install_root/log/lists-update.log"
-head -c 4096 /dev/zero | tr '\000' r > "$install_root/log/rt-proxy.log"
 head -c 4096 /dev/zero | tr '\000' d > "$install_root/log/r2o-datapath.log"
 head -c 4096 /dev/zero | tr '\000' c > "$install_root/log/r2o-controller.log"
 head -c 4096 /dev/zero | tr '\000' y > "$install_root/log/unowned.log"
@@ -48,7 +47,6 @@ tail -c 14 "$install_root/log/panel.log" | grep -qx 'retained-tail'
 [ "$(wc -c < "$install_root/log/instagram-dns.log")" -eq 1024 ]
 [ "$(wc -c < "$install_root/log/instagram-dns-scheduler.log")" -eq 1024 ]
 [ "$(wc -c < "$install_root/log/lists-update.log")" -eq 1024 ]
-[ "$(wc -c < "$install_root/log/rt-proxy.log")" -eq 1024 ]
 [ "$(wc -c < "$install_root/log/r2o-datapath.log")" -eq 1024 ]
 [ "$(wc -c < "$install_root/log/r2o-controller.log")" -eq 1024 ]
 [ "$(stat -c %i "$install_root/log/panel.log")" = "$before_inode" ]

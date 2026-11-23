@@ -3,16 +3,10 @@
 # его на роутере. Локально рождённые пакеты роутера не проходят через
 # R2O PREROUTING, поэтому classifier измеряет линию, а не R2O-обход.
 #
-# ВАЖНО: если DNS на роутере подменяет имя на sentinel (rutracker.org ->
-# 10.171.171.171), передавайте IP:порт из публичного DNS. Иначе oracle
-# измерит rt-proxy, а не прямую линию.
-#
 # Использование:
 #   scripts/r2o-live-d2o-detect.sh HOST:PORT SNI [флаги d2k-detect...]
 # Примеры:
 #   scripts/r2o-live-d2o-detect.sh www.linkedin.com:443 www.linkedin.com \
-#       --repeats 3 --timeout 6000 --progress --json
-#   scripts/r2o-live-d2o-detect.sh 172.67.182.196:443 rutracker.org \
 #       --repeats 3 --timeout 6000 --progress --json
 #
 # Переменные:

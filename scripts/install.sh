@@ -44,19 +44,11 @@ DISK_TMP=
 BUNDLE=
 ARCHIVE=
 BOOTSTRAP_APK=
-RT_DNS_INIT_BACKUP=
-RT_DNS_INIT_DEST=
-RT_DNS_NEW_INIT=
 
 say() { echo "r2o: $*"; }
 die() { echo "r2o: $*" >&2; exit 1; }
 
 cleanup() {
-    if ! restore_keenetic_rt_dns_init; then
-        say "не удалось восстановить init dnsmasq; копия сохранена: $RT_DNS_INIT_BACKUP" >&2
-        TMP=
-    fi
-    disable_new_keenetic_rt_dns_init || say "не удалось отключить новый общий init dnsmasq: $RT_DNS_NEW_INIT" >&2
     [ -z "$TMP" ] || rm -rf "$TMP" 2>/dev/null || true
     [ -z "$DISK_TMP" ] || rm -rf "$DISK_TMP" 2>/dev/null || true
     if [ -n "$BOOTSTRAP_APK" ]; then
@@ -246,7 +238,6 @@ runtime_config() {
     ipv6_enabled=$(runtime_value IPV6_ENABLED 1)
     telegram_enabled=$(runtime_value TG_ENABLED 0)
     telegram_mode=$(runtime_value TG_MODE local)
-    rt_proxy_enabled=$(runtime_value R2O_RT_PROXY 1)
     case "$mode" in off|observe|apply) ;; *) die "неверный MODE: $mode" ;; esac
     case "$backend" in
         auto)
@@ -258,7 +249,6 @@ runtime_config() {
     case "$ipv6_enabled" in 0|1) ;; *) die "неверный IPV6_ENABLED: $ipv6_enabled" ;; esac
     case "$telegram_enabled" in 0|no) telegram_enabled=0 ;; 1|yes) telegram_enabled=1 ;; *) die "неверный TG_ENABLED: $telegram_enabled" ;; esac
     [ "$telegram_mode" = local ] || telegram_enabled=0
-    case "$rt_proxy_enabled" in 0|1) ;; *) die "неверный R2O_RT_PROXY: $rt_proxy_enabled" ;; esac
 }
 
 runtime_value() {
@@ -277,52 +267,6 @@ need_runtime_tool() {
     if ! "$tool" "$@" >/dev/null 2>&1; then
         case " $runtime_packages " in *" $package "*) ;; *) runtime_packages="$runtime_packages $package" ;; esac
     fi
-}
-
-restore_keenetic_rt_dns_init() {
-    [ -n "$RT_DNS_INIT_BACKUP" ] || return 0
-    restore_init_tmp=$(mktemp "$RT_DNS_INIT_DEST.r2o.XXXXXX") || return 1
-    if ! cp -p "$RT_DNS_INIT_BACKUP" "$restore_init_tmp" || ! mv -f "$restore_init_tmp" "$RT_DNS_INIT_DEST"; then
-        rm -f "$restore_init_tmp"
-        return 1
-    fi
-    RT_DNS_INIT_BACKUP=
-}
-
-disable_new_keenetic_rt_dns_init() {
-    [ -n "$RT_DNS_NEW_INIT" ] || return 0
-    if [ -e "$RT_DNS_NEW_INIT" ] || [ -L "$RT_DNS_NEW_INIT" ]; then
-        [ -f "$RT_DNS_NEW_INIT" ] && [ ! -L "$RT_DNS_NEW_INIT" ] || return 1
-        grep -q '^ENABLED=' "$RT_DNS_NEW_INIT" || return 1
-        new_init_tmp=$(mktemp "$RT_DNS_NEW_INIT.r2o.XXXXXX") || return 1
-        if ! sed 's/^ENABLED=.*/ENABLED=no/' "$RT_DNS_NEW_INIT" > "$new_init_tmp" \
-            || ! chmod 0755 "$new_init_tmp" || ! mv -f "$new_init_tmp" "$RT_DNS_NEW_INIT"; then
-            rm -f "$new_init_tmp"
-            return 1
-        fi
-    fi
-    RT_DNS_NEW_INIT=
-}
-
-install_keenetic_rt_dns() {
-    # Пакет нужен для частного listener на 127.0.0.1:5354. Его общий S56
-    # не должен при следующей загрузке занять порт штатного DNS Keenetic.
-    rt_dns_init=${R2O_ENTWARE_DNSMASQ_INIT:-/opt/etc/init.d/S56dnsmasq}
-    if [ -e "$rt_dns_init" ] || [ -L "$rt_dns_init" ]; then
-        [ -f "$rt_dns_init" ] && [ ! -L "$rt_dns_init" ] || die "небезопасный init dnsmasq: $rt_dns_init"
-        # S56 не является conffile opkg: пакет может заменить даже изменённый
-        # владельцем файл. Восстанавливаем его и при ошибке установки пакета.
-        rt_dns_backup_candidate=$TMP/dnsmasq-init.before
-        cp -p "$rt_dns_init" "$rt_dns_backup_candidate" || die 'не удалось сохранить init dnsmasq'
-        RT_DNS_INIT_BACKUP=$rt_dns_backup_candidate
-        RT_DNS_INIT_DEST=$rt_dns_init
-    else
-        RT_DNS_NEW_INIT=$rt_dns_init
-    fi
-    IPKG_NO_SCRIPT=1 install_packages dnsmasq-full
-    restore_keenetic_rt_dns_init || die 'не удалось восстановить существующий init dnsmasq'
-    disable_new_keenetic_rt_dns_init || die "не удалось отключить общий автозапуск нового dnsmasq: $rt_dns_init"
-    dnsmasq --version >/dev/null 2>&1 || die 'dnsmasq не запускается после установки dnsmasq-full'
 }
 
 runtime_failure() {
@@ -437,21 +381,11 @@ check_runtime_dependencies() {
         need_runtime_tool nft nftables-nojson --version
     else
         need_runtime_tool iptables "$ipt_package" -V
-        if [ "$rt_proxy_enabled" -eq 1 ]; then need_runtime_tool iptables-restore "$ipt_package" --help; fi
         if [ "$ipv6_enabled" -eq 1 ]; then need_runtime_tool ip6tables "$ip6t_package" -V; fi
         if [ "$telegram_enabled" -eq 1 ]; then need_runtime_tool ipset ipset --version; fi
     fi
     # shellcheck disable=SC2086
     install_packages $runtime_packages
-    if [ "$rt_proxy_enabled" -eq 1 ]; then
-        if [ "$PLATFORM" = keenetic ]; then
-            dnsmasq --version >/dev/null 2>&1 || install_keenetic_rt_dns
-        else
-            dnsmasq --version >/dev/null 2>&1 || install_packages dnsmasq
-        fi
-        command -v nc >/dev/null 2>&1 || install_packages netcat
-        command -v nc >/dev/null 2>&1 || die 'нет nc для проверки DNS RuTracker'
-    fi
 
     if [ "$backend" = nft ]; then
         rule_module=nft_queue
@@ -507,7 +441,7 @@ check_runtime_dependencies() {
         if [ "$ipv6_enabled" -eq 1 ]; then
             runtime_failure ip6tables "$ip6t_package" -t mangle -S PREROUTING
         fi
-        if [ "$telegram_enabled" -eq 1 ] || [ "$rt_proxy_enabled" -eq 1 ]; then
+        if [ "$telegram_enabled" -eq 1 ]; then
             runtime_failure iptables "$ipt_package" -t nat -S OUTPUT
         fi
         if [ "$telegram_enabled" -eq 1 ]; then
@@ -659,7 +593,7 @@ show_failed_install_logs() {
     log_dir=$ROOT/log
     shown=0
     if [ -d "$log_dir" ] && [ ! -L "$log_dir" ]; then
-        for file in "$log_dir"/r2o-datapath*.log "$log_dir"/r2o-controller*.log "$log_dir"/rt-proxy.log; do
+        for file in "$log_dir"/r2o-datapath*.log "$log_dir"/r2o-controller*.log; do
             [ -s "$file" ] && [ ! -L "$file" ] || continue
             printf 'r2o: журнал запуска %s (последние 80 строк, до отката):\n' "$file" >&2
             tail -n 80 "$file" >&2 || true

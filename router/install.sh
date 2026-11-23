@@ -60,13 +60,11 @@ if [ -L "$BUNDLE/router/001-r2o.sh" ] || [ ! -f "$BUNDLE/router/001-r2o.sh" ] \
     echo "в выпуске отсутствует адаптер NDM или PPE" >&2
     exit 2
 fi
-for rt_adapter in r2o-rt-firewall.sh r2o-rt-dns.sh; do
-    if [ -L "$BUNDLE/router/$rt_adapter" ] || [ ! -f "$BUNDLE/router/$rt_adapter" ] \
-        || [ ! -x "$BUNDLE/router/$rt_adapter" ]; then
-        echo "в выпуске отсутствует исполняемый адаптер RuTracker: $rt_adapter" >&2
-        exit 2
-    fi
-done
+LEGACY_RT_REMOVAL=$BUNDLE/router/r2o-remove-legacy-rt.sh
+if [ -L "$LEGACY_RT_REMOVAL" ] || [ ! -f "$LEGACY_RT_REMOVAL" ] || [ ! -x "$LEGACY_RT_REMOVAL" ]; then
+    echo 'в выпуске отсутствует средство миграции прежнего RuTracker' >&2
+    exit 2
+fi
 
 if [ -e "$ROOT" ] || [ -L "$ROOT" ]; then
     if [ -L "$ROOT" ] || [ ! -d "$ROOT" ]; then
@@ -154,6 +152,9 @@ if [ -e "$SLOTS" ] || [ -L "$SLOTS" ]; then
         INSTALL_LOCAL=0
     fi
 fi
+
+# Миграция нужна и после оборванной установки, когда служба ещё не запускается.
+R2O_DIR=$ROOT R2O_CONFIG=${R2O_CONFIG:-$ROOT/config} "$LEGACY_RT_REMOVAL"
 
 if [ "$INSTALL_LOCAL" = 1 ]; then
     "$MANAGER" install-local --root "$ROOT" --bundle "$BUNDLE" \

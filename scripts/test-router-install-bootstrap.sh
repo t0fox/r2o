@@ -185,13 +185,6 @@ case "$1" in
         for pkg do
             case "$pkg" in kmod*) [ "${TEST_OPENWRT_OPKG:-0}" = 1 ] || exit 89 ;; esac
             touch "$R2O_TEST_INSTALLED/$pkg"
-            if [ "$pkg" = dnsmasq-full ]; then
-                printf 'dnsmasq-postinst-disabled=%s\n' "${IPKG_NO_SCRIPT:-0}" >> "$R2O_TEST_PACKAGE_LOG"
-                # Настоящий пакет не помечает S56 как conffile и заменяет его.
-                printf '#!/bin/sh\nENABLED=yes\n' > "$R2O_ENTWARE_DNSMASQ_INIT"
-                chmod 0755 "$R2O_ENTWARE_DNSMASQ_INIT"
-                [ "${TEST_RT_DNS_PACKAGE_FAIL:-0}" = 0 ] || exit 71
-            fi
         done ;;
     *) exit 2 ;;
 esac
@@ -221,7 +214,6 @@ EOF
 cat > "$MOCK/dnsmasq" <<'EOF'
 #!/bin/sh
 [ "$*" = --version ] || exit 88
-[ "${TEST_NEED_RT_DNS:-0}" = 0 ] || [ -e "$R2O_TEST_INSTALLED/dnsmasq-full" ] || [ -e "$R2O_TEST_INSTALLED/dnsmasq" ]
 EOF
 printf '#!/bin/sh\nexit 88\n' > "$MOCK/nc"
 cat > "$MOCK/ipset" <<'EOF'
@@ -339,8 +331,7 @@ EOF
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/S99r2o"
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/001-r2o.sh"
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/r2o-ppe-deoffload.sh"
-printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/r2o-rt-firewall.sh"
-printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/r2o-rt-dns.sh"
+printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/router/r2o-remove-legacy-rt.sh"
 printf '#!/bin/sh\n[ -z "${R2O_TEST_SERVICE_LOG:-}" ] || printf "%%s\\n" "$*" >> "$R2O_TEST_SERVICE_LOG"\n' > "$FIXTURE/router/openwrt-init"
 printf 'MODE=apply\nTG_ENABLED=1\n' > "$FIXTURE/router/config.default"
 printf 'R2O-STATE-1\n' > "$FIXTURE/router/update-schema"
@@ -561,52 +552,20 @@ TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 run_entwar
 [ ! -e "$CASE/etc/init.d/r2o" ] || fail 'Keenetic installed an OpenWrt init script'
 grep -Fxq 'apply 1' "$CASE/probes.log" || fail 'Keenetic failed to check IPv6 without optional NAT6'
 
-new_case keenetic-private-rt-dns
-prepare_entware_fixture
-TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 TEST_NEED_RT_DNS=1 \
-    run_entware > "$CASE/out" 2>&1 ||
-    { cat "$CASE/out" >&2; fail 'Keenetic did not install the private RuTracker DNS dependency'; }
-grep -Fxq 'opkg dnsmasq-full' "$CASE/packages.log" || fail 'Keenetic missed dnsmasq-full'
-grep -Fxq 'dnsmasq-postinst-disabled=1' "$CASE/packages.log" || fail 'dnsmasq postinst could start a general DNS service'
-grep -Fxq 'ENABLED=no' "$CASE/opt/etc/init.d/S56dnsmasq" || fail 'new general dnsmasq service remains enabled'
+! grep -q dnsmasq "$CASE/packages.log" || fail 'чистый Keenetic установил dnsmasq для удалённой подсистемы'
 
 new_case keenetic-existing-dnsmasq-init
-printf '#!/bin/sh\nENABLED=yes\n# owner configuration\n' > "$CASE/opt/etc/init.d/S56dnsmasq"
+printf '#!/bin/sh\nENABLED=yes\n# Настройки владельца\n' > "$CASE/opt/etc/init.d/S56dnsmasq"
 cp "$CASE/opt/etc/init.d/S56dnsmasq" "$CASE/dnsmasq-init.before"
+touch "$CASE/installed/dnsmasq-full"
 prepare_entware_fixture
-TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 TEST_NEED_RT_DNS=1 \
+TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 \
     run_entware > "$CASE/out" 2>&1 ||
-    { cat "$CASE/out" >&2; fail 'Keenetic with an existing DNS service did not install'; }
-cmp -s "$CASE/dnsmasq-init.before" "$CASE/opt/etc/init.d/S56dnsmasq" || fail 'existing owner DNS service was changed'
-
-new_case keenetic-dnsmasq-package-failed
-printf '#!/bin/sh\nENABLED=no\n# preserve on package failure\n' > "$CASE/opt/etc/init.d/S56dnsmasq"
-cp "$CASE/opt/etc/init.d/S56dnsmasq" "$CASE/dnsmasq-init.before"
-prepare_entware_fixture
-if TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 TEST_NEED_RT_DNS=1 \
-    TEST_RT_DNS_PACKAGE_FAIL=1 run_entware > "$CASE/out" 2>&1; then
-    fail 'failed dnsmasq package installation was accepted'
-fi
-cmp -s "$CASE/dnsmasq-init.before" "$CASE/opt/etc/init.d/S56dnsmasq" || fail 'failed package install lost the existing DNS service'
-[ ! -s "$CASE/manager.log" ] || fail 'failed DNS dependency activated the release'
-
-new_case keenetic-new-dnsmasq-package-failed
-prepare_entware_fixture
-if TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 TEST_NEED_RT_DNS=1 \
-    TEST_RT_DNS_PACKAGE_FAIL=1 run_entware > "$CASE/out" 2>&1; then
-    fail 'failed new dnsmasq package installation was accepted'
-fi
-grep -Fxq 'ENABLED=no' "$CASE/opt/etc/init.d/S56dnsmasq" || fail 'failed new package left general DNS startup enabled'
-[ ! -s "$CASE/manager.log" ] || fail 'failed new DNS dependency activated the release'
-
-new_case keenetic-rt-disabled
-printf 'R2O_RT_PROXY=0\n' >> "$CASE/fixtures/router/config.default"
-prepare_entware_fixture
-TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 TEST_NEED_RT_DNS=1 \
-    run_entware > "$CASE/out" 2>&1 ||
-    { cat "$CASE/out" >&2; fail 'explicitly disabled RuTracker required DNS dependencies'; }
-! grep -q dnsmasq "$CASE/packages.log" || fail 'disabled RuTracker installed its private DNS dependency'
-[ ! -e "$CASE/opt/etc/init.d/S56dnsmasq" ] || fail 'disabled RuTracker changed general DNS startup'
+    { cat "$CASE/out" >&2; fail 'Keenetic с ранее установленным dnsmasq не запустился'; }
+cmp -s "$CASE/dnsmasq-init.before" "$CASE/opt/etc/init.d/S56dnsmasq" ||
+    fail 'установщик изменил пользовательский dnsmasq'
+[ -f "$CASE/installed/dnsmasq-full" ] || fail 'установщик удалил пользовательский dnsmasq-full'
+! grep -q dnsmasq "$CASE/packages.log" || fail 'установщик вызвал opkg для существующего dnsmasq'
 
 new_case clean-keenetic-ported-with-ipv4-only
 mkdir "$CASE/ndm"

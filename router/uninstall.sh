@@ -117,29 +117,17 @@ else
     STOP_FAILED=1
 fi
 
-# При недоступном NDM/UCI нельзя удалять журнал владения и прокси, пока DNS
-# продолжает выдавать sentinel. Повторный clear безопасен после обычного stop.
-RT_DNS_ADAPTER=$ROOT/releases/$ACTIVE/router/r2o-rt-dns.sh
-if [ ! -e "$RT_DNS_ADAPTER" ] && [ ! -L "$RT_DNS_ADAPTER" ]; then
-    RT_DNS_ADAPTER=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/r2o-rt-dns.sh
+MIGRATION=$ROOT/releases/$ACTIVE/router/r2o-remove-legacy-rt.sh
+if [ ! -e "$MIGRATION" ] && [ ! -L "$MIGRATION" ]; then
+    MIGRATION=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/r2o-remove-legacy-rt.sh
 fi
-if [ -e "$RT_DNS_ADAPTER" ] || [ -L "$RT_DNS_ADAPTER" ]; then
-    [ -f "$RT_DNS_ADAPTER" ] && [ ! -L "$RT_DNS_ADAPTER" ] && [ -x "$RT_DNS_ADAPTER" ] \
-        || fail 'адаптер очистки RuTracker DNS повреждён; установка сохранена'
-    R2O_DIR=$ROOT R2O_CONFIG=${R2O_CONFIG:-$ROOT/config} "$RT_DNS_ADAPTER" clear \
-        || fail 'RuTracker DNS не снят; прокси, конфигурация и журнал сохранены для повторного удаления'
-elif [ -e "$ROOT/state/rt-dns/backend" ]; then
-    fail 'нет адаптера очистки RuTracker DNS; установка и журнал сохранены'
-fi
-RT_FIREWALL_ADAPTER=$ROOT/releases/$ACTIVE/router/r2o-rt-firewall.sh
-if [ ! -e "$RT_FIREWALL_ADAPTER" ] && [ ! -L "$RT_FIREWALL_ADAPTER" ]; then
-    RT_FIREWALL_ADAPTER=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/r2o-rt-firewall.sh
-fi
-if [ -e "$RT_FIREWALL_ADAPTER" ] || [ -L "$RT_FIREWALL_ADAPTER" ]; then
-    [ -f "$RT_FIREWALL_ADAPTER" ] && [ ! -L "$RT_FIREWALL_ADAPTER" ] && [ -x "$RT_FIREWALL_ADAPTER" ] \
-        || fail 'адаптер очистки RuTracker firewall повреждён; установка сохранена'
-    R2O_DIR=$ROOT R2O_CONFIG=${R2O_CONFIG:-$ROOT/config} "$RT_FIREWALL_ADAPTER" stop \
-        || fail 'RuTracker firewall не снят; установка сохранена для повторного удаления'
+if [ -e "$MIGRATION" ] || [ -L "$MIGRATION" ]; then
+    [ -f "$MIGRATION" ] && [ ! -L "$MIGRATION" ] && [ -x "$MIGRATION" ] \
+        || fail 'средство миграции RuTracker повреждено; установка сохранена'
+    R2O_DIR=$ROOT R2O_CONFIG=${R2O_CONFIG:-$ROOT/config} "$MIGRATION" \
+        || fail 'очистка RuTracker не завершена; установка и журнал сохранены'
+elif [ -e "$ROOT/state/rt-dns" ]; then
+    fail 'нет средства миграции RuTracker; установка и журнал сохранены'
 fi
 if [ "$STOP_FAILED" = 1 ]; then
     echo 'r2o uninstall: DNS очищен; завершаю оставшиеся процессы по PID-файлам' >&2
