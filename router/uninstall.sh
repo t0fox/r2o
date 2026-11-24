@@ -142,6 +142,7 @@ if [ -f "$OPENWRT_RELEASE" ] || [ "${R2O_PLATFORM:-}" = openwrt ]; then
             && [ -f "$ROOT/releases/$ACTIVE/router/openwrt-init" ] \
             && cmp -s "$OPENWRT_SERVICE" "$ROOT/releases/$ACTIVE/router/openwrt-init"; then
             if [ -x "$OPENWRT_SERVICE" ]; then
+                "$OPENWRT_SERVICE" detach || fail 'не удалось снять службу R2O из procd'
                 "$OPENWRT_SERVICE" disable
             fi
             rm -f "$OPENWRT_SERVICE"

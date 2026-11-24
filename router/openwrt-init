@@ -49,7 +49,12 @@ boot_wait() {
 }
 
 detach() {
-    procd_kill r2o 2>/dev/null
+    if procd_kill r2o 2>/dev/null; then
+        return 0
+    fi
+    # При ручной установке служба может быть включена без экземпляра procd.
+    services=$(ubus call service list '{"name":"r2o"}') || return 1
+    [ -z "$(printf '%s\n' "$services" | jsonfilter -e '@.r2o')" ]
 }
 
 stop_service() {
