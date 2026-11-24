@@ -85,7 +85,7 @@ fn element(endpoint: Endpoint) -> (String, String) {
     }
 }
 
-fn get(endpoint: Endpoint) -> Result<bool> {
+pub(super) fn lease_present(endpoint: Endpoint) -> Result<bool> {
     let (set, key) = element(endpoint);
     let expression = format!("{{ {key} }}");
     let args = ["get", "element", "inet", "r2o", &set, &expression];
@@ -101,7 +101,10 @@ fn get(endpoint: Endpoint) -> Result<bool> {
 pub(super) fn leases_live(leases: &Leases, ipv6: bool) -> Result<bool> {
     let now = uptime()?;
     for (&endpoint, &until) in leases {
-        if (endpoint.version() == 4 || ipv6) && ttl(until, now).is_some() && !get(endpoint)? {
+        if (endpoint.version() == 4 || ipv6)
+            && ttl(until, now).is_some()
+            && !lease_present(endpoint)?
+        {
             return Ok(false);
         }
     }
@@ -118,7 +121,7 @@ pub(super) fn route(endpoint: Endpoint, add: bool, seconds: u64) -> Result<()> {
     }
     let (set, key) = element(endpoint);
     let mut rules = String::new();
-    if get(endpoint)? {
+    if lease_present(endpoint)? {
         writeln!(rules, "delete element inet r2o {set} {{ {key} }}").unwrap();
     }
     if add {

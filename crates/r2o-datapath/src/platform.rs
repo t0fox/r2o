@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
@@ -436,6 +436,30 @@ impl Platform {
         Ok(())
     }
 
+    fn accounting_sample(&self) -> Result<(usize, usize, bool)> {
+        let table = File::open(self.proc.join("net/nf_conntrack")).or_else(|err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                File::open(self.proc.join("net/ip_conntrack"))
+            } else {
+                Err(err)
+            }
+        })?;
+        sample_accounting(BufReader::new(table))
+    }
+
+    fn dns_uid_ready(&self, version: u8) -> Result<bool> {
+        if self.backend != Backend::Nft {
+            return Ok(false);
+        }
+        let flag = optional(
+            &self
+                .run
+                .join(format!("platform.uid.{}", self.queue(version))),
+        )?;
+        let advertised = flag.and_then(|value| value.trim().parse::<u32>().ok());
+        Ok(advertised.is_some() && advertised == Some(self.peer(version)?))
+    }
+
     fn boot(&self) -> Result<String> {
         let boot = fs::read_to_string(self.proc.join("sys/kernel/random/boot_id"))?;
         Ok(boot.trim().to_owned())
@@ -524,9 +548,18 @@ impl Platform {
         let exclusions = optional(&self.run.join("dns-excl"))?.unwrap_or_default();
         let desired =
             if self.kind == Kind::Keenetic && self.backend == Backend::Iptables && refresh_dns {
+                let health = self.run.join("platform.dns-excl-degraded");
                 match keenetic::dns_exclusions(&exclusions) {
-                    Ok(updated) => updated,
+                    Ok((updated, degraded)) => {
+                        if degraded {
+                            atomic(&health, "не все DNS upstream подтверждены\n")?;
+                        } else {
+                            remove(&health)?;
+                        }
+                        updated
+                    }
                     Err(err) => {
+                        atomic(&health, &err.to_string())?;
                         eprintln!("r2o-platform: прежние исключения DNS сохранены: {err}");
                         exclusions.clone()
                     }
@@ -534,8 +567,24 @@ impl Platform {
             } else {
                 exclusions.clone()
             };
-        let leases = self.leases()?;
-        let live = match self.backend {
+        let mut leases = self.leases()?;
+        let mut live = true;
+        if self.backend == Backend::Nft {
+            for version in [4, 6].into_iter().filter(|v| *v == 4 || ipv6) {
+                let endpoints: Vec<_> = leases
+                    .keys()
+                    .copied()
+                    .filter(|e| e.version() == version && e.uid.is_some())
+                    .collect();
+                if !endpoints.is_empty() && !self.dns_uid_ready(version)? {
+                    for endpoint in endpoints {
+                        leases.remove(&endpoint);
+                        live &= !nft::lease_present(endpoint)?;
+                    }
+                }
+            }
+        }
+        live &= match self.backend {
             Backend::Nft => nft::leases_live(&leases, ipv6)?,
             Backend::Iptables => iptables::leases_live(&leases, ipv6)?,
         };
@@ -612,20 +661,10 @@ impl Platform {
         if version == 6 && !ipv6 {
             return Err(error("IPv6 NFQUEUE недоступна"));
         }
-        if endpoint.uid.is_some() && add {
-            let peer = self.peer(version)?;
-            let flag = optional(
-                &self
-                    .run
-                    .join(format!("platform.uid.{}", self.queue(version))),
-            )?;
-            if self.backend != Backend::Nft
-                || flag.as_deref().map(str::trim) != Some(&peer.to_string())
-            {
-                return Err(error(
-                    "привязка DNS по UID недоступна на этом backend или NFQUEUE",
-                ));
-            }
+        if endpoint.uid.is_some() && add && !self.dns_uid_ready(version)? {
+            return Err(error(
+                "привязка DNS по UID недоступна на этом backend или NFQUEUE",
+            ));
         }
         let old = self.leases()?;
         let mut leases = old.clone();
@@ -697,6 +736,33 @@ struct QueueEvidence {
     kernel_drops: u64,
     user_drops: u64,
     sequence: u32,
+}
+
+fn sample_accounting(reader: impl BufRead) -> Result<(usize, usize, bool)> {
+    const MAX_ENTRIES: usize = 256;
+    let mut counted = 0;
+    let mut missing = 0;
+    for (index, line) in reader.lines().enumerate() {
+        if index == MAX_ENTRIES {
+            return Ok((counted, missing, true));
+        }
+        let line = line?;
+        let fields = line.split_whitespace();
+        // Both formats have a source field for each direction. Ignore non-flow rows.
+        if fields.clone().filter(|f| f.starts_with("src=")).count() != 2 {
+            continue;
+        }
+        let packets = fields
+            .filter_map(|field| field.strip_prefix("packets="))
+            .filter(|value| value.parse::<u64>().is_ok())
+            .count();
+        if packets == 2 {
+            counted += 1;
+        } else {
+            missing += 1;
+        }
+    }
+    Ok((counted, missing, false))
 }
 
 fn queue_evidence(text: &str, queue: u16) -> Option<QueueEvidence> {
@@ -879,12 +945,26 @@ pub fn cli(args: &[String]) -> Result<()> {
             println!(
                 "firewall=installed nfqueue=bound conntrack_accounting=enabled lan_coverage=unverified"
             );
+            match platform.accounting_sample() {
+                Ok((counted, missing, bounded)) => println!(
+                    "conntrack_entries=sampled with_counters={counted} without_full_counters={missing} bounded={bounded}"
+                ),
+                Err(err) => println!("conntrack_entries=unavailable ({err})"),
+            }
             for version in [4, 6].into_iter().filter(|version| *version == 4 || ipv6) {
                 let queue = platform.queue(version);
                 let evidence = platform.queue_evidence(version)?;
                 println!(
-                    "ipv{version} queue={queue} peer={} sequence={} kernel_drops={} user_drops={}",
-                    evidence.peer, evidence.sequence, evidence.kernel_drops, evidence.user_drops
+                    "ipv{version} queue={queue} peer={} sequence={} kernel_drops={} user_drops={} dns_uid={}",
+                    evidence.peer,
+                    evidence.sequence,
+                    evidence.kernel_drops,
+                    evidence.user_drops,
+                    if platform.dns_uid_ready(version)? {
+                        "socket_flag"
+                    } else {
+                        "unavailable"
+                    }
                 );
             }
             if platform.ipv6 {
@@ -903,6 +983,9 @@ pub fn cli(args: &[String]) -> Result<()> {
             }
             if platform.kind == Kind::Keenetic {
                 keenetic::offload_status(&platform);
+                if let Some(reason) = optional(&platform.run.join("platform.dns-excl-degraded"))? {
+                    println!("dns_exclusions=degraded ({})", reason.trim());
+                }
             } else if platform.kind == Kind::OpenWrt && platform.backend == Backend::Nft {
                 match nft::admission_status(&platform, ipv6) {
                     Ok(status) => println!("fw4_admission={status}"),
@@ -953,6 +1036,9 @@ impl Worker {
             },
         )?;
         if version != 4 {
+            if let Ok(sender) = UnixDatagram::unbound() {
+                let _ = sender.send_to(b"event", platform.run.join(EVENT));
+            }
             return Ok(None);
         }
         let path = platform.run.join(EVENT);
@@ -1046,6 +1132,19 @@ fn run_worker(platform: &Platform, listener: &UnixDatagram) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_conntrack_entries_created_without_accounting() {
+        let tracked =
+            "ipv4 2 tcp 6 100 ESTABLISHED src=192.0.2.2 packets=1 src=198.18.0.2 packets=0\n";
+        let no_extension = "tcp 6 100 ESTABLISHED src=192.0.2.2 src=198.18.0.2\n";
+        let mixed = format!("{tracked}{no_extension}header\n");
+        assert_eq!(sample_accounting(mixed.as_bytes()).unwrap(), (1, 1, false));
+        assert_eq!(
+            sample_accounting(tracked.repeat(257).as_bytes()).unwrap(),
+            (256, 0, true)
+        );
+    }
 
     #[test]
     fn retry_is_bounded() {

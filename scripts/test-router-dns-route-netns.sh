@@ -213,8 +213,8 @@ if [ "$FW_BACKEND" = nft ]; then
         cat "$WORK/datapath4.log" "$WORK/datapath6.log" >&2
         exit 1
     fi
-    sh "$FIREWALL" dns-route add 192.0.2.2 udp 854 20 411
-    sh "$FIREWALL" dns-route add 2001:db8::2 udp 854 20 411
+    sh "$FIREWALL" dns-route add 192.0.2.2 udp 854 60 411
+    sh "$FIREWALL" dns-route add 2001:db8::2 udp 854 60 411
     if sh "$FIREWALL" dns-route add 192.0.2.2 udp 854 20 0; then exit 1; fi
     if sh "$FIREWALL" dns-route add 192.0.2.2 tcp 854 20 411; then exit 1; fi
     python3 - <<'PY'
@@ -238,6 +238,25 @@ PY
     for family in 4 6; do
         [ "$(packets out "$family" dns_h3_route)" = 1 ]
     done
+    # При смене сведений о слушателе UID-маршрут приостанавливается до истечения TTL.
+    v4_get() { nft get element inet r2o dns_h3_route4 '{ 192.0.2.2 . 854 . 411 }' >/dev/null 2>&1; }
+    owner=$(cat "$uid4")
+    printf '%s\n' 0 >"$uid4"
+    sh "$FIREWALL" event
+    for _ in $(seq 1 40); do
+        if ! v4_get; then break; fi
+        sleep 0.1
+    done
+    if v4_get; then exit 1; fi
+    grep -q '^192\.0\.2\.2 udp 854 411 ' "$R2O_RUN_DIR/platform.dns"
+    nft get element inet r2o dns_h3_route6 '{ 2001:db8::2 . 854 . 411 }' >/dev/null
+    printf '%s\n' "$owner" >"$uid4"
+    sh "$FIREWALL" event
+    for _ in $(seq 1 40); do
+        if v4_get; then break; fi
+        sleep 0.1
+    done
+    v4_get
     sh "$FIREWALL" dns-route del 192.0.2.2 udp 854 0 411
     if nft get element inet r2o dns_h3_route4 '{ 192.0.2.2 . 854 . 411 }' >/dev/null 2>&1; then exit 1; fi
     nft get element inet r2o dns_h3_route6 '{ 2001:db8::2 . 854 . 411 }' >/dev/null

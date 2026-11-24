@@ -56,6 +56,9 @@ pub(super) fn offload_status(platform: &Platform) {
 }
 
 fn host_port(input: &str, default: u16) -> Option<(&str, u16)> {
+    if default == 0 {
+        return None;
+    }
     if let Ok(address) = input.parse::<IpAddr>()
         && !address.is_loopback()
     {
@@ -89,7 +92,40 @@ fn host_port(input: &str, default: u16) -> Option<(&str, u16)> {
 fn upstreams(text: &str) -> Result<BTreeSet<(&str, u16)>> {
     let mut endpoints = BTreeSet::new();
     let mut recognized = false;
-    for line in text.lines() {
+    let mut tls = None;
+    let mut https = false;
+    for line in text
+        .lines()
+        .map(str::trim)
+        .chain(std::iter::once("proxy-end:"))
+    {
+        if line.starts_with("server-") || line.starts_with("proxy-") {
+            if https {
+                return Err(error("отсутствует uri DNS-over-HTTPS"));
+            }
+            if let Some((host, port)) = tls.take() {
+                let (host, port) =
+                    host_port(host, port).ok_or_else(|| error("неверный address DNS-over-TLS"))?;
+                endpoints.insert((host, port));
+                recognized = true;
+            }
+            if line == "server-tls:" {
+                tls = Some(("", 853));
+            }
+            https = line == "server-https:";
+        } else if let Some((host, port)) = &mut tls {
+            if let Some(address) = line.strip_prefix("address:") {
+                *host = address.trim();
+            } else if let Some(value) = line.strip_prefix("port:") {
+                *port = number(value.trim())?;
+            }
+        } else if https && let Some(uri) = line.strip_prefix("uri:") {
+            endpoints.insert(
+                https_endpoint(uri.trim()).ok_or_else(|| error("неверный uri DNS-over-HTTPS"))?,
+            );
+            recognized = true;
+            https = false;
+        }
         let fields: Vec<_> = line.split_whitespace().collect();
         if let ["dns_server", "=", primary, rest @ ..] = fields.as_slice() {
             recognized = true;
@@ -103,15 +139,13 @@ fn upstreams(text: &str) -> Result<BTreeSet<(&str, u16)>> {
                 .find_map(|pair| (pair[0] == "#").then_some(pair[1]))
             {
                 let candidate = candidate.split('@').next().unwrap_or(candidate);
-                let (candidate, port) = if let Some(host) = candidate.strip_prefix("https://") {
-                    (host.split('/').next().unwrap_or(host), 443)
+                let endpoint = if candidate.starts_with("https://") {
+                    https_endpoint(candidate)
                 } else {
-                    (candidate.strip_prefix("tls://").unwrap_or(candidate), 853)
+                    host_port(candidate.strip_prefix("tls://").unwrap_or(candidate), 853)
                 };
-                endpoints.insert(
-                    host_port(candidate, port)
-                        .ok_or_else(|| error("неизвестный формат upstream Keenetic"))?,
-                );
+                endpoints
+                    .insert(endpoint.ok_or_else(|| error("неизвестный формат upstream Keenetic"))?);
             }
         }
     }
@@ -122,6 +156,37 @@ fn upstreams(text: &str) -> Result<BTreeSet<(&str, u16)>> {
         return Err(error("слишком много upstream Keenetic"));
     }
     Ok(endpoints)
+}
+
+fn https_endpoint(uri: &str) -> Option<(&str, u16)> {
+    let host = uri
+        .strip_prefix("https://")?
+        .split(['/', '?', '#'])
+        .next()?;
+    host_port(host, 443)
+}
+
+fn secure_config_omitted(text: &str) -> bool {
+    let mut loopback_upstream = false;
+    for line in text.lines().map(str::trim) {
+        if matches!(
+            line,
+            "proxy-tls:" | "proxy-https:" | "server-tls:" | "server-https:"
+        ) {
+            return false;
+        }
+        let mut words = line.split_whitespace();
+        if words.next() == Some("dns_server")
+            && words.next() == Some("=")
+            && let Some((host, port)) = words.next().and_then(|value| host_port(value, 53))
+            && port != 53
+            && host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+            && !words.any(|word| word == "#")
+        {
+            loopback_upstream = true;
+        }
+    }
+    loopback_upstream
 }
 
 fn addresses(text: &str) -> BTreeSet<IpAddr> {
@@ -147,16 +212,19 @@ fn addresses(text: &str) -> BTreeSet<IpAddr> {
     result
 }
 
-pub(super) fn dns_exclusions(previous: &str) -> Result<String> {
-    let dump = command("ndmc", &["-c", "more temp:ndnproxymain.conf"], None)
-        .and_then(|text| {
-            upstreams(&text)?;
-            Ok(text)
-        })
-        .or_else(|_| command("ndmc", &["-c", "show dns-proxy"], None))?;
+pub(super) fn dns_exclusions(previous: &str) -> Result<(String, bool)> {
+    let show = command("ndmc", &["-c", "show dns-proxy"], None).and_then(|text| {
+        upstreams(&text)?;
+        Ok(text)
+    });
+    let fallback = show
+        .as_ref()
+        .map_or(true, |dump| secure_config_omitted(dump));
+    let dump = show.or_else(|_| command("ndmc", &["-c", "more temp:ndnproxymain.conf"], None))?;
     let deadline = Instant::now() + Duration::from_secs(2);
-    merge_exclusions(&dump, previous, |host| {
-        bootstrap_addresses(host, &dump, |host, server| {
+    let mut unresolved = false;
+    let updated = merge_exclusions(&dump, previous, |host| {
+        let found = bootstrap_addresses(host, &dump, |host, server| {
             let now = Instant::now();
             if now >= deadline {
                 return BTreeSet::new();
@@ -171,8 +239,20 @@ pub(super) fn dns_exclusions(previous: &str) -> Result<String> {
             .and_then(|output| checked("nslookup", &args, output))
             .map(|text| addresses(&text))
             .unwrap_or_default()
-        })
-    })
+        });
+        unresolved |= found.is_empty();
+        found
+    })?;
+    if !fallback {
+        return Ok((updated, unresolved));
+    }
+    // A legacy proxy-config dump can omit secure upstreams represented by loopback sockets.
+    let mut union = updated.lines().collect::<BTreeSet<_>>();
+    union.extend(previous.lines());
+    Ok((
+        union.into_iter().map(|line| format!("{line}\n")).collect(),
+        true,
+    ))
 }
 
 fn bootstrap_addresses(
@@ -197,8 +277,9 @@ fn bootstrap_addresses(
             && !address.is_multicast())
         .then_some(address)
     });
-    std::iter::once(IpAddr::V4(Ipv4Addr::LOCALHOST))
-        .chain(servers.take(2))
+    servers
+        .take(2)
+        .chain(std::iter::once(IpAddr::V4(Ipv4Addr::LOCALHOST)))
         .find_map(|server| {
             let found = lookup(host, server);
             (!found.is_empty()).then_some(found)
@@ -272,20 +353,14 @@ mod tests {
         let merged = merge_exclusions(dump, "", |host| {
             bootstrap_addresses(host, dump, |host, server| {
                 calls.push((host.to_owned(), server));
-                if server.is_loopback() {
-                    BTreeSet::new()
-                } else {
-                    BTreeSet::from([assigned_ip])
-                }
+                assert!(!server.is_loopback());
+                BTreeSet::from([assigned_ip])
             })
         })
         .unwrap();
         assert_eq!(
             calls,
-            vec![
-                ("dns.example".into(), "127.0.0.1".parse().unwrap()),
-                ("dns.example".into(), "192.0.2.3".parse().unwrap())
-            ]
+            vec![("dns.example".into(), "192.0.2.3".parse().unwrap())]
         );
         assert!(merged.contains("dns.example 198.51.100.2 443\n"));
     }
@@ -293,6 +368,7 @@ mod tests {
     #[test]
     fn rejects_unknown_ndm_and_untrusted_endpoints() {
         assert!(upstreams("error: management process unavailable").is_err());
+        assert!(upstreams("proxy-config:\nserver-https:\n").is_err());
         assert!(upstreams("dns_server = 127.0.0.1 # https://--quiet/dns").is_err());
         let parsed = upstreams("dns_server = 127.0.0.1 # https://dns.example/dns-query\ndns_server = [2001:db8::1]:5353").unwrap();
         assert_eq!(
@@ -305,5 +381,20 @@ mod tests {
             ),
             BTreeSet::from(["192.0.2.1".parse().unwrap()])
         );
+    }
+
+    #[test]
+    fn structured_dns_proxy_reports_secure_endpoints_without_local_resolution() {
+        let dump = "proxy-status:\n  proxy-config:\ndns_server = 127.0.0.1:40500 .\n\
+                    proxy-tls:\n  server-tls:\n    address: 2001:db8::53\n    port: 8853\n\
+                    proxy-https:\n  server-https:\n    uri: https://192.0.2.53:444/dns-query?format=wire\n";
+        assert_eq!(
+            merge_exclusions(dump, "", |_| panic!("literal upstreams need no resolver")).unwrap(),
+            "192.0.2.53 192.0.2.53 444\n2001:db8::53 2001:db8::53 8853\n"
+        );
+        assert!(!secure_config_omitted(dump));
+        assert!(secure_config_omitted(
+            "proxy-config:\ndns_server = 127.0.0.1:40500 .\n"
+        ));
     }
 }
