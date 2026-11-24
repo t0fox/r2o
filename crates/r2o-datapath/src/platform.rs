@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -530,8 +530,24 @@ impl Platform {
     }
 
     fn reconcile(&self, start: bool, refresh_dns: bool) -> Result<()> {
+        let active_path = self.run.join(ACTIVE);
+        let exclusions_path = self.run.join("dns-excl");
+        let dns_sample =
+            if self.kind == Kind::Keenetic && self.backend == Backend::Iptables && refresh_dns {
+                // ndmc и bootstrap могут ждать сеть дольше, чем down ждёт flock.
+                // Открытый маркер отличает этот запуск от последующего down/up.
+                let activation = File::open(&active_path).ok();
+                if !start && activation.is_none() {
+                    return Ok(());
+                }
+                let previous = optional(&exclusions_path)?.unwrap_or_default();
+                let sample = keenetic::dns_exclusions(&previous);
+                Some((activation, previous, sample))
+            } else {
+                None
+            };
         let _lock = self.lock()?;
-        if !start && !self.run.join(ACTIVE).is_file() {
+        if !start && !active_path.is_file() {
             return Ok(());
         }
         if start {
@@ -542,28 +558,35 @@ impl Platform {
         self.accounting(true)?;
         self.restore_legacy_offload()?;
 
-        let exclusions = optional(&self.run.join("dns-excl"))?.unwrap_or_default();
-        let desired =
-            if self.kind == Kind::Keenetic && self.backend == Backend::Iptables && refresh_dns {
-                let health = self.run.join("platform.dns-excl-degraded");
-                match keenetic::dns_exclusions(&exclusions) {
-                    Ok((updated, degraded)) => {
-                        if degraded {
-                            atomic(&health, "не все DNS upstream подтверждены\n")?;
-                        } else {
-                            remove(&health)?;
-                        }
-                        updated
+        let exclusions = optional(&exclusions_path)?.unwrap_or_default();
+        let desired = if let Some((activation, previous, sample)) = dns_sample
+            && previous == exclusions
+            && activation
+                .and_then(|file| file.metadata().ok())
+                .map(|metadata| (metadata.dev(), metadata.ino()))
+                == fs::metadata(&active_path)
+                    .ok()
+                    .map(|metadata| (metadata.dev(), metadata.ino()))
+        {
+            let health = self.run.join("platform.dns-excl-degraded");
+            match sample {
+                Ok((updated, degraded)) => {
+                    if degraded {
+                        atomic(&health, "не все DNS upstream подтверждены\n")?;
+                    } else {
+                        remove(&health)?;
                     }
-                    Err(err) => {
-                        atomic(&health, &err.to_string())?;
-                        eprintln!("r2o-platform: прежние исключения DNS сохранены: {err}");
-                        exclusions.clone()
-                    }
+                    updated
                 }
-            } else {
-                exclusions.clone()
-            };
+                Err(err) => {
+                    atomic(&health, &err.to_string())?;
+                    eprintln!("r2o-platform: прежние исключения DNS сохранены: {err}");
+                    exclusions.clone()
+                }
+            }
+        } else {
+            exclusions.clone()
+        };
         let mut leases = self.leases()?;
         let mut live = true;
         if self.backend == Backend::Nft {
@@ -588,12 +611,12 @@ impl Platform {
         if start || desired != exclusions || !live || self.status(ipv6).is_err() {
             self.install(ipv6, &leases, &desired)?;
             if desired != exclusions {
-                atomic(&self.run.join("dns-excl"), &desired)?;
+                atomic(&exclusions_path, &desired)?;
             }
         }
         self.status(ipv6)?;
         if start {
-            atomic(&self.run.join(ACTIVE), "1\n")?;
+            atomic(&active_path, "1\n")?;
         }
         if self.kind == Kind::OpenWrt && self.backend == Backend::Nft {
             let state = self.run.join("platform.offload-error");
