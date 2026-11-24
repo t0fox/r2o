@@ -2017,6 +2017,7 @@ mod app {
                 next_stats = options.stats_interval.map(|interval| now + interval);
             }
             if now >= next_session_sweep {
+                holding.expire_http_requests(now);
                 let reverse_queue_visible = options.reverse_queue_visible
                     && control.as_ref().is_some_and(ControlServer::is_connected);
                 tcp_sessions.expire_with_silent(now, options.r2o_idle_timeout, |event| {

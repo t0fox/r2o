@@ -1212,7 +1212,8 @@ impl HoldTable {
         self.next_syn_expiry = next_expiry;
     }
 
-    fn expire_http_requests(&mut self, now: Instant) {
+    /// Удалить просроченные HTTP-запросы по таймеру сессий.
+    pub fn expire_http_requests(&mut self, now: Instant) {
         if self.next_http_expiry.is_none_or(|deadline| now <= deadline) {
             return;
         }
@@ -2935,7 +2936,7 @@ mod tests {
         hold.feed_observing(4, &tcp_packet(2000, 0x02, &[]), later, options);
         assert!(hold.sweep_http_responses(later).is_empty());
         assert_eq!(hold.http_requests.len(), 1);
-        hold.feed_observing(5, &ack, later, options);
+        hold.expire_http_requests(later);
         assert!(hold.http_requests.is_empty());
         assert!(hold.next_http_expiry.is_none());
     }
