@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
-parser.add_argument("model", choices=["KN-1910", "KN-3810"])
+MODEL_RAM = {"KN-1910": 128, "KN-1913": 256, "KN-3810": 256}
+parser.add_argument("model", choices=MODEL_RAM)
 parser.add_argument("--qemu", required=True)
 parser.add_argument("--qemu-data", required=True)
 parser.add_argument("--kernel", required=True)
@@ -31,7 +32,7 @@ if args.measure and args.phase not in {"discovery", "discovery-after-boot"}:
 discovery_markers = (("KEENETIC_DISCOVERY_MEASURE_PASS",) if args.measure else
                      ("KEENETIC_TLS_DISCOVERY_PASS", "KEENETIC_TLS_REUSE_PASS"))
 discovery_timeout = 420 if args.measure else 250
-ram = args.ram or (128 if args.model == "KN-1910" else 256)
+ram = args.ram or MODEL_RAM[args.model]
 cmd = [
     args.qemu, "-L", args.qemu_data, "-M", "malta", "-cpu", "34Kf" if args.smp > 1 else "24Kf",
     "-smp", str(args.smp), "-m", str(ram), "-nodefaults", "-display", "none",
