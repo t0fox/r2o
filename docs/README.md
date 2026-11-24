@@ -21,8 +21,8 @@
 | [Физическая проверка Keenetic](audit/keenetic-offload-acceptance.md) | Приёмка аппаратного ускорения на реальных устройствах. |
 | [Производительность Rust](audit/rust-engine-performance.md) | Замеры относительно указанного baseline и ограничения измерений. |
 | [TLS без SNI](ip-only-tls-discovery.md) | Объём реализованного изменения, его границы и проверки. |
-| [Контракт DNS](audit/dns-services-contract.md) | Исторический контракт донора и результаты проверок на указанной ревизии; не спецификация текущего R2O. |
-| [Geneva](geneva-c-adoption.md) | История решений и контекст, на который ссылаются реализация и тесты; предложения не означают реализованные возможности. |
+| [Системный DNS](audit/rust-engine-performance.md#очередь-http-и-источники-dns) | Источники данных, условия DNS Recovery и сценарии проверки. |
+| [Тесты Geneva](../crates/r2o-controller/tests/fixtures/geneva/README.md) | Происхождение фикстур и запуск сетевой регрессии. |
 
 ## История аудитов
 
@@ -35,6 +35,10 @@ git worktree add --detach ../r2o-audit-history 752fd0fe2c3fc2efc6ff58e775bb92cb7
 ```
 
 Эти аудиты не заменяют проверку текущего кода, тестов и измерений.
+
+[Контракт DNS D2O](https://github.com/t0fox/r2o/blob/debf0e8b54ab32dd1681fe4da201fecd109231b9/docs/audit/dns-services-contract.md) и
+[исследование Geneva C](https://github.com/t0fox/r2o/blob/debf0e8b54ab32dd1681fe4da201fecd109231b9/docs/geneva-c-adoption.md)
+доступны в истории проекта.
 
 ## Служебные файлы
 

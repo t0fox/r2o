@@ -1,4 +1,4 @@
-//! Библиотека стратегий Geneva (P1, см. `docs/geneva-c-adoption.md`).
+//! Библиотека стратегий Geneva.
 //!
 //! Источник: geneva_c `src/library_data.h`, сгенерированный из Geneva
 //! `library.py` (BSD-3-Clause, Copyright (c) 2020, University of Maryland

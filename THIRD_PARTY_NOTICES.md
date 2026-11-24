@@ -11,6 +11,11 @@ R2O использует имеющийся JSON-парсер, сверяет з
 Из [`d615bf6c0556`](https://github.com/necronicle/d2k/commit/d615bf6c0556c63e1489d42d2097d512eb7a8abc)
 адаптированы проверки `d2k_http80_packet` и `missing_response` для
 раннего RST и повтора запроса до первого байта HTTP-ответа.
+Для TLS без SNI использован коммит
+[`e5ae90a6c371`](https://github.com/necronicle/d2k/commit/e5ae90a6c371008db4db14051fd283c40071fcc4).
+Источники поведения — `recall_noname`, `hello_profile_without_sni`,
+`fill_hellos`, `JOB_VERIFY` и `verify_confirm` из `core/sched.c`,
+а также временная TCP-проба из `datapath/plans.c`.
 [MIT, Copyright (c) 2026 Necronicle](docs/licenses/d2k.txt).
 
 ## Telegram MTProto/WSS-прокси
