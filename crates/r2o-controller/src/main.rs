@@ -35147,7 +35147,6 @@ fn baseline_silence_starts_search(
             kind,
             std::io::ErrorKind::TimedOut
                 | std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::ConnectionReset
                 | std::io::ErrorKind::UnexpectedEof
         )
 }
@@ -35170,10 +35169,7 @@ fn http_baseline_failure_action(
             if expected == Answer::Cut
                 && matches!(
                     error.kind(),
-                    ErrorKind::TimedOut
-                        | ErrorKind::WouldBlock
-                        | ErrorKind::ConnectionReset
-                        | ErrorKind::UnexpectedEof
+                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::UnexpectedEof
                 )
                 && attempts <= HTTP_SEARCH_BASE_RETRIES =>
         {
@@ -35188,10 +35184,7 @@ fn http_baseline_failure_action(
             if expected == Answer::Cut
                 && matches!(
                     error.kind(),
-                    ErrorKind::TimedOut
-                        | ErrorKind::WouldBlock
-                        | ErrorKind::ConnectionReset
-                        | ErrorKind::UnexpectedEof
+                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::UnexpectedEof
                 ) =>
         {
             HttpBaselineFailureAction::Search
@@ -58284,10 +58277,14 @@ group_block_proven: false,
         );
 
         let reset = HttpBaselineError::Response(Error::from(ErrorKind::ConnectionReset));
-        assert_eq!(
-            http_baseline_failure_action(Answer::Cut, 1, &reset),
-            HttpBaselineFailureAction::Recheck
-        );
+        for expected in [Answer::Cut, Answer::Injected] {
+            for attempt in [1, 2] {
+                assert_eq!(
+                    http_baseline_failure_action(expected, attempt, &reset),
+                    HttpBaselineFailureAction::Recheck
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -60642,6 +60639,48 @@ group_block_proven: false,
                 .unwrap();
 
         assert_eq!(response.complete_responses, 2);
+        assert_eq!(
+            http_request_paths(&stream.requests),
+            ["/watch/42", "/watch/42"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_baseline_counts_clean_eof_only_if_no_response_completed() {
+        use r2o_controller::http_search::Answer;
+
+        let mut stream = HttpBaselineFixture {
+            responses: std::io::Cursor::new(Vec::new()),
+            requests: Vec::new(),
+        };
+        let Err(error) =
+            super::run_http_baseline_on_stream("example.com", b"/watch/42", true, &mut stream, 0)
+        else {
+            panic!("ожидалось закрытие до первого байта ответа");
+        };
+        assert_eq!(http_request_paths(&stream.requests), ["/watch/42"]);
+        assert_eq!(
+            http_baseline_failure_action(Answer::Cut, 1, &error),
+            HttpBaselineFailureAction::Retry
+        );
+        assert_eq!(
+            http_baseline_failure_action(Answer::Cut, 2, &error),
+            HttpBaselineFailureAction::Search
+        );
+        assert_eq!(
+            http_baseline_failure_action(Answer::Injected, 1, &error),
+            HttpBaselineFailureAction::Search
+        );
+
+        stream.requests.clear();
+        stream.responses =
+            std::io::Cursor::new(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec());
+        let response =
+            super::run_http_baseline_on_stream("example.com", b"/watch/42", true, &mut stream, 0)
+                .unwrap();
+        assert_eq!(response.answer, Answer::Real);
+        assert_eq!(response.complete_responses, 1);
         assert_eq!(
             http_request_paths(&stream.requests),
             ["/watch/42", "/watch/42"]
