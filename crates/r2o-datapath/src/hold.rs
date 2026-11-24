@@ -176,6 +176,7 @@ struct HttpRequestFlow {
     response_segments: u8,
     rtt: Duration,
     response_reported: bool,
+    retry_reported: bool,
     answered: bool,
     ready_for_next: bool,
     seen: Instant,
@@ -681,18 +682,45 @@ impl HoldTable {
                 outcome: HoldOutcome::Pass,
             };
         }
-        let mut http_later = false;
         if destination.port == 80
             && source == anchor.client
             && let Some(flow) = self.http_requests.iter_mut().find(|flow| {
                 flow.key == key && flow.client == source && flow.generation == anchor.generation
             })
         {
-            http_later = flow.request_stream.header_done || tcp.sequence != flow.request_sequence;
+            if flow.request_stream.header_done || tcp.sequence != flow.request_sequence {
+                self.http80.later = self.http80.later.saturating_add(1);
+            }
+            // D2K d615bf6: повтор перед первым байтом фиксируется один раз.
+            // Подтверждённый ответ по этому же запросу всё равно учитывается.
+            if !flow.response_reported
+                && !flow.retry_reported
+                && flow.response_started.is_none()
+                && flow.next_known
+                && !flow.rtt.is_zero()
+                && now.saturating_duration_since(flow.seen) >= flow.rtt
+                && !seq_after(flow.request_sequence, tcp.sequence)
+                && !seq_after(
+                    tcp.sequence.wrapping_add(payload.len() as u32),
+                    flow.client_next,
+                )
+            {
+                flow.retry_reported = true;
+                return FeedResult {
+                    released,
+                    outcome: HoldOutcome::HttpResponse {
+                        event: Box::new(http_response_event(
+                            flow,
+                            r2k_core::control::HTTP_RETRY_BEFORE_RESPONSE,
+                            None,
+                        )),
+                        portal: None,
+                        redirect: None,
+                        log: None,
+                    },
+                };
+            }
             flow.feed_request(tcp.sequence, payload);
-        }
-        if http_later {
-            self.http80.later = self.http80.later.saturating_add(1);
         }
         let offset = tcp.sequence.wrapping_sub(anchor.sequence.wrapping_add(1));
         let r2o_http_followup = anchor.r2o_http_requests.is_checked();
@@ -1321,6 +1349,7 @@ impl HoldTable {
             response_segments: 0,
             rtt,
             response_reported: false,
+            retry_reported: false,
             answered: false,
             ready_for_next: false,
             seen: now,
@@ -1379,6 +1408,16 @@ impl HoldTable {
         let expected = flow
             .response_next
             .get_or_insert_with(|| server_sequence.wrapping_add(1));
+        if tcp.flags & 0x04 != 0
+            && flow.next_known
+            && flow.response_started.is_none()
+            && tcp.sequence == *expected
+            && (tcp.flags & 0x10 == 0 || tcp.acknowledgment == flow.client_next)
+        {
+            let (event, portal) =
+                finish_http_response(flow, r2k_core::control::HTTP_RESET_BEFORE_RESPONSE, None);
+            return Some((event, portal, None, None));
+        }
         if tcp.acknowledgment != flow.request_end || tcp.flags & 0x04 != 0 {
             let (event, portal) = finish_http_response(flow, 2, None);
             return Some((event, portal, None, None));
@@ -1615,8 +1654,16 @@ fn finish_http_response(
 ) -> (HttpResponseEvent, Option<HttpPortalEvent>) {
     flow.response_reported = true;
     flow.ready_for_next = false;
+    (http_response_event(flow, code, body_bytes), None)
+}
+
+fn http_response_event(
+    flow: &HttpRequestFlow,
+    code: u8,
+    body_bytes: Option<u64>,
+) -> HttpResponseEvent {
     let applied = flow.applied.as_ref();
-    let event = HttpResponseEvent {
+    HttpResponseEvent {
         key: flow.key.wire_key(),
         code,
         host: flow.host.clone(),
@@ -1639,8 +1686,7 @@ fn finish_http_response(
         status: flow.response.status(),
         body_bytes: body_bytes.unwrap_or_else(|| flow.response.body_bytes()),
         request_no: flow.request_no,
-    };
-    (event, None)
+    }
 }
 
 fn monotonic_ms() -> u64 {
@@ -2783,6 +2829,91 @@ mod tests {
         };
         assert_eq!(event.request_no, 2);
         assert_eq!(event.path, b"/two");
+    }
+
+    #[test]
+    fn http_ранний_rst_и_повтор_отличаются_от_полного_ответа() {
+        let now = Instant::now();
+        let rtt = Duration::from_millis(20);
+        let request_at = now + rtt * 2;
+        let options = HoldOptions {
+            observe_http: true,
+            ..HoldOptions::default()
+        };
+        let request = b"GET /path HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let request_end = 1001 + request.len() as u32;
+        let start_flow = || {
+            let mut hold = HoldTable::default();
+            hold.feed_observing(1, &http_packet(1000, 0x02, &[]), now, options);
+            hold.feed_observing(
+                2,
+                &http_response_packet(5000, 1001, 0x12, &[]),
+                now + rtt,
+                options,
+            );
+            hold.feed_observing(3, &http_packet(1001, 0x18, request), request_at, options);
+            hold
+        };
+        let mut reset = start_flow();
+        let response = reset.feed_observing(
+            4,
+            &http_response_packet(5001, request_end, 0x14, &[]),
+            request_at,
+            options,
+        );
+        let HoldOutcome::HttpResponse { event, .. } = response.outcome else {
+            panic!("ожидался RST до ответа");
+        };
+        assert_eq!(event.code, r2k_core::control::HTTP_RESET_BEFORE_RESPONSE);
+        assert_eq!(event.path, b"/path");
+        assert_eq!(event.body_bytes, 0);
+        let controller_event = r2k_core::control::Frame {
+            kind: r2k_core::control::EVENT_HTTP_EARLY_END,
+            body: event.event_body().unwrap(),
+        };
+        assert_eq!(
+            r2k_core::control::decode_http_response(&controller_event)
+                .unwrap()
+                .code,
+            event.code
+        );
+
+        let mut repeat = start_flow();
+        let retransmit = http_packet(1001, 0x18, request);
+        assert_eq!(
+            repeat
+                .feed_observing(4, &retransmit, request_at, options)
+                .outcome,
+            HoldOutcome::Pass
+        );
+        let response = repeat.feed_observing(5, &retransmit, request_at + rtt, options);
+        let HoldOutcome::HttpResponse { event, .. } = response.outcome else {
+            panic!("ожидался повтор до ответа");
+        };
+        assert_eq!(event.code, r2k_core::control::HTTP_RETRY_BEFORE_RESPONSE);
+        assert_eq!(event.request_no, 1);
+        assert_eq!(
+            repeat
+                .feed_observing(6, &retransmit, request_at + rtt, options)
+                .outcome,
+            HoldOutcome::Pass
+        );
+        let response = repeat.feed_observing(
+            7,
+            &http_response_packet(
+                5001,
+                request_end,
+                0x18,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+            ),
+            request_at + rtt,
+            options,
+        );
+        let HoldOutcome::HttpResponse { event, .. } = response.outcome else {
+            panic!("ожидался полный ответ");
+        };
+        assert_eq!(event.code, 1);
+        assert_eq!(event.request_no, 1);
     }
 
     #[test]

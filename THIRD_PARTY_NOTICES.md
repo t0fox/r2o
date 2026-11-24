@@ -8,6 +8,9 @@
 и [`044ea4ef6935`](https://github.com/necronicle/d2k/commit/044ea4ef69356d70cf48bacc85dcda23bb1c6177).
 R2O использует имеющийся JSON-парсер, сверяет запущенный экземпляр procd и
 полный upstream, а курсор пропускает историю после смены конфигурации.
+Из [`d615bf6c0556`](https://github.com/necronicle/d2k/commit/d615bf6c0556c63e1489d42d2097d512eb7a8abc)
+адаптированы проверки `d2k_http80_packet` и `missing_response` для
+раннего RST и повтора запроса до первого байта HTTP-ответа.
 [MIT, Copyright (c) 2026 Necronicle](docs/licenses/d2k.txt).
 
 ## Telegram MTProto/WSS-прокси

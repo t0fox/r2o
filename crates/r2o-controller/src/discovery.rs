@@ -790,11 +790,15 @@ impl DiscoveryTarget {
 
     /// Выбрать поток HTTP-ответа, путь которого можно повторить при поиске.
     pub fn from_http_response(event: &HttpResponseEvent) -> Option<Self> {
-        if !matches!(event.code, 3 | 4)
-            || event.key[37] != 6
+        if !matches!(
+            event.code,
+            3 | 4
+                | r2k_core::control::HTTP_RESET_BEFORE_RESPONSE
+                | r2k_core::control::HTTP_RETRY_BEFORE_RESPONSE
+        ) || event.key[37] != 6
             || !matches!(event.key[0], 4 | 6)
             || event.trial_id.iter().any(|byte| *byte != 0)
-            || event.code == 4 && !crate::http_search::repeatable_path(&event.path)
+            || event.code != 3 && !crate::http_search::repeatable_path(&event.path)
         {
             return None;
         }

@@ -47,6 +47,8 @@ pub const EVENT_ACK: u16 = 0x0008;
 pub const EVENT_PROTOCOL: u16 = 0x000a;
 pub const EVENT_HTTP_PORTAL: u16 = 0x000b;
 pub const EVENT_HTTP_RESPONSE: u16 = 0x000c;
+pub const HTTP_RESET_BEFORE_RESPONSE: u8 = 5;
+pub const HTTP_RETRY_BEFORE_RESPONSE: u8 = 6;
 pub const EVENT_R2O_VOICE_SUSPECT: u16 = 0x000d;
 pub const EVENT_R2O_VOICE_PROOF: u16 = 0x000e;
 pub const EVENT_R2O_QUIC_SUSPECT: u16 = 0x000f;
@@ -66,6 +68,8 @@ pub const EVENT_R2O_VOICE_RTP_PROOF: u16 = 0x001e;
 pub const EVENT_R2O_STUN_SUSPECT: u16 = 0x001f;
 pub const EVENT_R2O_STUN_EXCHANGE: u16 = 0x0020;
 pub const EVENT_META_DNS_NAME: u16 = 0x0021;
+/// Дополнительные исходы HTTP/80 для контроллеров R2O.
+pub const EVENT_HTTP_EARLY_END: u16 = 0x0022;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
 pub const COMMAND_SET_NAME: u16 = 0x0081;
@@ -1166,9 +1170,10 @@ impl HttpResponseEvent {
             || self.host.is_empty()
             || self.host.len() > u8::MAX as usize
             || self.path.len() >= 1024
-            || !matches!(self.code, 1..=4)
+            || !matches!(self.code, 1..=HTTP_RETRY_BEFORE_RESPONSE)
             || self.status > 599
             || self.code == 1 && self.status < 200
+            || self.code >= HTTP_RESET_BEFORE_RESPONSE && (self.status != 0 || self.body_bytes != 0)
             || self.request_no == 0
             || !valid_binding(&self.binding)
         {
@@ -3925,7 +3930,9 @@ pub fn decode_http_portal(frame: &Frame) -> Result<HttpPortalEvent, &'static str
 }
 
 pub fn decode_http_response(frame: &Frame) -> Result<HttpResponseEvent, &'static str> {
-    if frame.kind != EVENT_HTTP_RESPONSE || frame.body.len() < KEY_LEN + 2 {
+    if !matches!(frame.kind, EVENT_HTTP_RESPONSE | EVENT_HTTP_EARLY_END)
+        || frame.body.len() < KEY_LEN + 2
+    {
         return Err("неверное событие HTTP_RESPONSE");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
@@ -3938,7 +3945,15 @@ pub fn decode_http_response(frame: &Frame) -> Result<HttpResponseEvent, &'static
     let rest = &frame.body[KEY_LEN..];
     let code = rest[0];
     let host_len = usize::from(rest[1]);
-    if !matches!(code, 1..=4) || host_len == 0 {
+    let valid_code = if frame.kind == EVENT_HTTP_EARLY_END {
+        matches!(
+            code,
+            HTTP_RESET_BEFORE_RESPONSE | HTTP_RETRY_BEFORE_RESPONSE
+        )
+    } else {
+        matches!(code, 1..=4)
+    };
+    if !valid_code || host_len == 0 {
         return Err("HTTP_RESPONSE содержит неверный исход или пустое имя");
     }
     let context_offset = 2 + host_len;
@@ -3993,7 +4008,11 @@ pub fn decode_http_response(frame: &Frame) -> Result<HttpResponseEvent, &'static
             .try_into()
             .map_err(|_| "неверный номер запроса HTTP_RESPONSE")?,
     );
-    if status > 599 || code == 1 && status < 200 || request_no == 0 {
+    if status > 599
+        || code == 1 && status < 200
+        || code >= HTTP_RESET_BEFORE_RESPONSE && (status != 0 || body_bytes != 0)
+        || request_no == 0
+    {
         return Err("HTTP_RESPONSE содержит неверный статус или номер запроса");
     }
 

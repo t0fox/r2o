@@ -8734,7 +8734,9 @@ fn r2o_http_search_from_response(
     let target = r2o_controller::discovery::DiscoveryTarget::from_http_response(response)?;
     let expected = match response.code {
         3 => r2o_controller::http_search::Answer::Injected,
-        4 => r2o_controller::http_search::Answer::Cut,
+        4 | control::HTTP_RESET_BEFORE_RESPONSE | control::HTTP_RETRY_BEFORE_RESPONSE => {
+            r2o_controller::http_search::Answer::Cut
+        }
         _ => return None,
     };
     let request_path = if expected == r2o_controller::http_search::Answer::Injected {
@@ -29181,7 +29183,10 @@ impl ControlClient {
                     std::io::stdout().flush()?;
                     continue;
                 }
-                if frame.kind == EVENT_HTTP_RESPONSE {
+                if matches!(
+                    frame.kind,
+                    EVENT_HTTP_RESPONSE | control::EVENT_HTTP_EARLY_END
+                ) {
                     let response = decode_http_response(&frame)
                         .map_err(|error| format!("событие HTTP_RESPONSE: {error}"))?;
                     let acked_binding = self.acknowledged_http_binding_for(&response);
@@ -29221,6 +29226,10 @@ impl ControlClient {
                             2 => "результат неизвестен",
                             3 => "обнаружен портал",
                             4 => "обрыв ответа",
+                            control::HTTP_RESET_BEFORE_RESPONSE => "RST до первого байта ответа",
+                            control::HTTP_RETRY_BEFORE_RESPONSE => {
+                                "повтор запроса до первого байта ответа"
+                            }
                             _ => unreachable!("декодер отвергает неизвестный исход HTTP_RESPONSE"),
                         };
                         println!(
@@ -35131,7 +35140,10 @@ fn baseline_silence_starts_search(
     expected == r2o_controller::http_search::Answer::Injected
         && matches!(
             kind,
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::UnexpectedEof
         )
 }
 
@@ -35151,7 +35163,13 @@ fn http_baseline_failure_action(
         HttpBaselineError::Connect(_) => HttpBaselineFailureAction::Inconclusive,
         HttpBaselineError::Response(error)
             if expected == Answer::Cut
-                && matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock)
+                && matches!(
+                    error.kind(),
+                    ErrorKind::TimedOut
+                        | ErrorKind::WouldBlock
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::UnexpectedEof
+                )
                 && attempts <= HTTP_SEARCH_BASE_RETRIES =>
         {
             HttpBaselineFailureAction::Retry
@@ -35163,7 +35181,13 @@ fn http_baseline_failure_action(
         }
         HttpBaselineError::Response(error)
             if expected == Answer::Cut
-                && matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
+                && matches!(
+                    error.kind(),
+                    ErrorKind::TimedOut
+                        | ErrorKind::WouldBlock
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::UnexpectedEof
+                ) =>
         {
             HttpBaselineFailureAction::Search
         }
@@ -35781,13 +35805,16 @@ fn run_http_baseline_on_stream<S: std::io::Read + std::io::Write>(
         stream
             .write_all(&request)
             .map_err(HttpBaselineError::Send)?;
-        let response = r2o_controller::http_search::read_probe_response(
+        let response = match r2o_controller::http_search::read_probe_response(
             stream,
             Some(host.as_bytes()),
             rtt_us,
             sent,
-        )
-        .map_err(HttpBaselineError::Response)?;
+        ) {
+            Ok(response) => response,
+            Err(_) if result.complete_responses > 0 => break,
+            Err(error) => return Err(HttpBaselineError::Response(error)),
+        };
         result.answer = response.answer;
         if response.answer != r2o_controller::http_search::Answer::Real {
             break;

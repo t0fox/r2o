@@ -5163,7 +5163,12 @@ mod app {
         let Some(control) = control.as_mut() else {
             return;
         };
-        if let Err(error) = control.send_event(EVENT_HTTP_RESPONSE, &body) {
+        let kind = if event.code >= r2k_core::control::HTTP_RESET_BEFORE_RESPONSE {
+            r2k_core::control::EVENT_HTTP_EARLY_END
+        } else {
+            EVENT_HTTP_RESPONSE
+        };
+        if let Err(error) = control.send_event(kind, &body) {
             eprintln!("r2o-datapath: событие HTTP_RESPONSE не отправлено: {error}");
         }
     }
