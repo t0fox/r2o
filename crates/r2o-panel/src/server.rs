@@ -3604,6 +3604,7 @@ pub fn parse_config(
         "TG_DIAGNOSTIC_DIRECT_TCP",
         "TG_CF_WORKER_DOMAIN",
         "R2O_PPE_DEOFFLOAD",
+        "R2O_SOFTWARE_PATH_ENDPOINTS",
         "D2K_PPE_DEOFFLOAD",
     ];
     let ignored = [
@@ -3629,6 +3630,7 @@ pub fn parse_config(
         "TG_ENROLL_PORT",
         "TG_DIAGNOSTIC_DIRECT_TCP",
         "TG_CF_WORKER_DOMAIN",
+        "R2O_SOFTWARE_PATH_ENDPOINTS",
         "D2K_PPE_DEOFFLOAD",
     ];
     let sanitized;
