@@ -555,69 +555,144 @@ xt() {
     "$tool" "$@"
 }
 
+# На ядрах без hash:ip,port храним точные /32 и /128 в отдельных
+# hash:net для каждой пары протокол/порт. Срок жизни задаёт ядро.
+xt_dns_net_sets() {
+    available_sets=$(ipset list -name) || return 1
+    printf '%s\n' "$available_sets" | awk -v prefix="r2o_dn${dns_family}_" '
+        index($0, prefix) == 1 && substr($0, length(prefix) + 1) ~ /^(tcp|udp)_[0-9]+$/ { print }
+    '
+}
+
 xt_dns_route_down() {
     dns_xt=$1
-    case "$dns_xt" in ip6tables) dns_set=r2o_dns_route6 ;; *) dns_set=r2o_dns_route4 ;; esac
+    case "$dns_xt" in
+        ip6tables) dns_family=6 ;;
+        *) dns_family=4 ;;
+    esac
+    dns_pair_set=r2o_dns_route$dns_family
     while xt "$dns_xt" -t mangle -D OUTPUT -j R2O_DNS_OUT 2>/dev/null; do :; done
     while xt "$dns_xt" -t mangle -D INPUT -j R2O_DNS_IN 2>/dev/null; do :; done
-    while xt_dns_postrouting_skip -D 2>/dev/null; do :; done
     for dns_chain in R2O_DNS_OUT R2O_DNS_IN; do
-        xt "$dns_xt" -t mangle -F "$dns_chain" 2>/dev/null || true
-        xt "$dns_xt" -t mangle -X "$dns_chain" 2>/dev/null || true
+        if xt "$dns_xt" -t mangle -S "$dns_chain" >/dev/null 2>&1; then
+            xt "$dns_xt" -t mangle -F "$dns_chain" || return 1
+            xt "$dns_xt" -t mangle -X "$dns_chain" || return 1
+        fi
     done
-    command -v ipset >/dev/null 2>&1 && ipset -quiet destroy "$dns_set" || true
+    command -v ipset >/dev/null 2>&1 || return 0
+    xt_dns_remove_set "$dns_pair_set" dst,dst || return 1
+    # Без подсистемы ipset нет и привязанных к ней наборов маршрутизации.
+    old_sets=$(xt_dns_net_sets) || return 0
+    for old_set in $old_sets; do
+        suffix=${old_set#r2o_dn${dns_family}_}
+        xt_dns_remove_set "$old_set" dst -p "${suffix%_*}" --dport "${suffix##*_}" || return 1
+    done
+}
+
+xt_dns_remove_set() {
+    while xt_dns_postrouting_skip -D "$@" 2>/dev/null; do :; done
+    if ipset -quiet list "$1" >/dev/null 2>&1; then ipset destroy "$1"; fi
 }
 
 xt_dns_postrouting_skip() {
-    xt "$dns_xt" -t mangle "$1" R2O_OUT -m owner --socket-exists \
-        -m set --match-set "$dns_set" dst,dst -m conntrack ! --ctstate DNAT -j RETURN
+    dns_op=$1 dns_match_set=$2 dns_match_flags=$3
+    shift 3
+    xt "$dns_xt" -t mangle "$dns_op" R2O_OUT "$@" -m owner --socket-exists \
+        -m set --match-set "$dns_match_set" "$dns_match_flags" -m conntrack ! --ctstate DNAT -j RETURN
 }
 
-xt_dns_route_up() {
-    ipset -exist create "$dns_set" hash:ip,port family "$dns_inet" timeout 300 maxelem 64 || return 1
+xt_dns_chains_up() {
     xt "$dns_xt" -t mangle -N R2O_DNS_OUT || return 1
     xt "$dns_xt" -t mangle -N R2O_DNS_IN || return 1
     xt "$dns_xt" -t mangle -A R2O_DNS_OUT -m mark --mark "$MARK" -j RETURN || return 1
     if [ -n "$MEASURE_MARK" ]; then
         xt "$dns_xt" -t mangle -A R2O_DNS_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
     fi
-    xt "$dns_xt" -t mangle -A R2O_DNS_OUT ! -o lo -m owner --socket-exists \
-        -m set --match-set "$dns_set" dst,dst -m conntrack --ctdir ORIGINAL ! --ctstate DNAT \
-        -m connbytes --connbytes "$CONNBYTES" --connbytes-dir original --connbytes-mode packets \
-        -j NFQUEUE --queue-num "$dns_queue" --queue-bypass || return 1
-    xt "$dns_xt" -t mangle -A R2O_DNS_IN ! -i lo -m set --match-set "$dns_set" src,src \
-        -m conntrack --ctdir REPLY ! --ctstate DNAT \
-        -m connbytes --connbytes "$CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
-        -j NFQUEUE --queue-num "$dns_queue" --queue-bypass || return 1
-    xt_dns_postrouting_skip -I || return 1
     xt "$dns_xt" -t mangle -I OUTPUT 1 -j R2O_DNS_OUT || return 1
     xt "$dns_xt" -t mangle -I INPUT 1 -j R2O_DNS_IN
+}
+
+xt_dns_queue_rule() {
+    op=$1 direction=$2 match=$3
+    shift 3
+    case "$direction" in
+        OUT) iface=-o; ct_side=ORIGINAL; count_side=original; set -- ! "$iface" lo "$@" -m owner --socket-exists ;;
+        IN) iface=-i; ct_side=REPLY; count_side=reply; set -- ! "$iface" lo "$@" ;;
+    esac
+    xt "$dns_xt" -t mangle "$op" "R2O_DNS_$direction" "$@" -m set --match-set "$dns_set" "$match" \
+        -m conntrack --ctdir "$ct_side" ! --ctstate DNAT \
+        -m connbytes --connbytes "$CONNBYTES" --connbytes-dir "$count_side" --connbytes-mode packets \
+        -j NFQUEUE --queue-num "$dns_queue" --queue-bypass
+}
+
+xt_dns_ensure_rules() {
+    if [ "$dns_set" = "$dns_pair_set" ]; then
+        xt_dns_queue_rule -C OUT dst,dst || xt_dns_queue_rule -A OUT dst,dst || return 1
+        xt_dns_queue_rule -C IN src,src || xt_dns_queue_rule -A IN src,src || return 1
+        xt_dns_postrouting_skip -C "$dns_set" dst,dst || xt_dns_postrouting_skip -I "$dns_set" dst,dst
+    else
+        xt_dns_queue_rule -C OUT dst -p "$dns_protocol" --dport "$dns_port" ||
+            xt_dns_queue_rule -A OUT dst -p "$dns_protocol" --dport "$dns_port" || return 1
+        xt_dns_queue_rule -C IN src -p "$dns_protocol" --sport "$dns_port" ||
+            xt_dns_queue_rule -A IN src -p "$dns_protocol" --sport "$dns_port" || return 1
+        xt_dns_postrouting_skip -C "$dns_set" dst -p "$dns_protocol" --dport "$dns_port" ||
+            xt_dns_postrouting_skip -I "$dns_set" dst -p "$dns_protocol" --dport "$dns_port"
+    fi
 }
 
 xt_dns_route() {
     case "$dns_family" in
         6)
             [ ! -f "$FW_V4ONLY" ] || return 1
-            dns_xt=ip6tables dns_inet=inet6 dns_queue=$QUEUE6
+            dns_xt=ip6tables dns_inet=inet6 dns_mask=128 dns_queue=$QUEUE6
             ;;
-        *) dns_xt=iptables dns_inet=inet dns_queue=$QUEUE4 ;;
+        *) dns_xt=iptables dns_inet=inet dns_mask=32 dns_queue=$QUEUE4 ;;
     esac
-    command -v ipset >/dev/null 2>&1 || return 1
-    dns_set=r2o_dns_route$dns_family
-    dns_element=$dns_address,$dns_protocol:$dns_port
+    command -v ipset >/dev/null 2>&1 || { echo "для временного маршрута DNS нужен ipset" >&2; return 1; }
+    dns_pair_set=r2o_dns_route$dns_family
+    dns_net_set=r2o_dn${dns_family}_${dns_protocol}_${dns_port}
+    dns_pair_element=$dns_address,$dns_protocol:$dns_port
+    dns_net_element=$dns_address/$dns_mask
     if [ "$dns_action" = del ]; then
         dns_sets=$(ipset list -name) || return 1
-        printf '%s\n' "$dns_sets" | grep -Fxq "$dns_set" || return 0
-        ipset -exist del "$dns_set" "$dns_element"
-        return $?
+        if printf '%s\n' "$dns_sets" | grep -Fxq "$dns_pair_set"; then
+            ipset -exist del "$dns_pair_set" "$dns_pair_element" || return 1
+        fi
+        if printf '%s\n' "$dns_sets" | grep -Fxq "$dns_net_set"; then
+            ipset -exist del "$dns_net_set" "$dns_net_element" || return 1
+            contents=$(ipset save "$dns_net_set") || return 1
+            if ! printf '%s\n' "$contents" | grep -q '^add '; then
+                dns_set=$dns_net_set
+                while xt_dns_queue_rule -D OUT dst -p "$dns_protocol" --dport "$dns_port" 2>/dev/null; do :; done
+                while xt_dns_queue_rule -D IN src -p "$dns_protocol" --sport "$dns_port" 2>/dev/null; do :; done
+                xt_dns_remove_set "$dns_set" dst -p "$dns_protocol" --dport "$dns_port" || return 1
+            fi
+        fi
+        return 0
     fi
     xt "$dns_xt" -t mangle -C POSTROUTING -j R2O_OUT || return 1
     if ! xt "$dns_xt" -t mangle -C OUTPUT -j R2O_DNS_OUT 2>/dev/null ||
-       ! xt "$dns_xt" -t mangle -C INPUT -j R2O_DNS_IN 2>/dev/null ||
-       ! xt_dns_postrouting_skip -C 2>/dev/null; then
-        xt_dns_route_down "$dns_xt"
-        xt_dns_route_up || { xt_dns_route_down "$dns_xt"; return 1; }
+       ! xt "$dns_xt" -t mangle -C INPUT -j R2O_DNS_IN 2>/dev/null; then
+        xt_dns_route_down "$dns_xt" || return 1
+        xt_dns_chains_up || { xt_dns_route_down "$dns_xt"; return 1; }
     fi
+    dns_set=$dns_pair_set
+    dns_element=$dns_pair_element
+    if ! pair_error=$(ipset -exist create "$dns_set" hash:ip,port family "$dns_inet" timeout 300 maxelem 64 2>&1); then
+        dns_set=$dns_net_set
+        dns_element=$dns_net_element
+        dns_sets=$(xt_dns_net_sets) || return 1
+        if ! printf '%s\n' "$dns_sets" | grep -Fxq "$dns_set" &&
+            [ "$(printf '%s\n' "$dns_sets" | awk 'NF { n++ } END { print n+0 }')" -ge 16 ]; then
+            echo "достигнут лимит 16 групп протокол/порт маршрутов DNS" >&2
+            return 1
+        fi
+        if ! ipset -exist create "$dns_set" hash:net family "$dns_inet" hashsize 64 timeout 300 maxelem 64; then
+            printf '%s\n' "$pair_error" >&2
+            return 1
+        fi
+    fi
+    xt_dns_ensure_rules || return 1
     ipset -exist add "$dns_set" "$dns_element" timeout "$dns_seconds"
 }
 

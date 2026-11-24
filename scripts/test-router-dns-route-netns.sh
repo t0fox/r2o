@@ -166,7 +166,11 @@ has_route() {
     if [ "$FW_BACKEND" = nft ]; then
         nft get element inet r2o "dns_route$1" "{ $2 . $3 . 853 }" >/dev/null 2>&1
     else
-        ipset -quiet test "r2o_dns_route$1" "$2,$3:853"
+        if ipset -quiet list "r2o_dns_route$1" >/dev/null 2>&1; then
+            ipset -quiet test "r2o_dns_route$1" "$2,$3:853"
+        else
+            ipset -quiet test "r2o_dn${1}_${3}_853" "$2"
+        fi
     fi
 }
 for family in 4 6; do
