@@ -385,6 +385,7 @@ cargo build --workspace --release --locked
 | [router/README.md](router/README.md) | Установка, OpenWrt/Keenetic, службы и удаление |
 | [r2o-manager/README.md](crates/r2o-manager/README.md) | Манифесты, Ed25519, обновления и rollback |
 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Происхождение стороннего кода и лицензии |
+| [docs/README.md](docs/README.md) | Техническая документация, приёмка и замеры |
 
 ## Поддержать проект
 
