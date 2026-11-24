@@ -14500,7 +14500,7 @@ fn r2o_discovery_verify_snapshot(
                 } else {
                     r2o_controller::live::D2K_VER_TRANSPORT
                 }
-            } else if fetch.application_verified {
+            } else if fetch.complete && fetch.application_verified {
                 r2o_controller::live::D2K_VER_APPLICATION
             } else if fetch.handshake_verified || fetch.tls.is_some() {
                 r2o_controller::live::D2K_VER_HANDSHAKE
@@ -14514,15 +14514,15 @@ fn r2o_discovery_verify_snapshot(
                 status: i32::from(fetch.status),
                 dns_reply,
                 reason: fetch.reason.clone().unwrap_or_else(|| {
-                    format!(
-                        "проба завершилась: прикладной ответ HTTP {} {}",
-                        fetch.status,
-                        if verified {
-                            "подтверждён"
-                        } else {
-                            "не подтверждён"
-                        }
-                    )
+                    if dns_reply {
+                        "локальная проба получила корректный DNS-ответ".into()
+                    } else if fetch.complete && fetch.application_verified {
+                        format!("локальная проба получила ответ HTTP {}", fetch.status)
+                    } else if fetch.handshake_verified {
+                        "локальная проба подтвердила рукопожатие".into()
+                    } else {
+                        "локальная проба завершилась без полного ответа".into()
+                    }
                 }),
             }
         }
@@ -14761,7 +14761,7 @@ fn r2o_discovery_plan_result(
         Err(error) => format!("проба не завершилась: {error}"),
         Ok(fetch) if fetch.dns_probe.is_some() && applied => {
             if verified && fetch.verified_dns_reply() {
-                "План применён; получен корректный DNS-ответ.".into()
+                "Локальная проба с планом получила корректный DNS-ответ.".into()
             } else {
                 "APPLIED получен, но корректный DNS-ответ не подтверждён.".into()
             }
@@ -14769,17 +14769,21 @@ fn r2o_discovery_plan_result(
         Ok(fetch) if fetch.dns_probe.is_some() => {
             "Датапат не подтвердил применение плана к DNS-пробе.".into()
         }
-        Ok(fetch) if verified && fetch.handshake_verified && !fetch.application_verified => {
+        Ok(fetch)
+            if verified && applied && fetch.handshake_verified && !fetch.application_verified =>
+        {
             if fetch.tls.is_some() {
-                "План применён. TLS-рукопожатие завершено.".into()
+                "Локальная проба с планом завершила TLS-рукопожатие.".into()
             } else {
-                "План применён. На повтор ClientHello получен ServerHello.".into()
+                "Локальная проба с планом получила ServerHello на повтор ClientHello.".into()
             }
         }
-        Ok(fetch) if verified => format!(
-            "план применён; получен полный HTTPS-ответ HTTP {}",
-            fetch.status
-        ),
+        Ok(fetch) if verified && applied && fetch.complete && fetch.application_verified => {
+            format!(
+                "локальная проба с планом получила полный HTTPS-ответ HTTP {}",
+                fetch.status
+            )
+        }
         Ok(fetch) if fetch.cloudflare_challenge => {
             "получен защитный challenge; обход не подтверждён".into()
         }
@@ -40317,7 +40321,7 @@ mod tests {
             assert_eq!(decision(fetch.clone(), true), Verified);
             assert_eq!(
                 super::r2o_discovery_plan_result(&Ok(fetch.clone()), true, true).1,
-                "План применён; получен корректный DNS-ответ."
+                "Локальная проба с планом получила корректный DNS-ответ."
             );
             fetch.peer_name_ok = None;
             assert_eq!(decision(fetch, true), Reclassify);
@@ -44163,7 +44167,7 @@ mod tests {
             "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\nfake payload=1 poison=1 repeats=2 gap_us=20000\n",
             "выведен из замера",
             "точный APPLIED получен",
-            "план применён; получен полный HTTPS-ответ HTTP 200",
+            "локальная проба с планом получила полный HTTPS-ответ HTTP 200",
         );
         let search = searches
             .entries
@@ -44176,7 +44180,7 @@ mod tests {
         assert_eq!(search.application, "точный APPLIED получен");
         assert_eq!(
             search.last_result,
-            "план применён; получен полный HTTPS-ответ HTTP 200"
+            "локальная проба с планом получила полный HTTPS-ответ HTTP 200"
         );
     }
 
@@ -44193,8 +44197,25 @@ mod tests {
             super::r2o_discovery_plan_result(&Ok(replay), true, true),
             (
                 "точный APPLIED получен".into(),
-                "План применён. На повтор ClientHello получен ServerHello.".into(),
+                "Локальная проба с планом получила ServerHello на повтор ClientHello.".into(),
             ),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_report_requires_a_complete_application_exchange_and_applied() {
+        let mut fetch = r2o_test_fetch_result();
+        fetch.complete = false;
+        fetch.handshake_verified = false;
+        assert_eq!(
+            super::r2o_discovery_plan_result(&Ok(fetch.clone()), true, true).1,
+            "APPLIED получен, но полный HTTPS-ответ не подтверждён"
+        );
+        fetch.complete = true;
+        assert_eq!(
+            super::r2o_discovery_plan_result(&Ok(fetch), false, true).1,
+            "datapath не подтвердил применение плана к потоку пробы"
         );
     }
 
