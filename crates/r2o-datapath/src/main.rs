@@ -1839,7 +1839,8 @@ mod app {
             });
         let mut next_diagnostics = Instant::now();
         let mut diagnostic_write_failed = false;
-        let mut rpdb_packets_skipped = 0u64;
+        let mut rpdb_observe_only_packets = 0u64;
+        let mut rpdb_observe_only_flows: Option<R2oRoutedFlows> = None;
         let mut route_scope_packets_skipped = 0u64;
         let nfq_health_enabled =
             control.is_some() && options.control_wire == r2k_core::control::WireProfile::V48;
@@ -2014,7 +2015,7 @@ mod app {
                             "pending_output": control.r2o_has_pending_output(),
                             "discovery_events": control.discovery_events(),
                         })),
-                        "rpdb_packets_skipped": rpdb_packets_skipped,
+                        "rpdb_observe_only_packets": rpdb_observe_only_packets,
                         "route_scope_packets_skipped": route_scope_packets_skipped,
                         "process_packet_skip_reasons": r2o_datapath::reason_stats::reason_snapshot(),
                     });
@@ -2572,7 +2573,7 @@ mod app {
                     let now = Instant::now();
                     let controller_probe = r2o_is_controller_probe(packet.mark, options.probe_mark);
                     let original_from_queue = r2o_datapath_payload(&packet, options.mark);
-                    if router_runtime
+                    let rpdb_mismatch = router_runtime
                         && options.mode == RuntimeMode::Apply
                         && route_gate.r2o_policy_needs_check(route_family)
                         && matches!(
@@ -2592,31 +2593,38 @@ mod app {
                                 output_ifindex: queue_outdev,
                             },
                             measure_mark,
-                        )
-                    {
-                        rpdb_packets_skipped = rpdb_packets_skipped.saturating_add(1);
+                        );
+                    let rpdb_observe_only = if rpdb_mismatch {
+                        if let Some(bytes) = original_from_queue {
+                            rpdb_observe_only_flows
+                                .get_or_insert_with(R2oRoutedFlows::new_passive)
+                                .r2o_skip_packet(
+                                    bytes,
+                                    r2o_datapath::r2o_route::R2O_ROUTE_OUTSIDE,
+                                    now,
+                                );
+                        }
+                        true
+                    } else {
+                        original_from_queue.is_some_and(|bytes| {
+                            rpdb_observe_only_flows
+                                .as_mut()
+                                .is_some_and(|flows| flows.r2o_skip_packet(bytes, 0, now))
+                        })
+                    };
+                    let packet_mode = if rpdb_observe_only {
+                        rpdb_observe_only_packets = rpdb_observe_only_packets.saturating_add(1);
                         if !route_context_reported {
                             eprintln!(
-                                "r2o-datapath: {family_name} RPDB допускает разные пути LAN, зонда и raw; поток передан ядру"
+                                "r2o-datapath: {family_name} RPDB допускает разные пути LAN, зонда и raw; продолжаю наблюдение без применения плана"
                             );
                             route_context_reported = true;
                         }
-                        if let Some(bytes) = original_from_queue {
-                            routed_flows.r2o_skip_packet(
-                                bytes,
-                                r2o_datapath::r2o_route::R2O_ROUTE_OUTSIDE,
-                                now,
-                            );
-                        }
-                        send_verdicts(
-                            &mut socket,
-                            std::slice::from_ref(&packet_id),
-                            NF_ACCEPT,
-                            false,
-                        )?;
-                        continue;
-                    }
-                    if options.mode == RuntimeMode::Apply
+                        RuntimeMode::Observe
+                    } else {
+                        options.mode
+                    };
+                    if packet_mode == RuntimeMode::Apply
                         && let Some(bytes) = original_from_queue
                         && r2o_udp_handle_late_tail(
                             &mut socket,
@@ -2658,7 +2666,7 @@ mod app {
                     let udp_admitted_from_queue = original_from_queue
                         .map(|bytes| {
                             r2o_udp_packet_admitted_for_mode(
-                                options.mode,
+                                packet_mode,
                                 &mut udp_sessions,
                                 bytes,
                                 now,
@@ -2670,7 +2678,7 @@ mod app {
                     let mut replay_packet = None;
                     let mut udp_replay = None;
                     let mut prefetched_quic_hello = None;
-                    if options.mode == RuntimeMode::Apply
+                    if packet_mode == RuntimeMode::Apply
                         && udp_admitted_from_queue
                         && let Some(bytes) = original_from_queue
                     {
@@ -2766,11 +2774,22 @@ mod app {
                             }
                         })
                         .unwrap_or(true);
-                    if options.mode == RuntimeMode::Observe
+                    if packet_mode == RuntimeMode::Observe
                         && udp_admitted
                         && let Some(bytes) = original
                     {
-                        if controller_probe {
+                        if rpdb_observe_only {
+                            let _ = decide_with_tcp_session_mode(
+                                &mut tcp_sessions,
+                                &observe_plan,
+                                bytes,
+                                &mut control,
+                                &mut flow_journal,
+                                &journal_origin,
+                                controller_probe,
+                                0,
+                            );
+                        } else if controller_probe {
                             let _ =
                                 decide_with_session_probe(&mut tcp_sessions, &observe_plan, bytes);
                         } else {
@@ -2796,7 +2815,7 @@ mod app {
                     let mut address_stun_replan = false;
                     let mut owned_dns_probe = false;
                     let decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
-                        if options.mode == RuntimeMode::Apply {
+                        if packet_mode == RuntimeMode::Apply {
                             if !controller_probe {
                                 scheduled.observe(bytes, now);
                             }
@@ -2874,7 +2893,7 @@ mod app {
                                 )
                             });
                         let allow_tls = r2o_inline_hold_allowed(
-                            options.mode,
+                            packet_mode,
                             controller_probe,
                             installed_tls_probe,
                         ) && (controller_probe
@@ -2900,7 +2919,7 @@ mod app {
                             0
                         };
                         let allow_http =
-                            r2o_inline_hold_allowed(options.mode, controller_probe, false)
+                            r2o_inline_hold_allowed(packet_mode, controller_probe, false)
                                 && family.is_some_and(|family| {
                                     name_plans.has_http_candidate(family, http_source_port)
                                 });
@@ -2912,7 +2931,7 @@ mod app {
                         let observe_http = !controller_probe
                             && control.as_ref().is_some_and(ControlServer::is_connected);
                         let tcp_flow_damaged = tcp_sessions.r2o_is_damaged_packet(bytes);
-                        if tcp_flow_damaged {
+                        if tcp_flow_damaged || rpdb_observe_only {
                             let released = holding.r2o_release_damaged_flow(bytes);
                             r2o_flush_owned_hold_releases(
                                 &mut holding,
@@ -2952,8 +2971,11 @@ mod app {
                         // ветке `quic_deny` не доходит ни до выбора плана,
                         // ни до `shape_misses`.
                         use r2o_datapath::control::DnsProbeSelection;
-                        let dns_probe =
-                            name_plans.select_dns_probe(bytes, queue_hook, controller_probe);
+                        let dns_probe = if rpdb_observe_only {
+                            DnsProbeSelection::Unreserved
+                        } else {
+                            name_plans.select_dns_probe(bytes, queue_hook, controller_probe)
+                        };
                         let selected = match dns_probe {
                             DnsProbeSelection::Matched(plan) => {
                                 owned_dns_probe = true;
@@ -2961,7 +2983,9 @@ mod app {
                             }
                             DnsProbeSelection::DifferentQuestion => None,
                             DnsProbeSelection::Unreserved
-                                if quic_second_hello_skip.is_some() || quic_deny_skip =>
+                                if rpdb_observe_only
+                                    || quic_second_hello_skip.is_some()
+                                    || quic_deny_skip =>
                             {
                                 None
                             }
@@ -2994,7 +3018,9 @@ mod app {
                             udp_selected_plan = Some(selected);
                         }
                         let selected_plan = selected.unwrap_or(
-                            if matches!(dns_probe, DnsProbeSelection::DifferentQuestion) {
+                            if rpdb_observe_only
+                                || matches!(dns_probe, DnsProbeSelection::DifferentQuestion)
+                            {
                                 &observe_plan
                             } else {
                                 &plan
@@ -3069,11 +3095,11 @@ mod app {
                             && !quic_deny_skip
                             && selected_plan.qdeny != 0
                             && !controller_probe;
-                        if options.mode == RuntimeMode::Apply
+                        if (packet_mode == RuntimeMode::Apply || rpdb_observe_only)
                             && quic_second_hello_skip.is_none()
                             && !quic_deny_skip
                         {
-                            if selected_plan.qdeny != 0 && !controller_probe {
+                            if !rpdb_observe_only && selected_plan.qdeny != 0 && !controller_probe {
                                 quic_sessions.suppress_packet(bytes);
                             } else if !controller_probe {
                                 observe_quic_packet(
@@ -3121,7 +3147,7 @@ mod app {
                             allow_http: allow_http && !tcp_flow_damaged,
                             observe_tls,
                             observe_http,
-                            own_packets: raw.is_some(),
+                            own_packets: raw.is_some() && !rpdb_observe_only,
                         };
                         let fed = if controller_probe {
                             holding.feed_controller_probe(packet_id, bytes, now, hold_options)
@@ -3143,7 +3169,7 @@ mod app {
                         release_accepting(&mut socket, &fed.released);
                         match fed.outcome {
                             HoldOutcome::Pass => {
-                                if options.mode == RuntimeMode::Observe {
+                                if packet_mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
                                     let first_udp_packet =
@@ -3227,6 +3253,7 @@ mod app {
                                 r2o_note_counter(&R2O_HOLD_OWNED, 1);
                                 continue;
                             }
+                            HoldOutcome::Drop if rpdb_observe_only => PacketDecision::Accept,
                             HoldOutcome::Drop => PacketDecision::Drop,
                             HoldOutcome::Ready { ids, packet } => {
                                 if !controller_probe
@@ -3263,7 +3290,7 @@ mod app {
                                     global_plan_present,
                                     controller_probe,
                                 );
-                                let decision = if options.mode == RuntimeMode::Observe {
+                                let decision = if packet_mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
                                     let selected = name_plans.select_with_quic_host_at_hook_probe(
@@ -3322,7 +3349,7 @@ mod app {
                                     &plan,
                                     &packet,
                                     &decision,
-                                    options.mode,
+                                    packet_mode,
                                     queue_hook,
                                     queue_mark,
                                     queue_outdev,
@@ -3372,7 +3399,7 @@ mod app {
                                     global_plan_present,
                                     controller_probe,
                                 );
-                                let decision = if options.mode == RuntimeMode::Observe {
+                                let decision = if packet_mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
                                     let selected = name_plans.select_with_quic_host_at_hook_probe(
@@ -3431,7 +3458,7 @@ mod app {
                                     &plan,
                                     &packet,
                                     &decision,
-                                    options.mode,
+                                    packet_mode,
                                     queue_hook,
                                     queue_mark,
                                     queue_outdev,
@@ -3464,7 +3491,7 @@ mod app {
                                         hello.shape_event_body(),
                                     );
                                 }
-                                if options.mode == RuntimeMode::Observe {
+                                if packet_mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
                                     let tcp_syn_ack_seen =
@@ -3537,7 +3564,7 @@ mod app {
                     } else {
                         ids
                     };
-                    let redirect_packets = if options.mode == RuntimeMode::Apply
+                    let redirect_packets = if packet_mode == RuntimeMode::Apply
                         && raw.is_some()
                         && let (Some(redirect), Some(event), Some(packet)) = (
                             redirect_candidate.as_deref(),
@@ -3734,9 +3761,9 @@ mod app {
                             | PacketDecision::Refused { .. }
                             | PacketDecision::RefusedUdp { .. }
                             | PacketDecision::FlowUnfit { .. } => {
-                                let late_tail = original.filter(|_| udp_replay.is_none()).map_or(
-                                    R2oUdpLateTail::Unhandled,
-                                    |bytes| {
+                                let late_tail = original
+                                    .filter(|_| !rpdb_observe_only && udp_replay.is_none())
+                                    .map_or(R2oUdpLateTail::Unhandled, |bytes| {
                                         r2o_udp_handle_late_tail(
                                             &mut socket,
                                             raw.as_ref(),
@@ -3752,8 +3779,7 @@ mod app {
                                             follow_receive_seq,
                                             false,
                                         )
-                                    },
-                                );
+                                    });
                                 let needs_verdict = late_tail == R2oUdpLateTail::Unhandled;
                                 if needs_verdict {
                                     send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;
@@ -3762,7 +3788,7 @@ mod app {
                                     }
                                 }
                                 if (needs_verdict || late_tail == R2oUdpLateTail::Forwarded)
-                                    && options.mode == RuntimeMode::Apply
+                                    && packet_mode == RuntimeMode::Apply
                                     && !controller_probe
                                     && let Some(bytes) = original
                                 {

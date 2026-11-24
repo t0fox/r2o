@@ -1187,6 +1187,15 @@ impl Default for R2oRoutedFlows {
 }
 
 impl R2oRoutedFlows {
+    pub fn new_passive() -> Self {
+        // Полная таблица нужна только при наличии соответствующих потоков.
+        Self {
+            flows: HashMap::new(),
+            next_expire: Instant::now(),
+            routed_flows: 0,
+        }
+    }
+
     /// C `d2k_session_routed_flows`: кумулятивное число впервые помеченных
     /// потоков. Не уменьшается при истечении или новом SYN.
     pub fn routed_flows(&self) -> u64 {

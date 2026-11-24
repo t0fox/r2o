@@ -131,7 +131,8 @@ if [ "${2:-}" = rpdb ]; then
     request routed || true
     after=$(sequence)
     if [ -z "$before" ] || [ -z "$after" ] || [ "$after" -le "$before" ] || application routed ||
-        ! grep -q 'RPDB допускает разные пути' datapath.log || grep -q 'наблюдение TLS:' controller.log; then
+        ! grep -q 'продолжаю наблюдение без применения плана' datapath.log ||
+        ! grep -q 'наблюдение TLS:' controller.log || ! grep -q 'наблюдение TCP: ClientHello повторён' controller.log; then
         cat routed.log datapath.log controller.log
         exit 1
     fi
