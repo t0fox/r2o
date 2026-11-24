@@ -10,12 +10,19 @@ fi
 WORK=$(mktemp -d)
 peer=
 queue_listener=
+datapath4=
+datapath6=
 cleanup() {
     if [ -n "$peer" ]; then kill "$peer" 2>/dev/null || :; wait "$peer" 2>/dev/null || :; fi
     if [ -n "$queue_listener" ]; then
         kill "$queue_listener" 2>/dev/null || :
         wait "$queue_listener" 2>/dev/null || :
     fi
+    for pid in "$datapath4" "$datapath6"; do
+        [ -n "$pid" ] || continue
+        kill "$pid" 2>/dev/null || :
+        wait "$pid" 2>/dev/null || :
+    done
     rm -rf -- "$WORK"
 }
 trap cleanup EXIT HUP INT TERM
@@ -27,6 +34,8 @@ FIREWALL="$ROOT/router/r2o-firewall.sh"
 export R2O_DATAPATH_BIN=${R2O_DATAPATH_BIN:-$ROOT/target/release/r2o-datapath}
 
 ip link set lo up
+modprobe nf_conntrack
+modprobe nfnetlink_queue
 sysctl -qw net.netfilter.nf_conntrack_acct=1
 unshare -n sh -c 'echo ready > "$1"; exec sleep 60' sh "$WORK/peer" &
 peer=$!
@@ -187,6 +196,23 @@ has_route 4 192.0.2.2 tcp
 sleep 1.2
 if has_route 4 192.0.2.2 tcp; then exit 1; fi
 if [ "$FW_BACKEND" = nft ]; then
+    # Для регистрации маршрута с UID нужен текущий datapath с NFQA_CFG_F_UID_GID.
+    R2O_PLATFORM_RUNTIME=1 "$R2O_DATAPATH_BIN" --queue "$QUEUE_NUM" --mode observe --r2o-flow-capacity 64 \
+        > "$WORK/datapath4.log" 2>&1 &
+    datapath4=$!
+    R2O_PLATFORM_RUNTIME=1 "$R2O_DATAPATH_BIN" --queue "$QUEUE_NUM6" --family ipv6 --mode observe --r2o-flow-capacity 64 \
+        > "$WORK/datapath6.log" 2>&1 &
+    datapath6=$!
+    uid4="$R2O_RUN_DIR/platform.uid.$QUEUE_NUM"
+    uid6="$R2O_RUN_DIR/platform.uid.$QUEUE_NUM6"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if [ -s "$uid4" ] && [ -s "$uid6" ]; then break; fi
+        sleep 0.2
+    done
+    if [ ! -s "$uid4" ] || [ ! -s "$uid6" ]; then
+        cat "$WORK/datapath4.log" "$WORK/datapath6.log" >&2
+        exit 1
+    fi
     sh "$FIREWALL" dns-route add 192.0.2.2 udp 854 20 411
     sh "$FIREWALL" dns-route add 2001:db8::2 udp 854 20 411
     if sh "$FIREWALL" dns-route add 192.0.2.2 udp 854 20 0; then exit 1; fi

@@ -26,22 +26,23 @@ modprobe nfnetlink_queue
 modprobe nft_queue
 "$R2O_DATAPATH_BIN" --queue "$QUEUE_NUM" --mode observe --r2o-flow-capacity 64 > "$TEMP/datapath.log" 2>&1 &
 DP=$!
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for _ in 1 2 3 4 5 6 7 8 9 10; do
     if awk '$1 == 34000 && $2 != 0 { found=1 } END { exit !found }' /proc/net/netfilter/nfnetlink_queue; then break; fi
     sleep 0.1
 done
 FIREWALL="$ROOT/router/r2o-firewall.sh"
 sh "$FIREWALL" up
 sh "$FIREWALL" status
-nft list chain inet r2o out | grep -q '443.*ct original packets 1-8.*queue num 34000 bypass'
-nft list chain inet r2o out | grep -q '443.*ct original packets 9-.*rst.*queue num 34000 bypass'
-nft list chain inet r2o in_rules | grep -q '443.*ct reply packets 9-.*fin.*queue num 34000 bypass'
+queue_bypass='queue (num 34000 bypass|flags bypass to 34000)'
+nft list chain inet r2o out | grep -Eq "443.*ct original packets 1-8.*$queue_bypass"
+nft list chain inet r2o out | grep -Eq "443.*ct original packets 9-.*rst.*$queue_bypass"
+nft list chain inet r2o in_rules | grep -Eq "443.*ct reply packets 9-.*fin.*$queue_bypass"
 nft list chain inet r2o out | grep -q 'meta mark 0x0000002f return'
 nft list chain inet r2o_rst output | grep -q '@rst4 drop'
 nft insert rule inet r2o out tcp dport 444 return
 if sh "$FIREWALL" status; then exit 1; fi
 sh "$FIREWALL" event
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for _ in 1 2 3 4 5 6 7 8 9 10; do
     if sh "$FIREWALL" status 2>/dev/null; then break; fi
     sleep 0.2
 done

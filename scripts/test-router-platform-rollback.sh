@@ -43,7 +43,7 @@ chmod +x "$WORK/bin/uci" "$WORK/bin/fw4"
 
 printf '1\n' > "$RESTORE"
 printf '0\n' > "$WORK/uci-value"
-if FAIL=set "$R2O_DATAPATH_BIN" --platform flowoffload-restore; then exit 1; fi
+if FAIL='set' "$R2O_DATAPATH_BIN" --platform flowoffload-restore; then exit 1; fi
 test -f "$RESTORE"
 if FAIL=commit "$R2O_DATAPATH_BIN" --platform flowoffload-restore; then exit 1; fi
 test -f "$RESTORE"

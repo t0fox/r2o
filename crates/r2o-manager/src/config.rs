@@ -40,6 +40,7 @@ const DEFAULT_CONFIG_KEYS: &[&str] = &[
     "TG_MODE",
     "TG_PORT",
     "R2O_PPE_DEOFFLOAD",
+    "R2O_SOFTWARE_PATH_ENDPOINTS",
 ];
 const IMPORTABLE_KEYS: &[&str] = &[
     "SCHEMA",
@@ -399,6 +400,14 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
         "PORTS" | "VOICE_PORTS" | "HTTP_KEEPALIVE_PORTS" | "DNS_PORTS" => valid_port_list(value),
         "DNS_DISCOVERY_ENDPOINTS" => {
             r2k_core::dns_config::parse_plain_dns_endpoints(value, None).is_ok()
+        }
+        "R2O_SOFTWARE_PATH_ENDPOINTS" => {
+            let endpoints = value
+                .split_ascii_whitespace()
+                .map(|endpoint| endpoint.strip_prefix("udp://").unwrap_or(endpoint))
+                .collect::<Vec<_>>()
+                .join(" ");
+            r2k_core::dns_config::parse_plain_dns_endpoints(&endpoints, None).is_ok()
         }
         "CONNBYTES" | "VOICE_CONNBYTES" => valid_connbytes_window(value),
         "MARK" | "PROBE_MARK" | "MEASURE_MARK" => valid_mark(value),

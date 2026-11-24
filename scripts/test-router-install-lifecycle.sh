@@ -50,6 +50,14 @@ for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager 
     destination=$BUNDLE/builds/$component-linux-testhost
     if [ "$component" = r2o-manager ]; then
         cp "$MANAGER_BIN" "$destination"
+    elif [ "$component" = r2o-datapath ]; then
+        cat > "$destination" <<'EOF'
+#!/bin/sh
+case "$*" in
+    '--platform backend') printf '%s\n' iptables ;;
+    '--platform ipv6-enabled') printf '%s\n' 0 ;;
+esac
+EOF
     elif [ "$component" = r2o-controller ]; then
         cat > "$destination" <<EOF
 #!/bin/sh
