@@ -426,14 +426,11 @@ impl Platform {
     }
 
     fn accounting(&self, repair: bool) -> Result<()> {
-        let file = self.proc.join(ACCT);
-        if fs::read_to_string(&file)?.trim() != "1" && repair {
-            fs::write(&file, "1\n")?;
-        }
-        if fs::read_to_string(&file)?.trim() != "1" {
-            return Err(error("не включён nf_conntrack_acct"));
-        }
-        Ok(())
+        let module = (self.kind == Kind::Keenetic).then(|| {
+            path("R2O_SYS_MODULE_DIR", Path::new("/sys/module"))
+                .join("nf_conntrack/parameters/acct")
+        });
+        linux::accounting(&self.proc.join(ACCT), module.as_deref(), repair)
     }
 
     fn accounting_sample(&self) -> Result<(usize, usize, bool)> {
