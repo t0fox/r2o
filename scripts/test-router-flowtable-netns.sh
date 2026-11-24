@@ -295,7 +295,7 @@ if [ -n "${R2O_HTTP3_LAN_BIN:-}" ]; then
     sleep 1
     # План установлен, но при несовпадении RPDB остаётся только наблюдение.
     http3 198.18.0.2:443 4 0 1
-    grep -q 'RPDB допускает разные пути' "$TEMP/datapath4.log"
+    grep -q 'продолжаю наблюдение без применения плана' "$TEMP/datapath4.log"
 
     ip rule del priority 100
     sleep 1
