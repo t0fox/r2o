@@ -11,13 +11,22 @@ set -eu
 dp=$1
 controller=$2
 discovery=${3:-}
+measure=${R2O_DISCOVERY_MEASURE:-}
+if [ -n "$measure" ] && [ "$discovery" != --lan-discovery ]; then
+  echo 'Замер подбора требует --lan-discovery' >&2
+  exit 2
+fi
+namespace_lifetime=110
+if [ -n "$measure" ]; then
+  namespace_lifetime=300
+fi
 lab=$(mktemp -d "${TMPDIR:-/tmp}/geneva-netns.XXXXXX")
 echo "$lab"
 daemon=
 server=
 watcher=
 lan=
-unshare -n sleep 110 &
+unshare -n sleep "$namespace_lifetime" &
 peer=$!
 cleanup() {
   for pid in "$watcher" "$daemon" "$server" "$peer" "$lan"; do
@@ -37,7 +46,7 @@ nsenter -t "$peer" -n ip link set lo up
 nsenter -t "$peer" -n ip link set veth1 up
 nsenter -t "$peer" -n ip addr add 198.51.100.2/30 dev veth1
 if [ "$discovery" = --lan-discovery ]; then
-  unshare -n sleep 110 &
+  unshare -n sleep "$namespace_lifetime" &
   lan=$!
   sleep .1
   ip link add rlan type veth peer name client
@@ -55,12 +64,17 @@ if [ "$discovery" = --lan-discovery ]; then
   export QUEUE_NUM=52692 IPV6_ENABLED=0 PORTS=443 R2O_PLATFORM_RUNTIME=1
   export R2O_SOFTWARE_PATH_ENDPOINTS='' DNS_DISCOVERY_ENDPOINTS=''
 fi
+if [ -n "$measure" ]; then
+  nsenter -t "$peer" -n ip addr add 198.51.100.6/32 dev veth1
+  ip route add 198.51.100.6/32 dev veth0
+fi
 if [ -n "$discovery" ]; then
   # В этой проверке фильтр читает первый байт данных после TCP-заголовка без опций.
   sysctl -qw net.ipv4.tcp_timestamps=0
   nsenter -t "$peer" -n sysctl -qw net.ipv4.tcp_timestamps=0
 fi
-openssl req -x509 -newkey rsa:2048 -keyout "$lab/key.pem" -out "$lab/cert.pem" -subj /CN=a.example.com -days 1 -noenc >"$lab/key.log" 2>&1
+openssl req -x509 -newkey rsa:2048 -keyout "$lab/key.pem" -out "$lab/cert.pem" -subj /CN=a.example.com \
+  -addext subjectAltName=DNS:a.example.com,DNS:b.example.net -days 1 -noenc >"$lab/key.log" 2>&1
 cat >"$lab/peer.py" <<'PY'
 import socket
 import ssl
@@ -85,7 +99,7 @@ def serve(peer):
                 tls.unwrap().close()
         except (TimeoutError, OSError):
             pass
-with socket.create_server(("198.51.100.2", 443)) as listener:
+with socket.create_server(("0.0.0.0", 443)) as listener:
     while True:
         peer, _ = listener.accept()
         threading.Thread(target=serve, args=(peer,), daemon=True).start()
@@ -95,9 +109,10 @@ server=$!
 sleep .3
 client() {
   local args=()
+  local host=${2:-a.example.com}
   if [ -n "$lan" ]; then args=(nsenter -t "$lan" -n); fi
-  printf 'GET / HTTP/1.1\r\nHost: a.example.com\r\nConnection: close\r\n\r\n' |
-    "${args[@]}" timeout 3s openssl s_client -connect 198.51.100.2:443 -servername a.example.com -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups X25519 -alpn h2 -no_ticket -CAfile "$lab/cert.pem" -verify_hostname a.example.com -verify_return_error -brief -ign_eof >"$lab/$1.log" 2>&1
+  printf 'GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$host" |
+    "${args[@]}" timeout 3s openssl s_client -connect "${3:-198.51.100.2}:443" -servername "$host" -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups X25519 -alpn h2 -no_ticket -CAfile "$lab/cert.pem" -verify_hostname "$host" -verify_return_error -brief -ign_eof >"$lab/$1.log" 2>&1
 }
 verified() {
   grep -q 'Verification: OK' "$lab/$1.log" &&
@@ -147,6 +162,17 @@ if [ -n "$discovery" ]; then
   "$controller" --serve "$lab/dp.sock" "$lab/catalog.json" --discover --mark 46 --measure-mark 46 --live "$lab/discovery.json" --no-diagnostics >"$lab/controller.log" 2>&1 &
   watcher=$!
   sleep 1
+  if [ -n "$measure" ]; then
+    source "$measure"
+    measure_root=$lab
+    measure_log=$lab/controller.log
+    request() { client "$@"; }
+    application() { verified "$@"; }
+    measure_discovery cold a.example.com 198.51.100.2 || { tail -60 "$measure_log" "$lab/datapath.log"; exit 1; }
+    measure_discovery warm b.example.net 198.51.100.6 || { tail -60 "$measure_log" "$lab/datapath.log"; exit 1; }
+    "$dp" --platform down
+    exit 0
+  fi
   discovery_started=$SECONDS
   client trigger || true
   # Контроллер пишет подтверждения в файл с интервалом 60 секунд.

@@ -22,7 +22,7 @@ def serve(peer):
                 tls.unwrap().close()
         except (TimeoutError, OSError):
             pass
-with socket.create_server(("198.51.100.2", 443)) as listener:
+with socket.create_server(("0.0.0.0", 443)) as listener:
     while True:
         peer, _ = listener.accept()
         threading.Thread(target=serve, args=(peer,), daemon=True).start()

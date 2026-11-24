@@ -51,6 +51,10 @@ ip link set rlan up
 ip link set rwan up
 ip route add default dev rwan
 origin /opt/bin/ip addr add 198.51.100.2/30 dev wanp
+if [ -r "$LAB/tls/measure-discovery.sh" ]; then
+    origin /opt/bin/ip addr add 198.51.100.6/32 dev wanp
+    ip route add 198.51.100.6/32 dev rwan
+fi
 origin /opt/bin/ip link set wanp up
 origin /opt/bin/ip route add 203.0.113.0/30 via 198.51.100.1
 client /opt/bin/ip addr add 203.0.113.2/30 dev lanp
@@ -74,10 +78,11 @@ until origin /opt/bin/awk '$2 ~ /:01BB$/ && $4 == "0A" {ready=1} END {exit !read
     sleep 1
 done
 request() {
-    printf 'GET / HTTP/1.1\r\nHost: a.example.com\r\nConnection: close\r\n\r\n' |
-        client /opt/bin/busybox-bootstrap timeout 6 "$openssl" s_client -connect 198.51.100.2:443 \
-        -servername a.example.com -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups X25519 \
-        -alpn h2 -no_ticket -CAfile cert.pem -verify_hostname a.example.com -verify_return_error \
+    request_host=${2:-a.example.com}
+    printf 'GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$request_host" |
+        client /opt/bin/busybox-bootstrap timeout 6 "$openssl" s_client -connect "${3:-198.51.100.2}:443" \
+        -servername "$request_host" -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups X25519 \
+        -alpn h2 -no_ticket -CAfile cert.pem -verify_hostname "$request_host" -verify_return_error \
         -brief -ign_eof >"$1.log" 2>&1
 }
 application() {
@@ -112,6 +117,16 @@ stop() {
 }
 uptime_s() { cut -d. -f1 /proc/uptime; }
 launch
+if [ -r "$LAB/tls/measure-discovery.sh" ]; then
+    . "$LAB/tls/measure-discovery.sh"
+    measure_root=$root
+    measure_log=$root/controller.log
+    measure_discovery cold a.example.com 198.51.100.2 || { tail -60 controller.log datapath.log; exit 1; }
+    measure_discovery warm b.example.net 198.51.100.6 || { tail -60 controller.log datapath.log; exit 1; }
+    echo KEENETIC_DISCOVERY_MEASURE_PASS
+    stop
+    exit 0
+fi
 started=$(uptime_s)
 request trigger || true
 attempt=0
