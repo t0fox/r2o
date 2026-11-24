@@ -36,22 +36,24 @@ ip netns add "$LAN"
 ip netns add "$WAN"
 ip link add rlan type veth peer name client netns "$LAN"
 ip link add rwan type veth peer name origin netns "$WAN"
-ip addr add 192.0.2.1/24 dev rlan
+ip addr add 203.0.113.254/24 dev rlan
 ip addr add 198.18.0.1/24 dev rwan
 ip -6 addr add 2001:db8:1::1/64 dev rlan nodad
 ip -6 addr add 2001:db8:2::1/64 dev rwan nodad
 ip link set rlan up
 ip link set rwan up
-ip -n "$LAN" addr add 192.0.2.2/24 dev client
+ip -n "$LAN" addr add 203.0.113.2/24 dev client
 ip -n "$WAN" addr add 198.18.0.2/24 dev origin
 ip -n "$LAN" -6 addr add 2001:db8:1::2/64 dev client nodad
 ip -n "$WAN" -6 addr add 2001:db8:2::2/64 dev origin nodad
 ip -n "$LAN" link set client up
 ip -n "$WAN" link set origin up
-ip -n "$LAN" route add default via 192.0.2.1
+ip -n "$LAN" route add default via 203.0.113.254
 ip -n "$WAN" route add default via 198.18.0.1
 ip -n "$LAN" -6 route add default via 2001:db8:1::1
 ip -n "$WAN" -6 route add default via 2001:db8:2::1
+ip route add default via 198.18.0.2
+ip -6 route add default via 2001:db8:2::2
 echo 1 >/proc/sys/net/ipv4/ip_forward
 echo 1 >/proc/sys/net/ipv6/conf/all/forwarding
 
@@ -203,5 +205,35 @@ grep -q '^fw4_admission=bounded$' "$TEMP/status"
 nft -a list chain inet fw4 r2o_offload >"$TEMP/chain"
 platform up
 nft -a list chain inet fw4 r2o_offload | cmp "$TEMP/chain" -
+
+if [ -n "${R2O_HTTP3_LAN_BIN:-}" ]; then
+    http3() {
+        R2O_H3_LAN="$LAN" R2O_H3_WAN="$WAN" R2O_H3_ORIGIN="$1" \
+            R2O_H3_CONTROL="$TEMP/control$2" R2O_H3_EXPECT_HELLO="$3" \
+            R2O_H3_INSTALL_PLAN="${4:-0}" \
+            "$R2O_HTTP3_LAN_BIN" --exact r2o_http3_lan --ignored --nocapture || {
+                cat "$TEMP"/datapath*.log >&2
+                return 1
+            }
+    }
+    http3 198.18.0.2:443 4 1
+    http3 '[2001:db8:2::2]:443' 6 1
+
+    # Одинаковые назначение, fwmark и oif скрывают различие шлюзов.
+    ip -n "$WAN" addr add 198.18.0.3/24 dev origin
+    ip route add 198.18.0.2/32 via 198.18.0.3 dev rwan onlink table 100
+    ip rule add priority 100 iif rlan lookup 100
+    ip route get 198.18.0.2 mark "$MARK" | grep -Eq 'dev rwan( |$)'
+    ip route get 198.18.0.2 from 203.0.113.2 iif rlan mark "$MARK" | grep -Eq 'via 198\.18\.0\.3 dev rwan( |$)'
+    sleep 1
+    http3 198.18.0.2:443 4 0 1
+    grep -q 'RPDB допускает разные пути' "$TEMP/datapath4.log"
+
+    ip rule del priority 100
+    sleep 1
+    http3 198.18.0.2:443 4 1 1
+    http3 '[2001:db8:2::2]:443' 6 1 1
+fi
+
 platform down
 nft list chain inet fw4 forward | grep -Eq 'flow (add|offload) @ft'

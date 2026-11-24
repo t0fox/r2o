@@ -4273,3 +4273,177 @@ async fn r2o_http3_silent_udp_peer_timeout_matches_d2o() {
     .await;
     drop(silent_peer);
 }
+
+/// Запускается из сетевого стенда с действующим router datapath в apply.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires router, LAN and WAN network namespaces"]
+fn r2o_http3_lan() {
+    use r2k_core::control::{
+        COMMAND_SET_NAME, EVENT_APPLIED, EVENT_HELLO, SHAPE_QUIC, decode_ack, decode_applied,
+        decode_hello, encode_set_name, read_frame,
+    };
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    fn in_namespace<T: Send + 'static>(
+        namespace: String,
+        task: impl FnOnce() -> T + Send + 'static,
+    ) -> std::thread::JoinHandle<T> {
+        std::thread::spawn(move || {
+            let fd = std::fs::File::open(format!("/run/netns/{namespace}")).unwrap();
+            let rc = unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNET) };
+            assert_eq!(rc, 0, "setns: {}", std::io::Error::last_os_error());
+            task()
+        })
+    }
+    fn run<T>(task: impl Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(task)
+    }
+    let lan = std::env::var("R2O_H3_LAN").unwrap();
+    let wan = std::env::var("R2O_H3_WAN").unwrap();
+    let address: SocketAddr = std::env::var("R2O_H3_ORIGIN").unwrap().parse().unwrap();
+    let expect_hello = std::env::var("R2O_H3_EXPECT_HELLO").unwrap() == "1";
+    let install_plan = std::env::var("R2O_H3_INSTALL_PLAN").as_deref() == Ok("1");
+    let mut control = UnixStream::connect(std::env::var("R2O_H3_CONTROL").unwrap()).unwrap();
+    control
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    read_frame(&mut control).expect("приветствие datapath");
+    const HOST: &str = "h3-lan.example";
+    const BODY: &[u8] = b"HTTP/3 from the isolated WAN origin";
+    const PLAN_ID: [u8; 16] = [0x91; 16];
+    if install_plan {
+        let plan = r2o_controller::plan_text::compile_text(&format!(
+            "r2o-plan 1 10\nid {}\nproto udp quic\nquicsplit 1\n",
+            "91".repeat(16),
+        ))
+        .unwrap();
+        let family = if address.is_ipv4() { 4 } else { 6 };
+        control
+            .write_all(&encode_set_name(HOST, SHAPE_QUIC, family, &plan).unwrap())
+            .unwrap();
+        loop {
+            let frame = read_frame(&mut control).expect("ACK плана HTTP/3");
+            if let Ok(ack) = decode_ack(&frame)
+                && ack.command == COMMAND_SET_NAME
+            {
+                assert!(ack.ok, "{ack:?}");
+                break;
+            }
+        }
+    }
+    let certificate =
+        rcgen::Certificate::from_params(rcgen::CertificateParams::new(vec![HOST.into()])).unwrap();
+    let der = CertificateDer::from(certificate.serialize_der().unwrap());
+    let key = PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der());
+    let mut roots = RootCertStore::empty();
+    roots.add(der.clone()).unwrap();
+    let (ready, started) = std::sync::mpsc::channel();
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let origin = in_namespace(wan, move || {
+        run(async move {
+            let mut tls = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![der], PrivateKeyDer::Pkcs8(key))
+                .unwrap();
+            tls.alpn_protocols = vec![b"h3".to_vec()];
+            let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+            let endpoint = quinn::Endpoint::server(
+                quinn::ServerConfig::with_crypto(Arc::new(crypto)),
+                address,
+            )
+            .unwrap();
+            ready.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(8), async {
+                let connection = endpoint.accept().await.unwrap().await.unwrap();
+                let mut h3 = h3::server::builder()
+                    .build(h3_quinn::Connection::new(connection))
+                    .await
+                    .unwrap();
+                let (request, mut stream) = h3
+                    .accept()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .resolve_request()
+                    .await
+                    .unwrap();
+                assert_eq!(request.uri().authority().unwrap().host(), HOST);
+                assert_eq!(request.uri().path(), "/lan");
+                stream
+                    .send_response(
+                        http::Response::builder()
+                            .status(200)
+                            .header(http::header::CONTENT_LENGTH, BODY.len())
+                            .body(())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                stream
+                    .send_data(bytes::Bytes::from_static(BODY))
+                    .await
+                    .unwrap();
+                stream.finish().await.unwrap();
+                let _ = finished.await;
+            })
+            .await
+            .unwrap();
+        })
+    });
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    let client = in_namespace(lan, move || {
+        run(async move {
+            let bind = if address.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            };
+            let socket = UdpSocket::bind(bind).unwrap();
+            socket.connect(address).unwrap();
+            r2o_quic_http3_get(socket, address, HOST, "/lan", Duration::from_secs(5), roots).await
+        })
+    });
+    let result = client.join().unwrap();
+    let _ = done.send(());
+    origin.join().unwrap();
+    assert!(result.handshake_confirmed && result.complete, "{result:?}");
+    assert_eq!(
+        (result.status, result.body_bytes, result.peer_name),
+        (200, BODY.len() as u64, 1)
+    );
+    control
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    let mut saw_hello = false;
+    let mut saw_applied = false;
+    let expect_applied = expect_hello && install_plan;
+    while let Ok(frame) = read_frame(&mut control) {
+        if frame.kind == EVENT_HELLO {
+            let hello = decode_hello(&frame).unwrap();
+            if hello.host.as_deref() == Some(HOST.as_bytes()) && hello.quic_snapshot.is_some() {
+                saw_hello = true;
+            }
+        } else if frame.kind == EVENT_APPLIED {
+            saw_applied |= decode_applied(&frame).unwrap().plan_id == PLAN_ID;
+        }
+        if expect_hello && saw_hello && (!expect_applied || saw_applied) {
+            break;
+        }
+    }
+    assert_eq!(
+        saw_hello, expect_hello,
+        "SNI ожидается только при сопоставимом RPDB"
+    );
+    assert_eq!(saw_applied, expect_applied, "APPLIED плана HTTP/3");
+    println!(
+        "HTTP/3 {address}: 200, {} байт, QUIC ClientHello={saw_hello}, APPLIED={saw_applied}",
+        BODY.len()
+    );
+}
