@@ -174,7 +174,16 @@ fn r2o_meminfo_field(text: &str, key: &str) -> Option<u64> {
 
 fn r2o_parse_meminfo(text: &str) -> Option<R2oMemoryStats> {
     let total_kb = r2o_meminfo_field(text, "MemTotal")?;
-    let available_kb = r2o_meminfo_field(text, "MemAvailable")?;
+    let available_kb = r2o_meminfo_field(text, "MemAvailable")
+        .or_else(|| {
+            // Linux 3.4 не публикует MemAvailable. Учитываем лишь часть
+            // неактивного файлового кэша и освобождаемого slab.
+            let free = r2o_meminfo_field(text, "MemFree")?;
+            let file = r2o_meminfo_field(text, "Inactive(file)").unwrap_or(0);
+            let slab = r2o_meminfo_field(text, "SReclaimable").unwrap_or(0);
+            Some(free.saturating_add(file / 2).saturating_add(slab / 2))
+        })?
+        .min(total_kb);
     (total_kb > 0).then_some(R2oMemoryStats {
         available_kb,
         total_kb,
@@ -344,18 +353,11 @@ impl R2oAdaptiveLimit {
                 >= u128::from(stats.max) * u128::from(R2O_CONNTRACK_LIMIT_PERCENT)
         });
 
-        if self.nfqueue == NfqueuePressure::Full
-            || valid && (cpu_shrink || memory_short || conntrack_short)
-        {
+        if self.nfqueue == NfqueuePressure::Full || cpu_shrink || memory_short || conntrack_short {
             self.limit = (self.limit / 2).max(1);
             self.grow_pending = false;
         } else if !valid {
-            let fallback = R2O_DEFAULT_MEASUREMENT_LIMIT.min(self.max_slots);
-            self.limit = if self.nfqueue == NfqueuePressure::Busy {
-                self.limit.min(fallback)
-            } else {
-                fallback
-            };
+            self.limit = self.limit.min(R2O_DEFAULT_MEASUREMENT_LIMIT);
             self.grow_pending = false;
         } else {
             if !cpu_hold
@@ -373,19 +375,17 @@ impl R2oAdaptiveLimit {
         } else {
             R2O_MEASUREMENT_LIMIT_NFQUEUE
         };
-        if valid {
-            if cpu_shrink || cpu_hold {
-                limiter |= R2O_MEASUREMENT_LIMIT_CPU;
-            }
-            if memory_short {
-                limiter |= R2O_MEASUREMENT_LIMIT_MEMORY;
-            }
-            if conntrack_short {
-                limiter |= R2O_MEASUREMENT_LIMIT_CONNTRACK;
-            }
-            if limiter == 0 && self.limit >= self.max_slots {
-                limiter |= R2O_MEASUREMENT_LIMIT_SLOTS;
-            }
+        if cpu_shrink || cpu_hold {
+            limiter |= R2O_MEASUREMENT_LIMIT_CPU;
+        }
+        if memory_short {
+            limiter |= R2O_MEASUREMENT_LIMIT_MEMORY;
+        }
+        if conntrack_short {
+            limiter |= R2O_MEASUREMENT_LIMIT_CONNTRACK;
+        }
+        if valid && limiter == 0 && self.limit >= self.max_slots {
+            limiter |= R2O_MEASUREMENT_LIMIT_SLOTS;
         }
         if self.limit != previous_limit || limiter != previous_limiter {
             self.limit_since_ms = now_ms;
@@ -402,14 +402,16 @@ impl R2oAdaptiveLimit {
         self.logged_valid = valid;
         self.logged_limit = self.limit;
         self.logged_limiter = limiter;
+        let reason = r2o_limiter_text(limiter);
         if !valid {
             return Some(format!(
-                "замеров {active} из {} (нет данных о загрузке процессора и памяти — прежний предел)",
-                self.limit
+                "замеров {active} из {} (неполные данные о CPU или памяти{}{})",
+                self.limit,
+                if reason.is_empty() { "" } else { ", " },
+                reason,
             ));
         }
 
-        let reason = r2o_limiter_text(limiter);
         let memory = self.memory.expect("проверенная память");
         let conntrack = self
             .conntrack
@@ -1675,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn r2o_разбор_meminfo_требует_memavailable_и_ненулевой_memtotal() {
+    fn r2o_разбор_meminfo_использует_счётчики_старого_ядра_без_memavailable() {
         assert_eq!(
             r2o_parse_meminfo(
                 "MemTotal:         254000 kB\nMemFree: 10000 kB\nMemAvailable: 120000 kB\n"
@@ -1686,13 +1688,34 @@ mod tests {
             }),
         );
         assert_eq!(
-            r2o_parse_meminfo("MemTotal: 254000 kB\nMemFree: 10000 kB\n"),
-            None
+            r2o_parse_meminfo(
+                "MemTotal: 254000 kB\nMemFree: 10000 kB\nInactive(file): 40000 kB\nSReclaimable: 12000 kB\n"
+            ),
+            Some(R2oMemoryStats {
+                available_kb: 36000,
+                total_kb: 254000
+            })
         );
         assert_eq!(
             r2o_parse_meminfo("MemTotal: 0 kB\nMemAvailable: 1 kB\n"),
             None
         );
+    }
+
+    #[test]
+    fn r2o_aimd_снижает_предел_по_conntrack_при_недоступной_памяти() {
+        let mut limit = R2oAdaptiveLimit::new(8);
+        let reading = |count| R2oResourceReading {
+            cpu_cores: Vec::new(),
+            cpu: None,
+            memory: None,
+            conntrack: Some(R2oConntrackStats { count, max: 100 }),
+        };
+        limit.r2o_sample(1000, reading(95), 2, 1);
+        assert_eq!(limit.limit(), 1);
+        assert_eq!(limit.limiter, super::R2O_MEASUREMENT_LIMIT_CONNTRACK);
+        limit.r2o_sample(2000, reading(10), 1, 1);
+        assert_eq!(limit.limit(), 1);
     }
 
     #[test]
