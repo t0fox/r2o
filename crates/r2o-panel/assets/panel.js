@@ -3457,22 +3457,25 @@
     if (!root || !summary || !more || !extra) return;
     var configured = list(m && m.k.dns_services);
     var fresh = !this.failed && m && m.engine && m.linked && m.snap.live_fresh === true;
+    var source = m && m.k.dns_source_status;
     var now = this.serverNow();
     var rows = configured.filter(function (row) {
-      if (str(row.resolved_ip || row.host).indexOf(":") < 0) return true;
+      if (source !== "known" && source !== "activity_unknown" || row.scope !== "router") return false;
+      if (row.activity === "active") return true;
       var seen = parseTime(row.router_seen_at);
-      return row.state !== "no_route" && seen !== null && seen <= now && now - seen <= 10 * 60 * 1000;
+      return source === "known" && row.activity === "observed" &&
+        seen !== null && seen <= now && now - seen <= 3 * 60 * 1000;
     });
     var time = rows.map(function (row) {
       var checked = parseTime(row.checked_at);
       return { checked: checked, stale: !fresh || (checked && now - checked > 360000) };
     });
-    var key = JSON.stringify([rows, time, fresh]);
+    var key = JSON.stringify([rows, time, fresh, source, configured.length]);
     if (root.__r2oKey === key) return;
     root.__r2oKey = key;
-    var message = !fresh ? "Данные контроллера устарели или ещё недоступны."
-      : rows.length ? "Точки подключения: " + rows.length
-        : configured.length ? "Нет активных точек подключения."
+    var message = !fresh || source !== "known" ? "Данные об активности системного DNS недоступны."
+      : rows.length ? "Точки системного DNS роутера — " + rows.length
+        : configured.length ? "Есть настройки зашифрованного DNS. Активность не подтверждена."
         : "В поддерживаемых настройках роутера зашифрованные DNS-серверы не найдены.";
     if (summary.textContent !== message) summary.textContent = message;
     var doc = this.doc;
@@ -3486,7 +3489,7 @@
       dns_response: "Некорректный ответ"
     };
     var states = {
-      detected: ["Не проверен", ""],
+      detected: ["Замечен запрос", ""],
       checking: ["Проверка", "warn"],
       direct_ok: ["Доступен напрямую", "ok"],
       plan_applied: ["Подбор", "warn"],
@@ -3499,6 +3502,7 @@
     var items = rows.map(function (row, index) {
       var observed = time[index];
       var state = observed.stale ? ["Устарело", "warn"] : states[row.state] || states.detected;
+      if (!observed.stale && row.activity === "active") state = ["В работе · запросов не видно", ""];
       if (row.state === "recovered" && (row.dns_answer_confirmed !== true || row.dns_answer_via_plan !== true || row.plan_applied !== true || !row.applied_plan_id || !observed.checked)) {
         state = observed.stale ? state : states.checking;
       }

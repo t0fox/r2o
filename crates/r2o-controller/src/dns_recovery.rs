@@ -132,6 +132,7 @@ impl Request {
         let service = state.services.get(index)?;
         if live.state != DnsServiceState::Failed
             || live.consecutive_network_failures < 2
+            || live.router_seen_at.is_none()
             || service.verification_limitation().is_some()
         {
             return None;
@@ -195,6 +196,7 @@ impl Request {
         .ok()??;
         let live = state.live.get(index)?;
         (live.generation == self.generation
+            && live.router_seen_at.is_some()
             && live.ip.parse::<std::net::IpAddr>() == Ok(self.endpoint.ip()))
         .then_some(index)
     }
@@ -584,6 +586,7 @@ impl Recovery {
             }
             live.recovery_retry_at = Some(now + RETRY);
         }
+        state.publish_recovery_services();
         if let Some(binding) = binding {
             binding.remove(client);
         }
@@ -711,6 +714,7 @@ impl Recovery {
                 } else {
                     DnsRecoveryPhase::Discovery
                 });
+                state.publish_recovery_services();
             }
             self.attempt = Some(Attempt {
                 request,
@@ -1116,6 +1120,7 @@ mod tests {
                 ip: "192.0.2.2".into(),
                 generation: 1,
                 consecutive_network_failures: 2,
+                router_seen_at: Some(1000),
                 ..DnsServiceLive::default()
             }],
             tasks: Vec::new(),
@@ -1177,6 +1182,7 @@ mod tests {
         assert!(Request::from_failures(&state, 0, Some(6), None).is_none());
         finish_probe(&mut state, DnsHealthFailure::Network);
         assert!(Request::from_failures(&state, 0, Some(4), None).is_none());
+        state.live[0].router_seen_at = Some(1000);
         let request = Request::from_failures(&state, 0, Some(6), None).unwrap();
         assert_eq!(request.endpoint, "[2001:db8::5]:853".parse().unwrap());
         assert_eq!(request.target.host, "resolver.example");
@@ -1234,6 +1240,7 @@ mod tests {
                 ip: host,
                 generation,
                 consecutive_network_failures: 2,
+                router_seen_at: Some(1000),
                 ..Default::default()
             });
         }

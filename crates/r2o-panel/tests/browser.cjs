@@ -162,12 +162,15 @@ async function main() {
     catalog_at: new Date().toISOString(),
     boxes: [],
     groups: [],
+    dns_source_status: "known",
     dns_services: [
       { protocol: "dot", host: "dns.example", port: 853, resolved_ip: "192.0.2.8", state: "direct_ok", checked_at: new Date().toISOString(), answer_rtt_ms: 17, status_reason: "DoT: получен корректный DNS-ответ" },
       { protocol: "doq", host: "quic-with-a-long-resolver-name.example", port: 853, resolved_ip: "2001:db8::9", router_seen_at: new Date(Date.now() - 1000).toISOString(), state: "plan_applied", plan_applied: true, applied_plan_id: "8d3c8fc1b32c52c2013cb04f82891245", dns_answer_via_plan: false, status_reason: "DNS-ответ через план ещё проверяется" },
       { protocol: "doh", host: "old.example", port: 443, path: "/dns-query", state: "direct_ok", checked_at: new Date(Date.now() - 720000).toISOString() },
       { protocol: "doh", host: "refused.example", port: 443, path: "/dns-query", state: "failed", failure: "server", checked_at: new Date().toISOString(), status_reason: "HTTP 403: сервер отклонил запрос" },
-    ],
+    ].map(row => ({
+      scope: "router", activity: "observed", router_seen_at: new Date().toISOString(), ...row,
+    })),
     searches: [{
       target: "blocked.example",
       family: 4,
@@ -495,7 +498,7 @@ esac
     status_reason: "У роутера нет маршрута к этому адресу.",
   };
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#dns-protection-more').hidden"), "IPv6 без маршрута не показывается");
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip')?.textContent === 'Нет маршрута'"), "Наблюдаемый IPv6 без маршрута показан с точным состоянием");
   liveState.dns_services[3] = { ...ipv6Resolver, router_seen_at: undefined };
   liveState.dns_services[0].answer_rtt_ms = 18;
   fs.writeFileSync(livePath, JSON.stringify(liveState));

@@ -173,8 +173,10 @@ pub struct DnsServiceLive {
     pub next_check_ms: i64,
     pub plan_applied_at: Option<i64>,
     pub reason: String,
-    /// Стенные секунды последнего DNS-потока с адреса роутера.
+    /// Стенные секунды последнего подтверждённого обращения DNS-службы.
     pub router_seen_at: Option<i64>,
+    pub upstream_active: bool,
+    pub activity_tracked: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -216,6 +218,8 @@ impl Default for DnsServiceLive {
             plan_applied_at: None,
             reason: String::new(),
             router_seen_at: None,
+            upstream_active: false,
+            activity_tracked: false,
         }
     }
 }
@@ -874,7 +878,17 @@ fn r2o_live_dns_services(
             if let Some(profile_id) = &state.profile_id {
                 row["profile_id"] = json!(profile_id);
             }
-            if family == 6 && state.router_seen_at.is_some() {
+            if state.activity_tracked {
+                row["scope"] = json!("router");
+                row["activity"] = json!(if state.router_seen_at.is_some() {
+                    "observed"
+                } else if state.upstream_active {
+                    "active"
+                } else {
+                    "configured"
+                });
+            }
+            if (family == 6 || state.activity_tracked) && state.router_seen_at.is_some() {
                 row["router_seen_at"] = r2o_live_optional_time(state.router_seen_at);
             }
             if let Some(elapsed) = state.check_elapsed_ms {

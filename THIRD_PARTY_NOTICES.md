@@ -1,5 +1,15 @@
 # Сведения о стороннем коде
 
+## D2K
+
+В Rust-контроллере адаптированы `journal_snapshot`, `journal_text_snapshot`,
+`dns_journal_parse` и `journal_instance_domain` из коммитов
+[`741e036a90f4`](https://github.com/necronicle/d2k/commit/741e036a90f4c428fcec116ae62e4aa4de469299)
+и [`044ea4ef6935`](https://github.com/necronicle/d2k/commit/044ea4ef69356d70cf48bacc85dcda23bb1c6177).
+R2O использует имеющийся JSON-парсер, сверяет запущенный экземпляр procd и
+полный upstream, а курсор пропускает историю после смены конфигурации.
+[MIT, Copyright (c) 2026 Necronicle](docs/licenses/d2k.txt).
+
 ## Telegram MTProto/WSS-прокси
 
 - Источник: [`t0fox/z2kOW`](https://github.com/t0fox/z2kOW), каталог

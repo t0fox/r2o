@@ -1205,6 +1205,14 @@ fn merge_live_snapshot(primary: &mut Value, extra: &Value) {
 }
 
 fn merge_live_dns(primary: &mut Value, extra: &Value) {
+    let primary_dns_known = primary["dns_source_status"].as_str();
+    let checked_sources = primary_dns_known.is_some();
+    if checked_sources
+        && (primary_dns_known != Some("known")
+            || extra["dns_source_status"].as_str() != Some("known"))
+    {
+        return;
+    }
     let Some(extra_rows) = extra.get("dns_services").and_then(Value::as_array) else {
         return;
     };
@@ -1232,9 +1240,15 @@ fn merge_live_dns(primary: &mut Value, extra: &Value) {
                 && previous["resolved_ip"]
                     .as_str()
                     .is_none_or(|ip| ip.is_empty() || ip == address)
+                && (!checked_sources || previous["activity"] != "configured")
         }) {
             *previous = row.clone();
-        } else {
+        } else if !checked_sources
+            || rows.iter().any(|current| {
+                current["profile_id"].as_str() == Some(profile)
+                    && current["activity"] != "configured"
+            })
+        {
             rows.push(row.clone());
         }
     }
