@@ -637,6 +637,76 @@ pub(super) fn ppe_installed(version: u8) -> Result<bool> {
     }))
 }
 
+pub(super) fn diagnostic_counters(platform: &Platform, version: u8) -> serde_json::Value {
+    use serde_json::json;
+    let listing = match command(
+        &format!("{}-save", tool(version)),
+        &["-c", "-t", "mangle"],
+        None,
+    ) {
+        Ok(listing) => listing,
+        Err(error) => return json!({"error": super::limit_health_error(&error.to_string())}),
+    };
+    let [out_hook, in_hook, queue, ppe] = summarize_counters(&listing);
+    let pair = |(rules, packets)| json!({"rules": rules, "packets": packets});
+    json!({
+        "out_hook": pair(out_hook), "in_hook": pair(in_hook),
+        "nfqueue": pair(queue), "ppe": pair(ppe),
+        "ppe_target_available": ppe_target(platform, version).is_some(),
+    })
+}
+
+fn summarize_counters(listing: &str) -> [(u64, u64); 4] {
+    let mut counts = [(0u64, 0u64); 4];
+    for line in listing.lines() {
+        let Some((counters, rule)) = line.split_once("] -A ") else {
+            continue;
+        };
+        let Some(packets) = counters
+            .strip_prefix('[')
+            .and_then(|s| s.split_once(':'))
+            .and_then(|(packets, _)| packets.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let Some((chain, rule)) = rule.split_once(' ') else {
+            continue;
+        };
+        let slot = if chain == "POSTROUTING" && rule.ends_with("-j R2O_OUT") {
+            0
+        } else if chain == "FORWARD" && rule.ends_with("-j R2O_IN") {
+            1
+        } else if chain.starts_with("R2O_")
+            && (rule.starts_with("-j NFQUEUE ") || rule.contains(" -j NFQUEUE "))
+        {
+            2
+        } else if rule.contains("--comment \"r2o-ppe\" ") || rule.contains("--comment r2o-ppe ") {
+            3
+        } else {
+            continue;
+        };
+        counts[slot].0 += 1;
+        counts[slot].1 = counts[slot].1.saturating_add(packets);
+    }
+    counts
+}
+
+#[cfg(test)]
+#[test]
+fn diagnostic_counters_count_owned_hooks_and_queue_rules() {
+    let listing = "\
+[20:400] -A POSTROUTING -j R2O_OUT\n\
+[30:600] -A FORWARD -j R2O_IN\n\
+[17:340] -A PREROUTING -m comment --comment \"r2o-ppe\" -j PPE\n\
+[11:220] -A R2O_IN -j NFQUEUE --queue-num 2000\n\
+[3:60] -A R2O_OUT -j NFQUEUE --queue-num 2000\n\
+[2:40] -A FORWARD -j NFQUEUE --queue-num 3000\n";
+    assert_eq!(
+        summarize_counters(listing),
+        [(1, 20), (1, 30), (2, 14), (1, 17)]
+    );
+}
+
 pub(super) fn install(
     platform: &Platform,
     ipv6: bool,

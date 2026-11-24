@@ -72,6 +72,25 @@ pub const EVENT_META_DNS_NAME: u16 = 0x0021;
 pub const EVENT_HTTP_EARLY_END: u16 = 0x0022;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
+
+/// Сигналы, по которым контроллер рассматривает сетевой сбой для Discovery.
+pub fn is_discovery_signal(kind: u16) -> bool {
+    matches!(
+        kind,
+        EVENT_R2O_TCP_SILENT
+            | EVENT_R2O_TCP_STALL
+            | EVENT_R2O_TCP_FIN_RETRY
+            | EVENT_R2O_TCP_RST_AFTER_APP
+            | EVENT_R2O_TCP_EARLY_RST
+            | EVENT_R2O_TCP_REPEAT
+            | EVENT_R2O_TCP_RST_CUT
+            | EVENT_R2O_QUIC_SUSPECT
+            | EVENT_R2O_QUIC_STALL
+            | EVENT_R2O_VOICE_SUSPECT
+            | EVENT_R2O_STUN_SUSPECT
+            | EVENT_LEGACY_SUSPECT
+    )
+}
 pub const COMMAND_SET_NAME: u16 = 0x0081;
 pub const COMMAND_SET_ADDR: u16 = 0x0082;
 pub const COMMAND_DEL_NAME: u16 = 0x0083;

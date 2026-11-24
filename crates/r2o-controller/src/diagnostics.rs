@@ -7,7 +7,7 @@ use std::ffi::{c_int, c_long};
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -616,6 +616,7 @@ pub struct Counts {
     pub workers_started: u64,
     pub workers_joined: u64,
     pub worker_start_failures: u64,
+    pub discovery_signals_received: u64,
     pub worker_join_failures: u64,
     pub worker_oldest_type: &'static str,
 }
@@ -623,6 +624,7 @@ pub struct Counts {
 pub struct Recorder {
     dir: PathBuf,
     run_dir: PathBuf,
+    health_dir: PathBuf,
     proc_dir: PathBuf,
     enabled: bool,
     session: Option<(u64, u64, SystemTime)>,
@@ -656,6 +658,8 @@ impl Recorder {
     pub fn new(dir: PathBuf, run_dir: PathBuf) -> Self {
         Self {
             dir,
+            health_dir: std::env::var_os("R2O_RUNTIME_DIR")
+                .map_or_else(|| run_dir.clone(), PathBuf::from),
             run_dir,
             proc_dir: PathBuf::from("/proc"),
             enabled: false,
@@ -1007,13 +1011,28 @@ impl Recorder {
                 .as_millis()
                 .min(u64::MAX as u128) as u64
         });
+        let datapath = [4, 6].map(|family| {
+            let name = format!("datapath-health.{family}.json");
+            let (age, value) = runtime_health(&self.health_dir.join(name));
+            let fresh = age.is_some_and(|age| age <= 20);
+            (family, age, value, fresh)
+        });
+        let datapath_flows = datapath
+            .iter()
+            .filter(|(_, _, _, fresh)| *fresh)
+            .filter_map(|(_, _, value, _)| value["flows"].as_u64())
+            .reduce(u64::saturating_add);
         let sample = json!({
             "at": at,
             "mono_ms": mono_ms,
             "mem_total_kib": meminfo(&self.proc_dir, "MemTotal:"),
             "mem_available_kib": meminfo(&self.proc_dir, "MemAvailable:"),
             "system_conntrack": conntrack_count,
-            "datapath_flows": null,
+            "datapath_flows": datapath_flows,
+            "datapath_packets_v4_v6": datapath.each_ref().map(|(_, _, value, fresh)| {
+                fresh.then(|| value["nfqueue"]["packets"].as_u64()).flatten()
+            }),
+            "primary_controller_discovery_signals_received": counts.discovery_signals_received,
             "http_records": counts.http_records,
             "http_queued": counts.http_queued,
             "boxes": counts.boxes,
@@ -1096,6 +1115,16 @@ impl Recorder {
         let memory_time_base = memory_base
             .map(|(base_at, base_mono)| json!([base_at, base_mono]))
             .unwrap_or_else(|| json!([null, null]));
+        let (worker_age, worker_state) =
+            runtime_health(&self.health_dir.join("platform-health.json"));
+        let (start_age, start_state) =
+            runtime_health(&self.health_dir.join("platform-start-health.json"));
+        let (firewall_age, firewall_state) =
+            if worker_age.is_some_and(|worker| start_age.is_none_or(|start| worker <= start)) {
+                (worker_age, worker_state)
+            } else {
+                (start_age, start_state)
+            };
         let report = json!({
             "schema": 1,
             "enabled": true,
@@ -1122,6 +1151,17 @@ impl Recorder {
             "madvise": madvise_json(&self.madvise),
             "anomalies_overwritten": self.anomaly_total.saturating_sub(self.anomalies.len() as u64),
             "diagnostic_write_failures": self.write_failures,
+            "observation_pipeline": {
+                "families": datapath.map(|(family, age, value, fresh)| json!({
+                    "family": family, "sample_age_s": age, "fresh": fresh, "datapath": value,
+                })),
+                "kernel_nfqueue": kernel_nfqueue(&self.proc_dir),
+                "firewall": {
+                    "active_marker": self.run_dir.join("platform.active").is_file(),
+                    "sample_age_s": firewall_age,
+                    "state": firewall_state,
+                },
+            },
             "anomalies": self.anomalies,
             "events": self.events,
             "limit_transitions": self.limits,
@@ -1428,6 +1468,44 @@ fn lock_diagnostics_dir(dir: &Path) -> std::io::Result<File> {
     let file = File::open(dir)?;
     file.lock()?;
     Ok(file)
+}
+
+fn runtime_health(path: &Path) -> (Option<u64>, Value) {
+    const MAX_BYTES: u64 = 12 * 1024;
+    let result = (|| {
+        let file = File::open(path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_BYTES {
+            return None;
+        }
+        let age = metadata.modified().ok()?.elapsed().ok()?.as_secs();
+        let mut contents = Vec::new();
+        file.take(MAX_BYTES + 1).read_to_end(&mut contents).ok()?;
+        let value: Value = serde_json::from_slice(&contents).ok()?;
+        (value.is_object() && contents.len() as u64 <= MAX_BYTES).then_some((Some(age), value))
+    })();
+    result.unwrap_or((None, Value::Null))
+}
+
+fn kernel_nfqueue(proc_dir: &Path) -> Value {
+    let input = proc_dir.join("net/netfilter/nfnetlink_queue");
+    let Ok(text) = fs::read_to_string(input) else {
+        return Value::Null;
+    };
+    let queues: Vec<_> = text
+        .lines()
+        .take(32)
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().take(8).map(|s| s.parse::<u64>());
+            Some(json!({
+                "queue": fields.next()?.ok()?, "peer": fields.next()?.ok()?,
+                "depth": fields.next()?.ok()?, "copy_mode": fields.next()?.ok()?,
+                "copy_range": fields.next()?.ok()?, "kernel_drops": fields.next()?.ok()?,
+                "userspace_drops": fields.next()?.ok()?, "sequence": fields.next()?.ok()?,
+            }))
+        })
+        .collect();
+    json!(queues)
 }
 
 fn diagnostics_session(dir: &Path) -> Option<(u64, u64, SystemTime)> {

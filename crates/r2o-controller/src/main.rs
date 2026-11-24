@@ -25930,6 +25930,7 @@ impl ControlClient {
         }
         let mut r2o_scheduler_tick_pending = false;
         let mut r2o_quic_command_first = false;
+        let mut discovery_signals_received = 0u64;
         let mut catalog_area_sequence = 0;
         let mut installed_areas = Vec::new();
         let mut stall_budgets_sent = Vec::new();
@@ -26257,6 +26258,7 @@ impl ControlClient {
                             workers_started,
                             workers_joined,
                             worker_start_failures,
+                            discovery_signals_received,
                             worker_join_failures,
                             worker_oldest_type,
                             ..r2o_controller::diagnostics::Counts::default()
@@ -27793,6 +27795,9 @@ impl ControlClient {
                 };
                 if let Some((worker, _, _, _)) = discovery.as_ref() {
                     worker.note_datapath_event(frame.kind);
+                }
+                if control::is_discovery_signal(frame.kind) {
+                    discovery_signals_received = discovery_signals_received.saturating_add(1);
                 }
                 if frame.kind == EVENT_PROTOCOL {
                     self.r2o_update_send_cap(&frame)?;

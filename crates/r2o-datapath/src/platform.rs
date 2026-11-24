@@ -70,6 +70,10 @@ fn atomic(path: &Path, contents: &str) -> Result<()> {
     fs::rename(temp, path)
 }
 
+pub fn write_health(path: &Path, health: &serde_json::Value) -> Result<()> {
+    atomic(path, &health.to_string())
+}
+
 fn value(name: &str, default: &str) -> String {
     env::var(name)
         .ok()
@@ -634,6 +638,49 @@ impl Platform {
         Ok(())
     }
 
+    fn reconcile_reported(&self, start: bool, refresh_dns: bool) -> Result<()> {
+        use serde_json::json;
+        let result = self.reconcile(start, refresh_dns);
+        let active = self.run.join(ACTIVE).is_file();
+        let state = env::var_os("R2O_META_STATE_DIR")
+            .map(PathBuf::from)
+            .map(|path| path.join("diagnostics"));
+        if (start || active)
+            && state
+                .is_some_and(|dir| dir.join("enabled").is_file() && !dir.join("paused").is_file())
+        {
+            let sample = self.accounting_sample().ok().map(|(with, without, bounded)| {
+                json!({"with_counters": with, "without_full_counters": without, "bounded": bounded})
+            });
+            let firewall = json!({
+                "platform": match self.kind { Kind::Keenetic => "keenetic", Kind::OpenWrt => "openwrt", Kind::Linux => "linux" },
+                "backend": match self.backend { Backend::Iptables => "iptables", Backend::Nft => "nft" },
+                "active": active,
+                "verified": active && result.is_ok(),
+                "adapter_error": result.as_ref().err().map(|error| limit_health_error(&error.to_string())),
+                "offload_error": optional(&self.run.join("platform.offload-error")).ok().flatten().map(|s| limit_health_error(&s)),
+                "dns_adapter_error": optional(&self.run.join("platform.dns-excl-degraded")).ok().flatten().map(|s| limit_health_error(&s)),
+                "fastnat": optional(&self.proc.join("sys/net/netfilter/nf_conntrack_fastnat")).ok().flatten().and_then(|s| s.trim().parse::<u32>().ok()),
+                "rules": (self.backend == Backend::Iptables).then(|| {
+                    let evidence = |family| iptables::diagnostic_counters(self, family);
+                    json!({"ipv4": evidence(4), "ipv6": self.ipv6.then(|| evidence(6))})
+                }),
+                "conntrack_accounting": self.accounting(false).is_ok(),
+                "conntrack_entries": sample,
+            });
+            let name = if start {
+                "platform-start-health.json"
+            } else {
+                "platform-health.json"
+            };
+            let dir = path("R2O_RUNTIME_DIR", &self.run);
+            if let Err(error) = write_health(&dir.join(name), &firewall) {
+                eprintln!("r2o-platform: запись снимка диагностики: {error}");
+            }
+        }
+        result
+    }
+
     fn down(&self) -> Result<()> {
         let _lock = self.lock()?;
         remove(&self.run.join(ACTIVE))?;
@@ -748,6 +795,10 @@ impl Platform {
         }
         Ok(())
     }
+}
+
+fn limit_health_error(error: &str) -> String {
+    error.trim().chars().take(256).collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -931,7 +982,7 @@ pub fn cli(args: &[String]) -> Result<()> {
             }
             println!("{}", u8::from(platform.use_ipv6()));
         }
-        Some("up") => platform.reconcile(true, true)?,
+        Some("up") => platform.reconcile_reported(true, true)?,
         Some("down") => platform.down()?,
         Some("event" | "dns-ensure" | "flowoffload-ensure") => {
             let socket = UnixDatagram::unbound()?;
@@ -1130,7 +1181,7 @@ fn run_worker(platform: &Platform, listener: &UnixDatagram) {
             }
         }
         let current = platform
-            .reconcile(false, true)
+            .reconcile_reported(false, true)
             .err()
             .map(|err| err.to_string());
         attempt = if current.is_some() {

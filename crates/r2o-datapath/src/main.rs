@@ -1822,6 +1822,25 @@ mod app {
         let mut nfq_health_age = NfqLatency::new();
         let mut nfq_processing = NfqLatency::new();
         let mut next_ctl_stats = Instant::now() + Duration::from_secs(1);
+        let diagnostics = std::env::var_os("R2O_META_STATE_DIR")
+            .zip(std::env::var_os("R2O_RUNTIME_DIR").or_else(|| std::env::var_os("R2O_RUN_DIR")))
+            .map(|(state, run)| {
+                (
+                    std::path::PathBuf::from(state).join("diagnostics"),
+                    std::path::PathBuf::from(run).join(format!(
+                        "datapath-health.{}.json",
+                        if route_family == R2oRouteFamily::Ipv4 {
+                            4
+                        } else {
+                            6
+                        },
+                    )),
+                )
+            });
+        let mut next_diagnostics = Instant::now();
+        let mut diagnostic_write_failed = false;
+        let mut rpdb_packets_skipped = 0u64;
+        let mut route_scope_packets_skipped = 0u64;
         let nfq_health_enabled =
             control.is_some() && options.control_wire == r2k_core::control::WireProfile::V48;
         let nfq_owner = if nfq_health_enabled {
@@ -1967,6 +1986,47 @@ mod app {
             }
             name_plans.r2o_set_send_maxlen(raw.as_ref().map_or(send_maxlen, RawSocket::maxlen));
             let now = Instant::now();
+            if let Some((dir, output)) = &diagnostics
+                && now >= next_diagnostics
+            {
+                next_diagnostics = now + Duration::from_secs(5);
+                if dir.join("enabled").is_file() && !dir.join("paused").is_file() {
+                    let stats = socket.stats();
+                    let health = serde_json::json!({
+                        "pid": std::process::id(),
+                        "queue": queue,
+                        "flows": tcp_sessions.len() + udp_sessions.stats().flows,
+                        "tcp_flows": tcp_sessions.len(),
+                        "udp_flows": udp_sessions.stats().flows,
+                        "journal_entries": flow_journal.count(),
+                        "conntrack_netlink_up": ct_up,
+                        "nfqueue": {
+                            "packets": stats.packets, "bytes": stats.bytes,
+                            "accepted": stats.accepted, "dropped": stats.dropped,
+                            "no_payload": stats.no_payload, "no_header": stats.no_header,
+                            "truncated": stats.truncated, "receive_errors": stats.receive_errors,
+                            "verdict_failures": stats.verdict_failures,
+                        },
+                        "control": control.as_ref().map(|control| serde_json::json!({
+                            "connected": control.is_connected(),
+                            "sent_frames": control.sent_events(),
+                            "dropped_frames": control.dropped_events(),
+                            "pending_output": control.r2o_has_pending_output(),
+                            "discovery_events": control.discovery_events(),
+                        })),
+                        "rpdb_packets_skipped": rpdb_packets_skipped,
+                        "route_scope_packets_skipped": route_scope_packets_skipped,
+                        "process_packet_skip_reasons": r2o_datapath::reason_stats::reason_snapshot(),
+                    });
+                    let result = r2o_datapath::platform::write_health(output, &health);
+                    if let Err(error) = &result
+                        && !diagnostic_write_failed
+                    {
+                        eprintln!("r2o-datapath: запись снимка диагностики: {error}");
+                    }
+                    diagnostic_write_failed = result.is_err();
+                }
+            }
             if let Some(control) = control.as_mut()
                 && now >= next_ctl_stats
             {
@@ -2534,6 +2594,7 @@ mod app {
                             measure_mark,
                         )
                     {
+                        rpdb_packets_skipped = rpdb_packets_skipped.saturating_add(1);
                         if !route_context_reported {
                             eprintln!(
                                 "r2o-datapath: {family_name} RPDB допускает разные пути LAN, зонда и raw; поток передан ядру"
@@ -2585,6 +2646,7 @@ mod app {
                         options.mark,
                         now,
                     ) {
+                        route_scope_packets_skipped = route_scope_packets_skipped.saturating_add(1);
                         send_verdicts(
                             &mut socket,
                             std::slice::from_ref(&packet_id),

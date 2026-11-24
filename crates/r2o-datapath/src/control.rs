@@ -3420,6 +3420,7 @@ pub struct ControlServer {
     dropped_events: u64,
     /// C `d2k_ctl.sent`: кадры, целиком поставленные в кольцо.
     sent_events: u64,
+    discovery_events: u64,
     /// C `disconnect_hook`: вызывается при разрыве живого пира.
     disconnect_hook: Option<Box<dyn FnMut() + Send>>,
     // D2O хранит снимки нескольких целей. Один последний снимок на семейство
@@ -3642,6 +3643,7 @@ impl ControlServer {
             output_bytes: 0,
             dropped_events: 0,
             sent_events: 0,
+            discovery_events: 0,
             disconnect_hook: None,
             last_client_shapes: VecDeque::new(),
             armed_shapes: [None, None, None, None],
@@ -3726,6 +3728,7 @@ impl ControlServer {
     }
 
     pub fn send_event(&mut self, kind: u16, body: &[u8]) -> io::Result<()> {
+        self.note_discovery_event(kind);
         if self.peer.is_none() {
             self.dropped_events = self.dropped_events.saturating_add(1);
             return Ok(());
@@ -3746,6 +3749,7 @@ impl ControlServer {
 
     /// Queue an event only when it can be retained for the connected controller.
     pub fn try_send_event(&mut self, kind: u16, body: &[u8]) -> io::Result<bool> {
+        self.note_discovery_event(kind);
         if self.peer.is_none() {
             self.dropped_events = self.dropped_events.saturating_add(1);
             return Ok(false);
@@ -3803,6 +3807,16 @@ impl ControlServer {
 
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events
+    }
+
+    fn note_discovery_event(&mut self, kind: u16) {
+        if control::is_discovery_signal(kind) {
+            self.discovery_events = self.discovery_events.saturating_add(1);
+        }
+    }
+
+    pub fn discovery_events(&self) -> u64 {
+        self.discovery_events
     }
 
     /// C `d2k_ctl_sent` (`datapath/ctl.c:316`).
