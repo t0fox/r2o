@@ -1698,10 +1698,10 @@ mod app {
             .name("r2o-rtnetlink".into())
             .spawn(move || {
                 let mut monitor = R2oRouteMonitor::default();
-                while let Ok(()) = route_refresh_requests.recv() {
+                while let Ok(generation) = route_refresh_requests.recv() {
                     let (_, status) = monitor.r2o_refresh_with_status(&mut worker_gate);
                     if send_route_snapshot
-                        .send((worker_gate.clone(), status))
+                        .send((generation, worker_gate.clone(), status))
                         .is_err()
                     {
                         break;
@@ -1836,6 +1836,7 @@ mod app {
         let mut last_route_refresh = Instant::now();
         let mut next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
         let mut route_refresh_pending = false;
+        let mut route_generation = 0u64;
         install_signal_handlers()?;
         loop {
             if let Some(path) = options.health_path.as_deref() {
@@ -2256,6 +2257,7 @@ mod app {
                             raw.r2o_invalidate_route_mtu();
                         }
                         if changes.policy {
+                            route_generation = route_generation.wrapping_add(1);
                             route_gate.r2o_invalidate_policy();
                             route_context_reported = false;
                             if let Some(worker) = &platform_worker {
@@ -2274,7 +2276,7 @@ mod app {
             }
             let route_now = Instant::now();
             if !route_refresh_pending && route_now >= next_route_refresh {
-                route_refresh_pending = request_route_refresh.send(()).is_ok();
+                route_refresh_pending = request_route_refresh.send(route_generation).is_ok();
                 last_route_refresh = route_now;
                 next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
                 if !route_refresh_pending {
@@ -2282,7 +2284,11 @@ mod app {
                 }
             }
             let route_snapshot = match route_snapshots.try_recv() {
-                Ok(snapshot) => Some(snapshot),
+                Ok((generation, snapshot, status)) => {
+                    route_refresh_pending = false;
+                    // A dump begun before invalidation cannot authorize a packet.
+                    (generation == route_generation).then_some((snapshot, status))
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     route_refresh_pending = false;
@@ -2291,7 +2297,6 @@ mod app {
             };
             if let Some((snapshot, route_status)) = route_snapshot {
                 route_gate = snapshot;
-                route_refresh_pending = false;
                 if route_status.changed
                     && let Some(raw) = &raw
                 {
