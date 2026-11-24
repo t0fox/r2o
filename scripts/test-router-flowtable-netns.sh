@@ -101,6 +101,20 @@ for _ in $(seq 1 40); do
 done
 if ! platform up; then cat "$TEMP"/datapath*.log >&2; exit 1; fi
 platform status
+# Отдельный канал снимков обслуживается через тот же poll, даже без пакетов.
+python3 - "$TEMP/control4.snapshot" <<'PY'
+import socket
+import sys
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.settimeout(2)
+    sock.connect(sys.argv[1])
+    prefix = sock.recv(4, socket.MSG_WAITALL)
+    assert len(prefix) == 4
+    size = int.from_bytes(prefix, "big")
+    assert 2 <= size <= 4096, (prefix.hex(), size)
+    assert len(sock.recv(size, socket.MSG_WAITALL)) == size
+PY
 cat >"$TEMP/traffic.py" <<'PY'
 import pathlib
 import socket

@@ -3792,6 +3792,10 @@ impl ControlServer {
         self.peer.is_some()
     }
 
+    pub fn r2o_has_pending_output(&self) -> bool {
+        !self.output.is_empty()
+    }
+
     /// C `d2k_ctl_set_disconnect_hook`: повесить обработчик разрыва.
     pub fn set_disconnect_hook(&mut self, hook: impl FnMut() + Send + 'static) {
         self.disconnect_hook = Some(Box::new(hook));

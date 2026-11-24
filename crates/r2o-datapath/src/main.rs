@@ -1767,8 +1767,8 @@ mod app {
 
         let packet_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_PACKET as u16;
         let mut batch = vec![0; RECEIVE_CAPACITY];
-        let mut borrowed = Vec::with_capacity(3);
-        let mut extra_revents = [0; 3];
+        let mut borrowed = Vec::with_capacity(5);
+        let mut extra_revents = [0; 5];
         let observe_plan = Plan::default();
         // C `s->plan == NULL`: в observe без явного --plan и в controller-only
         // общего плана нет.
@@ -2132,8 +2132,7 @@ mod app {
                         .min(200) as i32
                 })
                 .min(stats_timeout);
-            // C `d2kd.c:1523-1536`: один poll на NFQUEUE, route-watch и
-            // control listen/peer. Набор — только реально открытые fd.
+            // Один poll на NFQUEUE, route-watch и оба управляющих сокета.
             borrowed.clear();
             let mut register = |fd| {
                 let index = borrowed.len();
@@ -2145,6 +2144,14 @@ mod app {
                 .as_ref()
                 .map(|control| register(control.listen_fd()));
             let control_peer_index = control
+                .as_ref()
+                .map(ControlServer::peer_fd)
+                .filter(|fd| *fd >= 0)
+                .map(&mut register);
+            let snapshot_listen_index = r2o_snapshot_control
+                .as_ref()
+                .map(|control| register(control.listen_fd()));
+            let snapshot_peer_index = r2o_snapshot_control
                 .as_ref()
                 .map(ControlServer::peer_fd)
                 .filter(|fd| *fd >= 0)
@@ -2380,7 +2387,11 @@ mod app {
                 &mut flow_journal,
                 &journal_origin,
             );
-            if let Some(r2o_snapshot_control) = r2o_snapshot_control.as_mut() {
+            if let Some(r2o_snapshot_control) = r2o_snapshot_control.as_mut()
+                && (r2o_poll_extra_ready(&extra_revents, snapshot_listen_index)
+                    || r2o_poll_extra_ready(&extra_revents, snapshot_peer_index)
+                    || r2o_snapshot_control.r2o_has_pending_output())
+            {
                 let _ = r2o_snapshot_control.poll()?;
             }
             let release_now = Instant::now();
