@@ -8,7 +8,12 @@ DURATION=${1:-600}
 REPORT=${2:-/tmp/r2o-soak.log}
 SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-30}
 exec >"$REPORT" 2>&1
-trap 'status=$?; [ "$status" -eq 0 ] || echo "SOAK_FAIL status=$status"' EXIT
+report_exit() {
+    if [ "$1" -ne 0 ]; then
+        printf 'SOAK_FAIL status=%s\n' "$1"
+    fi
+}
+trap 'report_exit "$?"' EXIT
 
 uptime_sec() {
     IFS='. ' read -r seconds rest </proc/uptime

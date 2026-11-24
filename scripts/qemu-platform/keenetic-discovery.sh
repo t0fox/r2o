@@ -25,11 +25,13 @@ root=/tmp/r2o-keenetic-tls.$$
 mkdir -p "$root/run" /var/run/netns
 chmod 700 "$root"
 export R2O_DIR=$root R2O_RUN_DIR=$root/run R2O_PLATFORM=keenetic FW_BACKEND=iptables QUEUE_NUM=52692
-export IPV6_ENABLED=0 PORTS=443 R2O_PLATFORM_RUNTIME=1 R2O_SOFTWARE_PATH_ENDPOINTS= DNS_DISCOVERY_ENDPOINTS=
+export IPV6_ENABLED=0 PORTS=443 R2O_PLATFORM_RUNTIME=1 R2O_SOFTWARE_PATH_ENDPOINTS='' DNS_DISCOVERY_ENDPOINTS=''
 dp=$LAB/bundle/builds/r2o-datapath-linux-mipsel
 controller=${dp%/*}/r2o-controller-linux-mipsel
 [ -x "$dp" ] && [ -x "$controller" ]
-server= daemon= watcher=
+server=''
+daemon=''
+watcher=''
 cleanup() {
     for pid in "$watcher" "$daemon" "$server"; do
         [ -z "$pid" ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
@@ -113,16 +115,15 @@ stop() {
     kill "$watcher" "$daemon"
     wait "$watcher" || true
     wait "$daemon" || true
-    watcher= daemon=
+    watcher=''
+    daemon=''
 }
 uptime_s() { cut -d. -f1 /proc/uptime; }
 launch
 if [ -r "$LAB/tls/measure-discovery.sh" ]; then
     . "$LAB/tls/measure-discovery.sh"
-    measure_root=$root
-    measure_log=$root/controller.log
-    measure_discovery cold a.example.com 198.51.100.2 || { tail -60 controller.log datapath.log; exit 1; }
-    measure_discovery warm b.example.net 198.51.100.6 || { tail -60 controller.log datapath.log; exit 1; }
+    measure_discovery cold a.example.com 198.51.100.2 "$root" "$root/controller.log" "$watcher" "$daemon" || { tail -60 controller.log datapath.log; exit 1; }
+    measure_discovery warm b.example.net 198.51.100.6 "$root" "$root/controller.log" "$watcher" "$daemon" || { tail -60 controller.log datapath.log; exit 1; }
     echo KEENETIC_DISCOVERY_MEASURE_PASS
     stop
     exit 0

@@ -164,12 +164,11 @@ if [ -n "$discovery" ]; then
   sleep 1
   if [ -n "$measure" ]; then
     source "$measure"
-    measure_root=$lab
     measure_log=$lab/controller.log
     request() { client "$@"; }
     application() { verified "$@"; }
-    measure_discovery cold a.example.com 198.51.100.2 || { tail -60 "$measure_log" "$lab/datapath.log"; exit 1; }
-    measure_discovery warm b.example.net 198.51.100.6 || { tail -60 "$measure_log" "$lab/datapath.log"; exit 1; }
+    measure_discovery cold a.example.com 198.51.100.2 "$lab" "$measure_log" "$watcher" "$daemon" || { tail -60 "$measure_log" "$lab/datapath.log"; exit 1; }
+    measure_discovery warm b.example.net 198.51.100.6 "$lab" "$measure_log" "$watcher" "$daemon" || { tail -60 "$measure_log" "$lab/datapath.log"; exit 1; }
     "$dp" --platform down
     exit 0
   fi

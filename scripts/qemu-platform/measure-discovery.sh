@@ -1,5 +1,6 @@
 #!/bin/sh
 # Вызывать в TLS-стенде с уже запущенными datapath и controller.
+# Аргументы: case host address state-dir controller-log controller-pid datapath-pid.
 
 discovery_clock_cs() {
     IFS=' ' read -r timestamp rest </proc/uptime
@@ -8,18 +9,22 @@ discovery_clock_cs() {
 }
 
 discovery_catalog_has() {
-    grep -Fq "\"target\":\"$1\"" "$measure_root/catalog.json" 2>/dev/null
+    grep -Fq "\"target\":\"$1\"" "$2/catalog.json" 2>/dev/null
 }
 
 measure_discovery() (
     name=$1
     host=$2
     address=$3
-    ! discovery_catalog_has "$host" || exit 1
+    measure_root=$4
+    measure_log=$5
+    watcher=$6
+    daemon=$7
+    ! discovery_catalog_has "$host" "$measure_root" || exit 1
     started=$(discovery_clock_cs)
     deadline=$((started + 9500))
     (
-        while ! discovery_catalog_has "$host"; do
+        while ! discovery_catalog_has "$host" "$measure_root"; do
             [ "$(discovery_clock_cs)" -lt "$deadline" ] || exit 1
             sleep 1
         done
