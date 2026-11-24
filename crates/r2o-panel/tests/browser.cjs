@@ -848,8 +848,12 @@ esac
   assert.equal(await evaluate("document.fonts.check('400 16px \\\"IBM Plex Mono\\\"')"), true, "локальный IBM Plex Mono загружен");
   assert.equal(await evaluate("document.querySelectorAll('script:not([src])').length"), 0, "встроенные скрипты макета не исполняются");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent !== 'Получаем состояние…'"), "состояние из /api/status");
-  assert.match(await evaluate("document.querySelector('#now-lede').textContent"), /^R2O исследует сетевой сбой/);
-  assert.equal(await evaluate("document.querySelector('#overview-metrics').textContent.includes('CPU роутера свободен на 96%')"), true, "сводка показывает свободный CPU всего роутера");
+  assert.equal(await evaluate("document.querySelector('#now-lede').textContent"), "Измеряем сетевые сбои и проверяем стратегии.");
+  assert.deepEqual(await evaluate(`[
+    document.querySelector("#discovery-cpu-label").textContent,
+    document.querySelector("#discovery-cpu-value").textContent,
+    document.querySelector("#discovery-cpu-fill").style.transform
+  ]`), ["Нагрузка CPU", "4%", "scaleX(0.04)"], "сводка показывает загрузку CPU, соответствующую 96% свободного времени");
   await waitFor(() => evaluate("document.querySelector('.bindings tr[data-enabled] .t')?.textContent === 'Голос Discord'"), "голосовая привязка в коробке");
   assert.equal(await evaluate("document.querySelectorAll('.bindings .proof-note').length"), 0, "голосовая привязка не добавляет заметку о RTP, которой нет в d2o");
   assert.equal(await evaluate("[...document.querySelectorAll('.search-plan-details')].some(plan => !plan.hidden)"), true, "карточка Discovery раскрывает сведения о плане");
