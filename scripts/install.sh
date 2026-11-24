@@ -382,7 +382,7 @@ check_runtime_dependencies() {
     else
         need_runtime_tool iptables "$ipt_package" -V
         if [ "$ipv6_enabled" -eq 1 ]; then need_runtime_tool ip6tables "$ip6t_package" -V; fi
-        if [ "$telegram_enabled" -eq 1 ] && ! command -v iptables-restore >/dev/null 2>&1; then
+        if ! command -v iptables-restore >/dev/null 2>&1; then
             case " $runtime_packages " in *" $ipt_package "*) ;; *) runtime_packages="$runtime_packages $ipt_package" ;; esac
         fi
     fi
@@ -448,6 +448,8 @@ check_runtime_dependencies() {
     nfqueue_rule_ready || die "цель NFQUEUE для $backend недоступна; $remedy"
     conntrack -C >/dev/null || die "ядро не отвечает на conntrack -C; $remedy"
     if [ "$backend" = iptables ]; then
+        command -v iptables-restore >/dev/null 2>&1 ||
+            die "нет iptables-restore из пакета $ipt_package"
         runtime_failure iptables "$ipt_queue_package" -j NFQUEUE --queue-num 65535 --queue-bypass --help
         runtime_failure iptables "$ipt_package" -t mangle -S PREROUTING
         if [ "$ipv6_enabled" -eq 1 ]; then

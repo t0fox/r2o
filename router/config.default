@@ -31,3 +31,6 @@ TG_MODE=local
 TG_PORT=1443
 # В сетях, где доступен прямой WSS к Telegram, его можно включить через TG_DIRECT_WSS=1.
 R2O_PPE_DEOFFLOAD=1
+# Опционально удерживать точные endpoint в программном тракте.
+# Формат: 'tcp://192.0.2.10:443 udp://[2001:db8::10]:443'.
+R2O_SOFTWARE_PATH_ENDPOINTS=

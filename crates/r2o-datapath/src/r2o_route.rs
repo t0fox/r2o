@@ -664,24 +664,26 @@ impl Default for R2oRouteMonitor {
 impl R2oRouteMonitor {
     /// Подписывается на группы IPv4/IPv6; при недоступности подписки остаётся опрос.
     pub fn r2o_open_watch(&mut self) -> std::io::Result<()> {
-        let fd = Self::r2o_open_watch_with(|fd, group| {
-            let result = unsafe {
-                libc::setsockopt(
-                    fd,
-                    R2O_SOL_NETLINK,
-                    R2O_NETLINK_ADD_MEMBERSHIP,
-                    &group as *const i32 as *const libc::c_void,
-                    std::mem::size_of_val(&group) as libc::socklen_t,
-                )
-            };
-            if result == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
+        let fd = Self::r2o_open_watch_with(Self::r2o_add_membership);
         self.watch = Some(fd?);
         Ok(())
+    }
+
+    fn r2o_add_membership(fd: i32, group: i32) -> std::io::Result<()> {
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                R2O_SOL_NETLINK,
+                R2O_NETLINK_ADD_MEMBERSHIP,
+                &group as *const i32 as *const libc::c_void,
+                std::mem::size_of_val(&group) as libc::socklen_t,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     }
 
     /// Открыть watch-сокет с подставляемым `setsockopt(NETLINK_ADD_MEMBERSHIP)`.
@@ -724,6 +726,17 @@ impl R2oRouteMonitor {
             }
         }
         Ok(fd)
+    }
+
+    /// События линка и адресов используют тот же дескриптор rtnetlink.
+    pub fn r2o_watch_platform(&self) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let Some(watch) = self.watch.as_ref() else {
+            return Ok(());
+        };
+        Self::r2o_add_membership(watch.as_raw_fd(), 1)?; // RTNLGRP_LINK
+        Self::r2o_add_membership(watch.as_raw_fd(), 5)?; // RTNLGRP_IPV4_IFADDR
+        Self::r2o_add_membership(watch.as_raw_fd(), 9) // RTNLGRP_IPV6_IFADDR
     }
 
     /// Дескриптор уведомлений для совместного ожидания с NFQUEUE.
@@ -973,6 +986,7 @@ impl R2oRouteMonitor {
             return Err(std::io::Error::last_os_error());
         }
 
+        let sequence = u32::from_ne_bytes(request[8..12].try_into().unwrap());
         let mut bytes = vec![0_u8; buffer_len];
         for _ in 0..rounds {
             let received = unsafe {
@@ -990,7 +1004,8 @@ impl R2oRouteMonitor {
                 }
                 return Err(error);
             }
-            if parse(&bytes[..received as usize])? {
+            let datagram = &bytes[..received as usize];
+            if r2o_check_route_reply(datagram, sequence)? && parse(datagram)? {
                 return Ok(());
             }
         }
@@ -1005,6 +1020,31 @@ impl R2oRouteMonitor {
         self.sequence = self.sequence.wrapping_add(1).max(1);
         sequence
     }
+}
+
+// Адаптация nlink dump_frame::classify / done_result (Marc Pardo, MIT).
+// Используем существующий итератор Netlink и отбрасываем оборванный снимок.
+#[cfg(target_os = "linux")]
+fn r2o_check_route_reply(bytes: &[u8], sequence: u32) -> std::io::Result<bool> {
+    let mut found = false;
+    for message in crate::netlink::MessageIter::new(bytes) {
+        if message.sequence != sequence {
+            return Ok(false);
+        }
+        found = true;
+        if message.flags & libc::NLM_F_DUMP_INTR as u16 != 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EINTR));
+        }
+        if message.kind == R2O_NLMSG_DONE
+            && let Some(status) = message.body.get(..4)
+        {
+            let status = i32::from_ne_bytes(status.try_into().unwrap());
+            if status < 0 {
+                return Err(std::io::Error::from_raw_os_error(status.saturating_neg()));
+            }
+        }
+    }
+    Ok(found)
 }
 
 #[cfg(target_os = "linux")]
@@ -1397,13 +1437,17 @@ pub fn r2o_route_parse_lookup(bytes: &[u8]) -> Result<R2oRouteLookup, R2oRoutePa
     Ok(R2oRouteLookup::Pending)
 }
 
-/// Уведомления о правилах, маршрутах по умолчанию и повреждённые данные требуют обновления.
+/// Уведомления о линке, адресе, правилах и маршруте по умолчанию требуют обновления.
 pub fn r2o_route_watch_relevant(bytes: &[u8]) -> bool {
     let Ok(messages) = r2o_route_messages(bytes) else {
         return true;
     };
     messages.iter().any(|message| {
-        if matches!(message.kind, R2O_RTM_NEWRULE | R2O_RTM_DELRULE) {
+        if matches!(
+            message.kind,
+            R2O_RTM_NEWRULE | R2O_RTM_DELRULE | 16 | 17 | 20 | 21
+        ) {
+            // RTM_NEWLINK, DELLINK, NEWADDR, DELADDR
             return true;
         }
         matches!(message.kind, R2O_RTM_NEWROUTE | R2O_RTM_DELROUTE)
@@ -2550,6 +2594,20 @@ mod tests {
             "ошибка чтения обязательного IPv4 rtnetlink: {errors:?}"
         );
         assert!(gate.r2o_rules_v4.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_route_dump_preserves_previous_snapshot() {
+        let mut done = r2o_test_message(R2O_NLMSG_DONE, &[]);
+        done[8..12].copy_from_slice(&7u32.to_ne_bytes());
+        assert!(r2o_check_route_reply(&done, 7).unwrap());
+        assert!(!r2o_check_route_reply(&done, 8).unwrap());
+        done[6..8].copy_from_slice(&(libc::NLM_F_DUMP_INTR as u16).to_ne_bytes());
+        assert_eq!(
+            r2o_check_route_reply(&done, 7).unwrap_err().raw_os_error(),
+            Some(libc::EINTR)
+        );
     }
 
     fn r2o_test_message(kind: u16, body: &[u8]) -> Vec<u8> {

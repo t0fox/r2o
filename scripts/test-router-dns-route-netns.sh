@@ -24,6 +24,7 @@ export R2O_DIR="$WORK" R2O_CONFIG=/dev/null R2O_RUN_DIR="$WORK/run"
 export FW_BACKEND=${FW_BACKEND:-nft} QUEUE_NUM=34000 QUEUE_NUM6=34001 MEASURE_MARK=47
 export R2O_PPE_DEOFFLOAD=0 PORTS=853 DNS_PORTS=53
 FIREWALL="$ROOT/router/r2o-firewall.sh"
+export R2O_DATAPATH_BIN=${R2O_DATAPATH_BIN:-$ROOT/target/release/r2o-datapath}
 
 ip link set lo up
 sysctl -qw net.netfilter.nf_conntrack_acct=1
@@ -42,21 +43,6 @@ ip link set dnsc up
 nsenter -n -t "$peer" ip addr add 192.0.2.2/24 dev dnss
 nsenter -n -t "$peer" ip -6 addr add 2001:db8::2/64 dev dnss nodad
 nsenter -n -t "$peer" ip link set dnss up
-
-sh "$FIREWALL" up
-sh "$FIREWALL" status
-sh "$FIREWALL" dns-route add 192.0.2.2 udp 853 20
-sh "$FIREWALL" dns-route add 2001:db8::2 udp 853 20
-sh "$FIREWALL" dns-route add 2001:db8::2 udp 853 40
-if sh "$FIREWALL" dns-route add 192.0.2.2 udp 53 20; then exit 1; fi
-if sh "$FIREWALL" dns-route add ::1 tcp 853 20; then exit 1; fi
-
-if [ "$FW_BACKEND" = nft ]; then
-    nft list chain inet r2o dns_output | grep -Fq 'hook output'
-else
-    iptables -t mangle -C OUTPUT -j R2O_DNS_OUT
-    ip6tables -t mangle -C OUTPUT -j R2O_DNS_OUT
-fi
 
 python3 - "$WORK/queue" <<'PY' &
 from collections import Counter
@@ -81,7 +67,7 @@ with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 12) as control:
 
     for queue in (34000, 34001):
         send(2, queue, 1, struct.pack("!BBH", 1, 0, 0), confirm=True)
-        send(2, queue, 2, struct.pack("!IB", 0, 1), confirm=True)
+        send(2, queue, 2, struct.pack("!IB", 1600, 2), confirm=True)
     Path(sys.argv[1]).touch()
     hooks = Counter()
     for _ in range(6):
@@ -107,6 +93,21 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.05
 done
 test -e "$WORK/queue"
+
+sh "$FIREWALL" up
+sh "$FIREWALL" status
+sh "$FIREWALL" dns-route add 192.0.2.2 udp 853 20
+sh "$FIREWALL" dns-route add 2001:db8::2 udp 853 20
+sh "$FIREWALL" dns-route add 2001:db8::2 udp 853 40
+if sh "$FIREWALL" dns-route add 192.0.2.2 udp 53 20; then exit 1; fi
+if sh "$FIREWALL" dns-route add ::1 tcp 853 20; then exit 1; fi
+
+if [ "$FW_BACKEND" = nft ]; then
+    nft list chain inet r2o dns_output | grep -Fq 'hook output'
+else
+    iptables -t mangle -C OUTPUT -j R2O_DNS_OUT
+    ip6tables -t mangle -C OUTPUT -j R2O_DNS_OUT
+fi
 
 nsenter -n -t "$peer" python3 - "$WORK/server" <<'PY' &
 import pathlib

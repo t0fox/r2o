@@ -71,6 +71,10 @@ for ARCH do
     done
     install -m 0644 "$ROOT/router/files/meta-ranges.txt" "$STAGE/router/files/meta-ranges.txt"
     install -m 0644 "$ROOT/router/controller-applets" "$STAGE/router/controller-applets"
+    mkdir -p "$STAGE/router/licenses"
+    for donor in dfw nlink rust-iptables tailscale; do
+        install -m 0644 "$ROOT/docs/licenses/$donor.txt" "$STAGE/router/licenses/$donor.txt"
+    done
     printf '%s\n' "$RELEASE_SEQUENCE" > "$STAGE/router/update-sequence"
     printf '%s\n' "${R2O_R2_PUBLIC_URL:-}" > "$STAGE/router/update-r2"
     chmod 0644 "$STAGE/router/update-sequence" "$STAGE/router/update-r2"

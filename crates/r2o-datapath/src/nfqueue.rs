@@ -152,6 +152,7 @@ pub struct QueueSocket {
     fd: OwnedFd,
     queue: u16,
     sequence: u32,
+    socket_owner: bool,
     lost_packets: Cell<u64>,
     stats: Cell<QueueStats>,
 }
@@ -188,6 +189,7 @@ impl QueueSocket {
             fd,
             queue,
             sequence: 1,
+            socket_owner: true,
             lost_packets: Cell::new(0),
             stats: Cell::new(QueueStats::default()),
         };
@@ -213,6 +215,7 @@ impl QueueSocket {
             ) {
                 return Err(error);
             }
+            socket.socket_owner = false;
             // Старые ядра продолжают работу без владельца пакета и адресных планов DoH3.
             let params = config_params(
                 queue,
@@ -245,6 +248,23 @@ impl QueueSocket {
             );
         }
         Ok(socket)
+    }
+
+    pub fn owner_capability(&self) -> io::Result<(bool, u32)> {
+        let mut name: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of_val(&name) as libc::socklen_t;
+        // Сравниваем ID именно этого сокета с peer очереди в procfs.
+        if unsafe {
+            libc::getsockname(
+                self.fd.as_raw_fd(),
+                (&mut name as *mut libc::sockaddr_nl).cast(),
+                &mut len,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((self.socket_owner, name.nl_pid))
     }
 
     pub fn receive(&self, bytes: &mut [u8]) -> Result<Option<usize>, ReceiveError> {
@@ -682,6 +702,7 @@ mod tests {
             queue: 0,
 
             sequence: 1,
+            socket_owner: false,
             lost_packets: Cell::new(0),
             stats: Cell::new(Default::default()),
         }
@@ -692,6 +713,7 @@ mod tests {
             fd,
             queue: 0,
             sequence: 1,
+            socket_owner: false,
             lost_packets: Cell::new(0),
             stats: Cell::new(Default::default()),
         }

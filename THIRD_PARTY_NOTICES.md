@@ -116,3 +116,19 @@ Rust-алгоритмы прокси и его тестовые сценарии
   https://gsap.com/standard-license.
 - Шрифты Onest, Manrope, Unbounded, IBM Plex Mono и JetBrains Mono
   сопровождаются текстами лицензий OFL в `crates/r2o-panel/assets/fonts/`.
+
+## Платформенный firewall
+
+| Донор и ревизия | Использованные функции | Лицензия |
+| --- | --- | --- |
+| [DFW](https://github.com/pitkley/dfw/tree/30d7edeb20c3c4ef2722b8df2d9620346becc48a) | `FirewallBackend::apply`, `Nftables::apply`, `Iptables::restore`. Раздельные типы правил, пакет `nft -f` и транзакция `iptables-restore` через stdin | [MIT](docs/licenses/dfw.txt) |
+| [nlink](https://github.com/p13marc/nlink/tree/174b5458c2191fff2e729bef99156c064a87067c) | `dump_frame::classify`, `done_result`, `Backoff::delay`, `config::rules::longest_increasing` и упорядоченная часть `plan_chain`, используемая `NftablesConfig::diff_snapshot` | [MIT](docs/licenses/nlink.txt) |
+| [rust-iptables](https://github.com/yaa110/rust-iptables/tree/e0e1f5dcc02023dbd162940af1b2f5159677dbd7) | `IPTables::new`, выбор iptables/ip6tables и определение поддержки `-w` по версии | [MIT](docs/licenses/rust-iptables.txt) |
+| [Tailscale linuxfw](https://github.com/tailscale/tailscale/tree/da6276d77025ee2bce288c4ccf07b35e14f253a7/util/linuxfw) | `CheckIPv6`, читающая часть `CheckIPRuleSupportsV6`, проверка таблицы по образцу `checkSupportsV6Filter` | [BSD-3-Clause](docs/licenses/tailscale.txt) |
+
+Реализация использует действующие утилиты и итератор Netlink R2O. Из netavark
+(`ba588de03fb8c72d2dade087e288de9d63f785fc`), routerforge
+(`b27670d45314fb2793a60fa359abfe3b9f37fbd9`) и zapret-gui
+(`582e518cddde85187bec0aac9b38dee94f9a4186`) изучены соответственно firewall drivers,
+инвентаризация возможностей Keenetic и восстановление после NDMS flush.
+В приложение не включён код этих трёх проектов.

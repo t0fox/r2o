@@ -60,3 +60,11 @@ stop_service() {
 status_service() {
     [ ! -x /opt/etc/init.d/S99r2o ] || /opt/etc/init.d/S99r2o status
 }
+
+service_triggers() {
+    procd_add_reload_trigger firewall
+}
+
+reload_service() {
+    [ ! -x /opt/etc/init.d/S99r2o ] || /opt/etc/init.d/S99r2o firewall-heal
+}

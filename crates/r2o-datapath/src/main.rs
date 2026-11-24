@@ -1561,6 +1561,9 @@ mod app {
 
     pub fn run() -> Result<(), Box<dyn Error>> {
         let arguments = r2o_thread_arguments();
+        if arguments.first().is_some_and(|arg| arg == "--platform") {
+            return r2o_datapath::platform::cli(&arguments[1..]).map_err(Into::into);
+        }
         if arguments
             .first()
             .is_some_and(|arg| arg == "--runtime-preflight")
@@ -1662,6 +1665,7 @@ mod app {
                 );
             }
         }
+        let router_runtime = std::env::var("R2O_PLATFORM_RUNTIME").as_deref() == Ok("1");
         let mut route_monitor = R2oRouteMonitor::default();
         let mut route_watch_notifications = 0_u64;
         let mut routes_log = R2oRoutesRefreshLog::default();
@@ -1669,6 +1673,12 @@ mod app {
             eprintln!(
                 "r2o-datapath: уведомления rtnetlink недоступны ({error}); оставляю опрос раз в 30 секунд"
             );
+        }
+        if router_runtime
+            && options.protocol_family == libc::AF_INET as u16
+            && let Err(error) = route_monitor.r2o_watch_platform()
+        {
+            eprintln!("r2o-platform: неполная подписка на события сети: {error}");
         }
         let (_, route_status) = route_monitor.r2o_refresh_with_status(&mut route_gate);
         r2o_log_routes_refresh(&mut routes_log, &route_gate, &route_status, Instant::now());
@@ -1734,6 +1744,12 @@ mod app {
             options.fail_open,
             options.receive_buffer,
         )?;
+        let platform_worker = if router_runtime {
+            let (owner, port_id) = socket.owner_capability()?;
+            r2o_datapath::platform::Worker::start(queue, options.protocol_family, owner, port_id)?
+        } else {
+            None
+        };
         let mut flow_journal = R2oFlowJournal::with_capacity(options.journal_capacity as usize)?;
         let journal_origin = Instant::now();
         let meta_state_dir = std::env::var_os("R2O_META_STATE_DIR").map(std::path::PathBuf::from);
@@ -2218,6 +2234,9 @@ mod app {
             if route_ready {
                 match route_monitor.r2o_drain_watch() {
                     Ok(true) => {
+                        if let Some(worker) = &platform_worker {
+                            worker.notify();
+                        }
                         route_watch_notifications = route_watch_notifications.saturating_add(1);
                         let settled =
                             (last_route_refresh + R2O_ROUTE_SETTLE_INTERVAL).max(Instant::now());
