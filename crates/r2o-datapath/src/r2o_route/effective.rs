@@ -126,18 +126,18 @@ impl R2oRouteMonitor {
             }
         }
 
-        let mut checked = [None; 3];
-        for (index, mark) in [
+        let marks = [
             Some(query.raw_mark),
             Some(query.probe_mark),
             (query.measure_mark != 0).then_some(query.measure_mark),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        ];
+        for (index, mark) in marks.iter().copied().enumerate() {
             let Some(mark) = mark else {
                 continue;
             };
+            if marks[..index].contains(&Some(mark)) {
+                continue;
+            }
             let first = self.r2o_effective_lookup(query.destination, None, None, mark, 0);
             let Lookup::Route(path, source) = first else {
                 return matches!(first, Lookup::Local | Lookup::Unreachable)
@@ -146,7 +146,7 @@ impl R2oRouteMonitor {
             if path != original {
                 return Some(R2oEffectiveRoute::Different);
             }
-            if index != 0 && !checked.contains(&Some(mark)) {
+            if marks[1..].contains(&Some(mark)) {
                 // Зонд TCP/UDP выбирает локальный адрес до последующих посылок.
                 let selected =
                     self.r2o_effective_lookup(query.destination, Some(source?), None, mark, 0);
@@ -157,7 +157,6 @@ impl R2oRouteMonitor {
                     }
                     Lookup::Unavailable => return None,
                 }
-                checked[index] = Some(mark);
             }
         }
         Some(R2oEffectiveRoute::Equivalent)

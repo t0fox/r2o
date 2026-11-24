@@ -133,8 +133,12 @@ origin "$filter" -A INPUT -p tcp --dport 443 -m connmark --mark 0 \
 request blocked || true
 if grep -q 'CONNECTION ESTABLISHED' blocked.log; then echo 'Контрольная блокировка не сработала'; exit 1; fi
 launch() {
-    "$dp" --mode apply --queue "$queue" --family "$family" --mark 45 --probe-mark 46 --controller-only \
-        --control "$root/dp.sock" </dev/null >datapath.log 2>&1 &
+    if [ "$family" = ipv6 ]; then
+        set -- --both --queue4 52692 --queue6 "$queue" --control4 "$root/dp4.sock" --control6 "$root/dp.sock"
+    else
+        set -- --queue "$queue" --family "$family" --control "$root/dp.sock"
+    fi
+    "$dp" --mode apply "$@" --mark 45 --probe-mark 46 --controller-only </dev/null >datapath.log 2>&1 &
     daemon=$!
     sleep 1
     "$dp" --platform up
