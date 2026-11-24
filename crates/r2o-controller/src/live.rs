@@ -175,8 +175,20 @@ pub struct DnsServiceLive {
     pub reason: String,
     /// Стенные секунды последнего подтверждённого обращения DNS-службы.
     pub router_seen_at: Option<i64>,
-    pub upstream_active: bool,
+    pub upstream_active: Option<bool>,
     pub activity_tracked: bool,
+    pub inventory_current: bool,
+    pub journal_current: bool,
+    pub health_current: bool,
+    pub last_availability: Option<DnsAvailabilityProof>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DnsAvailabilityProof {
+    pub state: &'static str,
+    pub checked_at: i64,
+    pub answer_rtt_ms: Option<u64>,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug)]
@@ -218,8 +230,12 @@ impl Default for DnsServiceLive {
             plan_applied_at: None,
             reason: String::new(),
             router_seen_at: None,
-            upstream_active: false,
+            upstream_active: None,
             activity_tracked: false,
+            inventory_current: false,
+            journal_current: false,
+            health_current: false,
+            last_availability: None,
         }
     }
 }
@@ -730,7 +746,9 @@ fn r2o_live_dns_services(
                 })
                 .map(|binding| binding.plan_id.clone())
                 .unwrap_or_default();
-            let detected_reason = if !resolved_ip.is_empty() {
+            let detected_reason = if state.activity_tracked {
+                ""
+            } else if !resolved_ip.is_empty() {
                 "Адрес DNS-сервера найден. Проверка ожидает очереди."
             } else if service.bootstrap_dns.is_empty() {
                 "Для проверки нужен IP DNS-сервера. Bootstrap-адрес отсутствует или не распознан."
@@ -879,14 +897,46 @@ fn r2o_live_dns_services(
                 row["profile_id"] = json!(profile_id);
             }
             if state.activity_tracked {
+                use crate::dns_health::DnsHealthFailure;
+
                 row["scope"] = json!("router");
+                row["configured"] = json!(state.inventory_current.then_some(true));
+                row["service_active"] = json!(state.upstream_active);
+                row["usage_observed"] = json!(
+                    state.router_seen_at.is_some().then_some(true)
+                        .or_else(|| state.journal_current.then_some(false))
+                );
                 row["activity"] = json!(if state.router_seen_at.is_some() {
                     "observed"
-                } else if state.upstream_active {
+                } else if state.upstream_active == Some(true) {
                     "active"
                 } else {
                     "configured"
                 });
+                let availability = if state.upstream_active != Some(true) {
+                    "unknown"
+                } else if state.state == DnsServiceState::Checking || state.recovery_phase.is_some() {
+                    "checking"
+                } else if recovered.is_some() {
+                    "recovered"
+                } else if !state.health_current {
+                    "unknown"
+                } else if state.dns_answer {
+                    "available"
+                } else if matches!(state.failure, Some(DnsHealthFailure::Configuration | DnsHealthFailure::Local)) {
+                    "unknown"
+                } else {
+                    "unavailable"
+                };
+                row["availability"] = json!(availability);
+                if let Some(last) = &state.last_availability {
+                    row["last_result"] = json!({
+                        "state": last.state,
+                        "checked_at": r2o_live_optional_time(Some(last.checked_at)),
+                        "answer_rtt_ms": last.answer_rtt_ms,
+                        "reason": last.reason,
+                    });
+                }
             }
             if (family == 6 || state.activity_tracked) && state.router_seen_at.is_some() {
                 row["router_seen_at"] = r2o_live_optional_time(state.router_seen_at);

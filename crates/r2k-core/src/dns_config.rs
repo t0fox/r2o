@@ -209,7 +209,7 @@ pub fn dns_uri_parse(uri: &str, source: Option<&str>) -> Option<DnsService> {
     let scheme = &uri[..separator];
     let (protocol, default_port) = if scheme.eq_ignore_ascii_case("https") {
         ("doh", 443)
-    } else if scheme.eq_ignore_ascii_case("h3") && source == Some("dnsproxy") {
+    } else if scheme.eq_ignore_ascii_case("h3") {
         ("doh3", 443)
     } else if scheme.eq_ignore_ascii_case("tls") {
         ("dot", 853)
@@ -543,24 +543,13 @@ pub fn dns_query_one(host: &str, server: &str, qtype: u16, mark: u32) -> Option<
     if mark != 0 {
         #[cfg(target_os = "linux")]
         {
-            const SOL_SOCKET: std::os::raw::c_int = 1;
-            const SO_MARK: std::os::raw::c_int = 36;
-            unsafe extern "C" {
-                fn setsockopt(
-                    fd: std::os::raw::c_int,
-                    level: std::os::raw::c_int,
-                    option: std::os::raw::c_int,
-                    value: *const std::os::raw::c_void,
-                    length: u32,
-                ) -> std::os::raw::c_int;
-            }
             let result = unsafe {
-                setsockopt(
+                libc::setsockopt(
                     socket.as_raw_fd(),
-                    SOL_SOCKET,
-                    SO_MARK,
+                    libc::SOL_SOCKET,
+                    libc::SO_MARK,
                     (&mark as *const u32).cast(),
-                    std::mem::size_of_val(&mark) as u32,
+                    std::mem::size_of_val(&mark) as libc::socklen_t,
                 )
             };
             if result != 0 {

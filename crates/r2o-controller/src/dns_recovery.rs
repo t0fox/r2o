@@ -133,6 +133,7 @@ impl Request {
         if live.state != DnsServiceState::Failed
             || live.consecutive_network_failures < 2
             || live.router_seen_at.is_none()
+            || (live.activity_tracked && live.upstream_active != Some(true))
             || service.verification_limitation().is_some()
         {
             return None;
@@ -197,6 +198,7 @@ impl Request {
         let live = state.live.get(index)?;
         (live.generation == self.generation
             && live.router_seen_at.is_some()
+            && (!live.activity_tracked || live.upstream_active == Some(true))
             && live.ip.parse::<std::net::IpAddr>() == Ok(self.endpoint.ip()))
         .then_some(index)
     }
@@ -918,6 +920,14 @@ impl Recovery {
                         checked_at: wall,
                         rtt_ms: result.answer_rtt_ms,
                     });
+                    if live.activity_tracked {
+                        live.last_availability = Some(r2o_controller::live::DnsAvailabilityProof {
+                            state: "recovered",
+                            checked_at: wall,
+                            answer_rtt_ms: result.answer_rtt_ms,
+                            reason: String::new(),
+                        });
+                    }
                     let expires = attempt.expires.min(recheck.binding.expires);
                     self.retained.push(Retained {
                         request: attempt.request,
