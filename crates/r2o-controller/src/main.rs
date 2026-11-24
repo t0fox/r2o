@@ -33876,8 +33876,15 @@ impl ControlClient {
         persist_catalog_update(&updated, catalog_path, now, persistence)?;
         *catalog = updated;
         *confirmed = true;
+        let evidence = match verified_by {
+            Some(R2O_D2K_VERBY_REPLAY_HANDSHAKE) => "повтор ClientHello получил ServerHello",
+            Some(R2O_D2K_VERBY_PROBE_HANDSHAKE) => "локальное TLS-рукопожатие",
+            Some(R2O_D2K_VERBY_PROBE) => "локальный обмен",
+            Some(R2O_D2K_VERBY_CLIENT) => "событие клиентского потока",
+            _ => "источник не указан",
+        };
         println!(
-            "автопоиск подтвердил и сохранил план {}; синхронизация каталога поставлена в очередь для {} ({shape})",
+            "автопоиск подтвердил и сохранил план {}; синхронизация каталога поставлена в очередь для {} ({shape}), доказательство: {evidence}, прикладной результат LAN не измерялся",
             plan_id,
             outcome.target.host,
             shape = if outcome.target.shape == SHAPE_MODERN {
