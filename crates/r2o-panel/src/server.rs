@@ -3405,7 +3405,8 @@ fn telegram_diagnostics_snapshot(config: &Config) -> Value {
     let mut report = if config.telegram_check_running.load(Ordering::Acquire) {
         read_telegram_diagnostics(&progress).unwrap_or_else(|| json!({"state":"running"}))
     } else {
-        let mut report = read_telegram_diagnostics(&saved).unwrap_or_else(|| json!({"state":"never"}));
+        let mut report =
+            read_telegram_diagnostics(&saved).unwrap_or_else(|| json!({"state":"never"}));
         if report["running"] == true {
             report["running"] = json!(false);
             report["interrupted"] = json!(true);
