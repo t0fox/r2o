@@ -1207,9 +1207,9 @@ fn merge_live_snapshot(primary: &mut Value, extra: &Value) {
 fn merge_live_dns(primary: &mut Value, extra: &Value) {
     let primary_dns_known = primary["dns_source_status"].as_str();
     let checked_sources = primary_dns_known.is_some();
+    let configured = |status| matches!(status, Some("known" | "activity_unknown"));
     if checked_sources
-        && (primary_dns_known != Some("known")
-            || extra["dns_source_status"].as_str() != Some("known"))
+        && (!configured(primary_dns_known) || !configured(extra["dns_source_status"].as_str()))
     {
         return;
     }

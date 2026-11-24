@@ -164,12 +164,12 @@ async function main() {
     groups: [],
     dns_source_status: "known",
     dns_services: [
-      { protocol: "dot", host: "dns.example", port: 853, resolved_ip: "192.0.2.8", state: "direct_ok", checked_at: new Date().toISOString(), answer_rtt_ms: 17, status_reason: "DoT: получен корректный DNS-ответ" },
-      { protocol: "doq", host: "quic-with-a-long-resolver-name.example", port: 853, resolved_ip: "2001:db8::9", router_seen_at: new Date(Date.now() - 1000).toISOString(), state: "plan_applied", plan_applied: true, applied_plan_id: "8d3c8fc1b32c52c2013cb04f82891245", dns_answer_via_plan: false, status_reason: "DNS-ответ через план ещё проверяется" },
-      { protocol: "doh", host: "old.example", port: 443, path: "/dns-query", state: "direct_ok", checked_at: new Date(Date.now() - 720000).toISOString() },
-      { protocol: "doh", host: "refused.example", port: 443, path: "/dns-query", state: "failed", failure: "server", checked_at: new Date().toISOString(), status_reason: "HTTP 403: сервер отклонил запрос" },
+      { protocol: "dot", host: "dns.example", port: 853, resolved_ip: "192.0.2.8", state: "direct_ok", checked_at: new Date().toISOString(), answer_rtt_ms: 17, availability: "available", usage_observed: false, dns_answer_confirmed: true, status_reason: "DoT: получен корректный DNS-ответ" },
+      { protocol: "doq", host: "quic-with-a-long-resolver-name.example", port: 853, resolved_ip: "2001:db8::9", router_seen_at: new Date(Date.now() - 1000).toISOString(), state: "plan_applied", availability: "checking", plan_applied: true, applied_plan_id: "8d3c8fc1b32c52c2013cb04f82891245", dns_answer_via_plan: false, status_reason: "DNS-ответ через план ещё проверяется" },
+      { protocol: "doh3", host: "old.example", port: 443, path: "/dns-query", state: "direct_ok", availability: "available", dns_answer_confirmed: true, checked_at: new Date(Date.now() - 720000).toISOString(), last_result: { state: "available", checked_at: new Date(Date.now() - 720000).toISOString(), answer_rtt_ms: 22 } },
+      { protocol: "doh", host: "refused.example", port: 443, path: "/dns-query", state: "failed", availability: "unavailable", failure: "server", checked_at: new Date().toISOString(), status_reason: "HTTP 403: сервер отклонил запрос" },
     ].map(row => ({
-      scope: "router", activity: "observed", router_seen_at: new Date().toISOString(), ...row,
+      scope: "router", configured: true, service_active: true, usage_observed: true, ...row,
     })),
     searches: [{
       target: "blocked.example",
@@ -432,6 +432,78 @@ esac
   await waitFor(() => evaluate("document.readyState === 'complete' && !!document.querySelector('#app')"), "загрузка страницы R2O");
   await evaluate("document.fonts.ready.then(() => true)");
   await waitFor(() => evaluate("!!document.querySelector('#engine-state small')"), "состояние движка в верхней панели");
+  await waitFor(() => evaluate("document.querySelectorAll('#status-panel .metric-card').length === 6"), "единая сводка Discovery");
+  await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  assert.deepEqual(await evaluate(`(() => {
+    const cards = [...document.querySelectorAll('#status-panel .metric-card')];
+    return [new Set(cards.map(card => card.offsetTop)).size,
+      cards[1].querySelector('.metric-reading').textContent,
+      document.querySelector('#discovery-slots').children.length,
+      document.querySelector('#discovery-cpu-label').textContent,
+      document.querySelector('#discovery-cpu-value').textContent,
+      document.querySelector('#discovery-cpu .discovery-gauge').getBoundingClientRect().width > 100];
+  })()`), [1, "1 / 2", 2, "Нагрузка CPU", "4%", true]);
+  const measurements = liveState.measurements;
+  const nextSlot = "document.querySelectorAll('.discovery-slot-fill')[1]";
+  const slotAnimating = `${nextSlot}.getAnimations().some(animation => animation.playState === 'running')`;
+  const metricReading = "document.querySelectorAll('#overview-metrics .metric-value')[1].firstElementChild";
+  const readingAnimating = `${metricReading}.getAnimations().some(animation => animation.playState === 'running')`;
+  const updateActiveSlots = async (active, limit = measurements.limit, free_pct = measurements.free_pct) => {
+    liveState.measurements = { ...measurements, active, limit, free_pct };
+    fs.writeFileSync(livePath, JSON.stringify(liveState));
+    await evaluate("document.dispatchEvent(new Event('visibilitychange'))");
+  };
+  await updateActiveSlots(measurements.active, measurements.limit, null);
+  await waitFor(() => evaluate("document.querySelector('#discovery-cpu-value').textContent === '—' && document.querySelector('#discovery-cpu').offsetHeight > 0"), "при отсутствии замера строка CPU остаётся видимой");
+  await updateActiveSlots(measurements.active, measurements.limit, 100);
+  await waitFor(() => evaluate("document.querySelector('#discovery-cpu-value').textContent === '0%' && document.querySelector('#discovery-cpu-fill').style.transform === 'scaleX(0)'"), "реальный нулевой замер отличается от отсутствия данных");
+  await updateActiveSlots(measurements.active, measurements.limit, 29);
+  await waitFor(() => evaluate("document.querySelector('#discovery-cpu-value').textContent === '71%' && document.querySelector('#discovery-cpu-fill').style.transform === 'scaleX(0.71)'"), "процент и длина шкалы CPU совпадают");
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+  await evaluate(`window.initialDiscoverySlot = ${nextSlot}`);
+  await updateActiveSlots(2);
+  await waitFor(() => evaluate(`${slotAnimating} && ${nextSlot}.style.getPropertyValue('--slot-fill') === '1'`), "новый слот плавно заполняется");
+  await waitFor(() => evaluate(`${readingAnimating} && ${metricReading}.textContent === '2 / 2'`), "оба числа замеров обновляются одной прокруткой");
+  await waitFor(() => evaluate(`!${slotAnimating} && !${readingAnimating}`), "при неизменной загрузке шкала и цифры статичны");
+  await updateActiveSlots(1);
+  await waitFor(() => evaluate(`${slotAnimating} && ${nextSlot}.style.getPropertyValue('--slot-fill') === '0'`), "освободившийся слот плавно гаснет");
+  await waitFor(() => evaluate(`${readingAnimating} && ${metricReading}.textContent === '1 / 2'`), "пара чисел прокручивается при освобождении слота");
+  assert.equal(await evaluate(`window.initialDiscoverySlot === ${nextSlot}`), true, "слоты сохраняют DOM между замерами");
+  assert.equal(await evaluate("document.querySelector('#discovery-capacity-status').textContent"), "Свободно 1");
+  await updateActiveSlots(0, 6);
+  await waitFor(() => evaluate("document.querySelector('#discovery-capacity-status').textContent === 'Свободно 6'"), "шесть свободных слотов");
+  await updateActiveSlots(6, 6);
+  await waitFor(() => evaluate(`(() => {
+    const slots = document.querySelector('#discovery-slots');
+    return slots.querySelectorAll('.discovery-slot[data-occupied]').length === 6
+      && slots.querySelectorAll('.discovery-slot[data-preview]').length === 6
+      && document.querySelector('#discovery-capacity-status[data-full]').textContent === 'Все 6 заняты'
+      && slots.getAnimations({subtree: true}).some(animation => animation.effect.target?.classList.contains('discovery-slot'));
+  })()`), "при шести занятых слотах шкала плавно расширяется еще на шесть ячеек");
+  await waitFor(() => evaluate("!document.querySelector('#discovery-slots').getAnimations({subtree: true}).length"), "при полной загрузке анимация завершается");
+  assert.equal(await evaluate("Number(document.querySelector('#overview-metrics').children[2].querySelector('.metric-number').textContent) > 0"), true, "очередь видна отдельно от полной шкалы");
+  assert.equal(await evaluate(`${metricReading}.textContent`), "6 / 6", "пунктирные ячейки не меняют лимит");
+  await updateActiveSlots(6, 12);
+  await waitFor(() => evaluate(`${metricReading}.textContent === '6 / 12' && !document.querySelector('#discovery-slots [data-preview]')`),
+    "дополнительные слоты становятся реальными после изменения лимита");
+  await updateActiveSlots(12, 12);
+  await waitFor(() => evaluate("document.querySelectorAll('#discovery-slots [data-preview]').length === 6"
+    + " && document.querySelectorAll('#discovery-slots [data-occupied]').length === 12"), "следующий блок появляется при 12 / 12");
+  await updateActiveSlots(measurements.active);
+  liveState.confirms += 1;
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate(`(() => {
+    const metrics = document.querySelector('#overview-metrics');
+    return metrics.children[3].querySelector('.metric-number').textContent === '1'
+      && !metrics.querySelector('.metric-reading-outgoing') && !metrics.getAnimations({subtree: true}).length;
+  })()`), "после обновления счётчика сводка статична");
+  if (captureDir) {
+    const screenshot = await call("Page.captureScreenshot", { format: "png" });
+    fs.writeFileSync(path.join(captureDir, "discovery-overview-desktop.png"), Buffer.from(screenshot.data, "base64"));
+  }
+  liveState.confirms -= 1;
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await call("Emulation.clearDeviceMetricsOverride");
   assert.match(await evaluate("document.querySelector('#engine-state .mast-state-text').textContent"), /^Движок работает /);
   assert.equal(await evaluate("document.querySelectorAll('#engine-state[role=status]').length === 1 && !document.querySelector('#status-state, #rail-status')"), true);
   assert.equal(await evaluate(`(() => {
@@ -455,7 +527,7 @@ esac
   fs.unlinkSync(splitControllerPidPath);
   await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок остановлен')"), "опрос отражает фактическую остановку");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent === 'Подбор приостановлен'"), "карточка обзора показывает состояние подбора");
-  assert.equal(await evaluate("document.querySelector('#dns-protection-list .meta-chip').textContent"), "Устарело");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-list .meta-chip').textContent"), "Состояние неизвестно");
   assert.equal(await evaluate("document.querySelector('#nav-now').textContent"), "");
   fs.writeFileSync(enginePidPath, String(process.pid));
   fs.writeFileSync(controllerPidPath, String(process.pid));
@@ -474,50 +546,58 @@ esac
       && status.querySelector('.lamp').dataset.tone === 'warn'
       && !status.querySelector('small');
   })()`), "при недоступном API старый статус сменяется предупреждением");
-  assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip, #dns-protection-extra .meta-chip')].map(node => node.textContent)"), ["Устарело", "Устарело", "Устарело", "Устарело"]);
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip, #dns-protection-extra .meta-chip')].map(node => node.textContent)"), ["Состояние неизвестно", "Состояние неизвестно", "Состояние неизвестно", "Состояние неизвестно"]);
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('Последний план')"), true);
   await evaluate("window.restoreStatusFetch()");
   await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок работает')"), "успешный запрос возвращает актуальный статус");
   await waitFor(() => evaluate("!document.querySelector('#now').hidden && document.querySelector('#now #dns-protection-list').children.length === 3"), "карточки зашифрованного DNS на обзоре");
-  assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip')].map(node => node.textContent)"), ["Доступен напрямую", "Подбор", "Устарело"]);
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip')].map(node => node.textContent)"), ["Доступен", "Проверяется", "Состояние неизвестно"]);
   assert.equal(await evaluate("!!document.querySelector('[data-nav=dns-protection]')"), false);
   assert.equal(await evaluate("document.querySelector('[data-nav=now]').getAttribute('aria-current')"), "page");
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('[2001:db8::9]:853')"), true);
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('17 мс')"), true);
   assert.equal(await evaluate("document.querySelector('#dns-protection-more summary').textContent"), "Ещё 1 точка подключения · с ошибкой 1");
   await evaluate("document.querySelector('#dns-protection-more summary').click()");
-  assert.equal(await evaluate("document.querySelector('#dns-protection-more').open && document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Ошибка'"), true);
+  assert.equal(await evaluate("document.querySelector('#dns-protection-more').open && document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Недоступен'"), true);
   const refusedResolver = liveState.dns_services[3];
   const ipv6Resolver = {
     ...liveState.dns_services[0], resolved_ip: "2001:db8::53",
     dns_answer_confirmed: true, router_seen_at: new Date(Date.now() - 1000).toISOString(),
   };
   liveState.dns_services[3] = {
-    ...liveState.dns_services[0], resolved_ip: "2001:db8::53", state: "no_route",
+    ...liveState.dns_services[0], resolved_ip: "2001:db8::53", state: "no_route", availability: "unavailable",
     router_seen_at: ipv6Resolver.router_seen_at, failure: "no_route", answer_rtt_ms: null,
     status_reason: "У роутера нет маршрута к этому адресу.",
   };
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip')?.textContent === 'Нет маршрута'"), "Наблюдаемый IPv6 без маршрута показан с точным состоянием");
-  liveState.dns_services[3] = { ...ipv6Resolver, router_seen_at: undefined };
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip')?.textContent === 'Недоступен'"), "Наблюдаемый IPv6 без маршрута показан с точным состоянием");
+  liveState.dns_services[3] = { ...ipv6Resolver, usage_observed: false };
+  liveState.dns_source_status = "activity_unknown";
+  liveState.dns_services[0].usage_observed = null;
   liveState.dns_services[0].answer_rtt_ms = 18;
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#dns-protection-list').textContent.includes('18 мс')"), "панель обновилась после фоновой пробы");
-  assert.equal(await evaluate("document.querySelector('#dns-protection-more').hidden"), true, "успешная фоновая проба сама не показывает IPv6");
-  liveState.dns_services[3] = ipv6Resolver;
-  fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("!document.querySelector('#dns-protection-more').hidden"), "наблюдаемое соединение показывает IPv6");
-  assert.equal(await evaluate("document.querySelector('#dns-protection-more summary').textContent"), "Ещё 1 точка подключения");
+  await waitFor(() => evaluate(`(() => {
+    const row = document.querySelector('#dns-protection-list li');
+    return row.textContent.includes('18 мс') && row.textContent.includes('ЗапросыНеизвестно')
+      && row.querySelector('.meta-chip').textContent === 'Доступен';
+  })()`), "без журнала доступность DNS и активность пользователей отображаются отдельно");
   assert.deepEqual(await evaluate(`["#dns-protection-list", "#dns-protection-extra"].map(selector =>
     [...document.querySelector(selector).querySelector("li").querySelectorAll(".dns-service-protocol, .meta-chip")].map(e => e.textContent))`),
-  [["DoT · IPv4", "Доступен напрямую"], ["DoT · IPv6", "Доступен напрямую"]]);
-  liveState.dns_services[3] = { ...ipv6Resolver, router_seen_at: new Date(Date.now() - 11 * 60 * 1000).toISOString() };
+  [["DoT · IPv4", "Доступен"], ["DoT · IPv6", "Доступен"]]);
+  liveState.dns_source_status = "unknown";
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#dns-protection-more').hidden"), "давно не используемый IPv6 скрывается");
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-summary').textContent.includes('неизвестно')"), "потеря системного источника");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('22 мс')"), true, "прошлый достоверный результат остаётся видимым");
+  liveState.dns_source_status = "known";
+  liveState.dns_services[3] = { ...ipv6Resolver, service_active: false };
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra').textContent.includes('Выключена')"),
+    "выключенная служба не отображается доступной");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-extra .meta-chip').textContent"), "Состояние неизвестно");
   liveState.dns_services[3] = refusedResolver;
   liveState.dns_services[0].answer_rtt_ms = 17;
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip')?.textContent === 'Ошибка'"), "отказ DNS-сервера остаётся ошибкой");
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip')?.textContent === 'Недоступен'"), "отказ DNS-сервера остаётся ошибкой");
   await evaluate("document.querySelector('#dns-protection-more summary').click()");
   await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   assert.equal(await evaluate(`(() => {
@@ -628,16 +708,17 @@ esac
   liveState.dns_services[1] = {
     ...previousDnsService,
     state: "recovered",
+    availability: "recovered",
     checked_at: new Date().toISOString(),
     dns_answer_via_plan: true,
     dns_answer_confirmed: false,
   };
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   const doqBadge = "document.querySelectorAll('#dns-protection-list .meta-chip')[1].textContent";
-  await waitFor(async () => await evaluate(doqBadge) === "Проверка", "статус восстановления требует подтверждённого DNS-ответа");
+  await waitFor(async () => await evaluate(doqBadge) === "Состояние неизвестно", "статус восстановления требует подтверждённого DNS-ответа");
   liveState.dns_services[1].dns_answer_confirmed = true;
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(async () => await evaluate(doqBadge) === "Обход работает", "подтверждённый DNS-ответ отображает восстановление");
+  await waitFor(async () => await evaluate(doqBadge) === "Восстановлен", "подтверждённый DNS-ответ отображает восстановление");
   liveState.dns_services[1] = previousDnsService;
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await call("Emulation.clearDeviceMetricsOverride");

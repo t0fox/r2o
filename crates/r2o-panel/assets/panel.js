@@ -207,23 +207,6 @@
     return panel;
   }
 
-  /* Предел одновременных замеров считает движок по нагрузке роутера:
-     от 1 на слабом до десятков на мощном. До 16 — клетками, больше — шкалой. */
-  function slotsView(meas) {
-    var limit = Math.max(0, Math.round(num(meas && meas.limit) || 0));
-    var active = Math.max(0, Math.round(num(meas && meas.active) || 0));
-    var queued = Math.max(0, Math.round(num(meas && meas.queued) || 0));
-    var measured = num(meas && meas.free_pct) !== null;
-    return {
-      kind: limit <= 16 ? "cells" : "bar",
-      limit: limit, active: Math.min(active, Math.max(limit, active)), queued: queued,
-      short: measured ? "предел по нагрузке роутера" : "предел по умолчанию",
-      note: measured
-        ? "Сколько замеров идёт одновременно, решает движок: предел снижается, когда роутеру не хватает процессора, памяти или conntrack, и растёт, когда есть запас и очередь."
-        : "Данных о нагрузке роутера нет — движок держит предел по умолчанию."
-    };
-  }
-
   function normName(n) { return str(n).toLowerCase().replace(/\.$/, ""); }
 
   /* Привязка, уже покрытая применяемым семейством, не дублируется как отдельный результат.
@@ -249,20 +232,21 @@
 
   /* ─── Модель: что можно честно утверждать по снимку ─── */
 
+  var DISCOVERY_QUEUED = "ожидает безопасного слота замера";
+
   function model(status, received, now) {
     var snap = (status && status.snapshot) || {};
     var k = (status && status.knowledge) || {};
     var linked = !!k.linked;
     var engine = !!snap.engine_running;
     var searches = linked ? list(k.searches) : [];
-    var QUEUED = "ожидает безопасного слота замера";
     var active = searches.filter(function (s) { return !s.completed_at && s.phase !== "подтверждено, смотрим живой трафик"; });
     var m = {
       snap: snap, k: k, linked: linked, engine: engine,
       fresh: snap.live_fresh !== false,
       searches: searches, hunting: active.length,
-      running: searches.filter(function (s) { return s.phase !== QUEUED; }),
-      queued: searches.filter(function (s) { return s.phase === QUEUED; }),
+      running: searches.filter(function (s) { return s.phase !== DISCOVERY_QUEUED; }),
+      queued: searches.filter(function (s) { return s.phase === DISCOVERY_QUEUED; }),
       groups: list(k.groups), boxes: list(k.boxes),
       mode: str(snap.mode) || "observe"
     };
@@ -282,16 +266,14 @@
         "Идут ли поиски и применяются ли обходы, отсюда не видно. Это не «ноль поисков», а отсутствие измерения.";
     } else if (m.hunting > 0) {
       m.tone = "live"; m.lamp = "ok";
-      m.headline = ["Идёт ", count(m.hunting, "поиск", "поиска", "поисков")];
+      m.headline = ["Идёт ", "подбор"];
       m.state = "Движок работает";
-      m.lede = "R2O исследует сетевой сбой и проверяет, восстанавливает ли обход обмен." +
-        (m.queued.length ? " Замеряется " + (m.hunting - m.queued.length) + ", " + m.queued.length + " " +
-          plural(m.queued.length, "ждёт", "ждут", "ждут") + " свободного слота замера." : "");
+      m.lede = "Измеряем сетевые сбои и проверяем стратегии.";
     } else {
       m.tone = "ok"; m.lamp = "ok";
-      m.headline = ["Поисков ", "нет"];
+      m.headline = ["Наблюдаем ", "за трафиком"];
       m.state = "Движок работает";
-      m.lede = "R2O наблюдает за соединениями. При устойчивом сетевом сбое запустится проверка.";
+      m.lede = "При устойчивом сетевом сбое запустится проверка.";
     }
     if (engine && !m.fresh) {
       m.lamp = "warn";
@@ -592,7 +574,7 @@
         }));
       }
       var parts = [].slice.call(screen.querySelectorAll(".screen-head, .status-panel, .overview-metric, .metric-card, .card, .family-card, .box-card, .diag-card, .tg-proxy, .release-hero, .diag-history"));
-      if (screen.id === "now") parts = [].slice.call(screen.querySelectorAll(".status-panel, .overview-metrics, .workload-card, .overview-side > *"));
+      if (screen.id === "now") parts = [].slice.call(screen.querySelectorAll(".status-panel, .workload-card, .overview-side > *"));
       g.killTweensOf(screen);
       g.killTweensOf(parts);
       this.screenMotion = Motion.track(g.timeline({ defaults: { ease: "power3.out", clearProps: "transform,opacity,visibility" } })
@@ -875,6 +857,7 @@
         self.catalogRevision = null;
         self.failed = true;
         self.renderEngineStatus(self.m);
+        if (self.m) self.renderNow(self.m);
         self.renderDnsProtection(self.m);
         self.renderMetaProtection(self.m);
         var staleBefore = bodyAttribute(self.doc, "data-stale");
@@ -1234,49 +1217,6 @@
     var newer = update.latest && update.latest.release_id && update.latest.release_id !== str(update.current);
     var bindings = 0;
     m.boxes.forEach(function (box) { bindings += list(box.bindings).length; });
-    var meas = m.k.measurements || {};
-    var activeMeasures = num(meas.active);
-    var limitMeasures = num(meas.limit);
-    var freePct = num(meas.free_pct);
-    var confirms = num(m.k.confirms) || 0;
-    var probes = num(m.k.probes_used) || 0;
-    var unfit = num(m.k.client_unfit);
-
-    var metricKey = JSON.stringify([m.hunting, m.queued.length, activeMeasures, limitMeasures, freePct, confirms, probes, unfit, broken]);
-    if (metrics.__r2oKey !== metricKey) {
-      metrics.__r2oKey = metricKey;
-      metrics.replaceChildren();
-      var measureValue = activeMeasures !== null && limitMeasures !== null ? activeMeasures + " / " + limitMeasures : "—";
-      var measureNote = freePct !== null ? "CPU роутера свободен на " + freePct + "%" : "CPU роутера не измерен";
-      var items = [
-        { route: "now", label: "Поиски", value: String(m.hunting), note: m.queued.length ? "в очереди " + m.queued.length : "очередь пуста", tone: m.hunting ? "live" : "" },
-        { route: "now", label: "Замеры", value: measureValue, note: measureNote, tone: "" },
-        { route: "now", label: "Очередь", value: String(m.queued.length), note: m.queued.length ? "ждут свободного слота" : "нет ожидающих", tone: m.queued.length ? "warn" : "" },
-        { route: "families", label: "Подтверждения", value: String(confirms), note: "за сессию", tone: confirms ? "ok" : "" },
-        { route: "diagnostics", label: "Зонды", value: String(probes), note: "отправлено", tone: "" },
-        { route: "diagnostics", label: "План не подошёл", value: unfit === null ? "—" : String(unfit), note: "клиент не принял", tone: unfit ? "warn" : "" }
-      ];
-      items.forEach(function (item) {
-        var card = item.route === "now" ? el(doc, "div", "metric-card") : el(doc, "a", "metric-card");
-        if (item.route !== "now") card.href = "#" + item.route;
-        card.setAttribute("data-route", item.route);
-        var top = el(doc, "div", "metric-top");
-        add(top, el(doc, "span", "metric-label", item.label));
-        var value = el(doc, "div", "metric-value", item.value);
-        value.setAttribute("data-tone", item.tone || "idle");
-        add(card, top, value, el(doc, "div", "metric-note", item.note));
-        metrics.appendChild(card);
-      });
-      if (Motion.on() && metrics.children.length && !metrics.__r2oSeen) {
-        /* Появление карточек — только при первом построении. При каждом
-           обновлении цифр повторять его нельзя: сетка мигает на опросе. */
-        metrics.__r2oSeen = true;
-        Motion.g.fromTo(metrics.children, { y: 4, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.2, stagger: 0.02, ease: "power2.out", clearProps: "all" });
-      } else if (metrics.children.length) {
-        metrics.__r2oSeen = true;
-      }
-    }
-
     var services = this.$("overview-services");
     if (services) {
       var updateState = newer ? "доступна " + (str(update.latest.version) || update.latest.release_id) :
@@ -2020,100 +1960,247 @@
   App.prototype.renderNow = function (m) {
     var doc = this.doc;
     var title = this.$("now-title");
-    var h = JSON.stringify(m.headline);
-    if (title.__r2oKey !== h) {
-      var prev = title.__r2oHeadline;
-      title.__r2oKey = h;
-      title.__r2oHeadline = m.headline;
-      var apply = function () { title.replaceChildren(doc.createTextNode(m.headline[0]), el(doc, "em", "", m.headline[1])); };
-      var from = prev && /^(\d+) /.exec(prev[1]), to = /^(\d+) /.exec(m.headline[1]);
-      if (!prev || !Motion.on()) {
-        apply();
-        if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(title);
-      } else if (from && to && prev[0] === m.headline[0]) {
-        /* Тот же заголовок, другое число: число прокручивается. */
-        apply();
-        var em = title.lastChild, n = { v: +from[1] };
-        Motion.g.to(n, { v: +to[1], duration: 0.4, ease: "power2.out", onUpdate: function () {
-          var v = Math.round(n.v);
-          em.textContent = count(v, "поиск", "поиска", "поисков");
-        } });
-        Motion.g.fromTo(em, { y: -5 }, { y: 0, duration: 0.32, ease: "back.out(3)" });
-      } else {
-        apply();
-        if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(title);
+    var unavailable = this.failed || m.engine && !m.fresh;
+    var headline = unavailable ? ["Состояние ", "неизвестно"] : m.headline;
+    var tone = unavailable ? "idle" : m.tone;
+    var key = JSON.stringify(headline);
+    if (title.__r2oKey !== key) {
+      var previous = title.__r2oKey;
+      title.__r2oKey = key;
+      title.replaceChildren(doc.createTextNode(headline[0]), el(doc, "em", "", headline[1]));
+      if (previous && discoveryMotion(title)) {
+        title.animate([{ opacity: .5, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }],
+          { duration: 170, easing: "ease-out" });
       }
     }
-    title.setAttribute("data-tone", m.tone);
-    this.$("now-lede").textContent = m.lede;
-    var panel = this.$("status-panel");
-    if (panel) panel.setAttribute("data-tone", m.tone);
-
-    var slots = this.$("slots");
-    var meas = m.k.measurements;
-    var wasActive = slots.__r2oActive;
-    var rebuilt = section(slots, JSON.stringify([m.linked, meas, m.k.targets, m.k.confirms, m.k.probes_used, m.k.client_unfit, m.groups.length, m.boxes.length]), function () {
-      var out = [];
-      if (m.linked && meas && num(meas.limit)) {
-        var sv = slotsView(meas);
-        var row = el(doc, "div", "slot-row");
-        row.title = sv.note;
-        if (sv.kind === "cells") {
-          var cells = el(doc, "div", "slot-cells");
-          cells.setAttribute("aria-hidden", "true");
-          for (var i = 0; i < sv.limit; i++) {
-            var c = el(doc, "span", "slot-cell");
-            c.setAttribute("data-on", String(i < sv.active));
-            cells.appendChild(c);
-          }
-          row.appendChild(cells);
-        } else {
-          /* Десятки замеров клетками не нарисовать честно — шкала с долей занятых. */
-          var bar = el(doc, "span", "slot-bar");
-          bar.setAttribute("aria-hidden", "true");
-          var fill = el(doc, "span", "slot-bar-fill");
-          fill.style.setProperty("--share", String(sv.active / sv.limit));
-          bar.appendChild(fill);
-          row.appendChild(bar);
-        }
-        add(row, el(doc, "span", "", "Замеры: " + sv.active + " из " + sv.limit +
-          (sv.queued ? ", в очереди " + sv.queued : "")), el(doc, "small", "slot-note", sv.short));
-        out.push(row);
-        if (num(meas.free_pct) !== null) {
-          out.push(el(doc, "span", "", "Свободно процессора " + meas.free_pct + "%" +
-            (num(meas.cores) ? " на " + count(meas.cores, "ядре", "ядрах", "ядрах") : "")));
-        }
-      }
-      if (m.linked) {
-        var facts = el(doc, "span", "");
-        add(facts,
-          el(doc, "b", "", String(num(m.k.confirms) || 0)), " " + plural(num(m.k.confirms) || 0, "подтверждение", "подтверждения", "подтверждений") + ", ",
-          el(doc, "b", "", String(num(m.k.probes_used) || 0)), " " + plural(num(m.k.probes_used) || 0, "зонд", "зонда", "зондов") + " за работу движка");
-        out.push(facts);
-        if (num(m.k.client_unfit)) {
-          var unfit = el(doc, "span", "");
-          add(unfit, tag(doc, "план не подошёл клиенту: " + m.k.client_unfit, "warn"));
-          out.push(unfit);
-        }
-      }
-      return out;
-    });
-    var nowActive = meas && num(meas.active) !== null ? meas.active : null;
-    if (rebuilt && Motion.on() && wasActive !== undefined && nowActive !== null && nowActive !== wasActive) {
-      var cellsNow = slots.querySelectorAll(".slot-cell");
-      var lit = [], dim = [];
-      for (var ci = 0; ci < cellsNow.length; ci++) {
-        if (ci >= Math.min(wasActive || 0, nowActive) && ci < Math.max(wasActive || 0, nowActive)) (ci < nowActive ? lit : dim).push(cellsNow[ci]);
-      }
-      if (lit.length) Motion.g.from(lit, { scale: 0.2, autoAlpha: 0, duration: 0.3, stagger: 0.05, ease: "back.out(2.4)", clearProps: "all" });
-      if (dim.length) {
-        var sig = global.getComputedStyle(doc.documentElement).getPropertyValue("--acc").trim() || "#7fd0d4";
-        Motion.g.from(dim, { backgroundColor: sig, duration: 0.35, ease: "power2.out", clearProps: "all" });
-      }
-    }
-    slots.__r2oActive = nowActive === null ? undefined : nowActive;
+    title.dataset.tone = tone;
+    var lede = unavailable ? "Свежий снимок движка пока недоступен." : m.lede;
+    if (this.$("now-lede").textContent !== lede) this.$("now-lede").textContent = lede;
+    this.$("status-panel").dataset.tone = tone;
+    var current = unavailable || !m.engine || !m.linked ? null : m;
+    this.renderDiscoveryMetrics(current);
 
     this.renderSearches(m);
+  };
+
+  function discoveryMotion(node) {
+    return !node.ownerDocument.hidden && !node.closest("[hidden]") &&
+      typeof node.animate === "function" && !global.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function searchKey(search) {
+    return JSON.stringify([search.target, search.family, search.transport, search.ip, search.port]);
+  }
+
+  var DISCOVERY_SLOT_GROUP = 6;
+  var DISCOVERY_SLOT_MAX = 64;
+
+  function animateDiscoverySlots(cells, before) {
+    cells.forEach(function (cell) {
+      if (cell.__layout) {
+        cell.__layout.cancel();
+        cell.__layout = null;
+      }
+    });
+    var after = cells.map(function (cell) { return cell.getBoundingClientRect(); });
+    cells.forEach(function (cell, index) {
+      var start = before[index], end = after[index];
+      if (!end.width || !end.height) return;
+      if (!start) {
+        cell.__layout = cell.animate([
+          { transform: "translateY(4px) scale(.72)", opacity: 0 },
+          { transform: "none", opacity: cell.hasAttribute("data-preview") ? .62 : 1 }
+        ], { duration: 340, delay: 95 + (index - before.length) % DISCOVERY_SLOT_GROUP * 30, easing: "ease-out", fill: "backwards" });
+        return;
+      }
+      var dx = start.left - end.left, dy = start.top - end.top;
+      var sx = start.width / end.width, sy = start.height / end.height;
+      if (Math.abs(dx) < .5 && Math.abs(dy) < .5 && Math.abs(sx - 1) < .01 && Math.abs(sy - 1) < .01) return;
+      cell.__layout = cell.animate([
+        { transform: "translate(" + dx + "px, " + dy + "px) scale(" + sx + ", " + sy + ")" },
+        { transform: "none" }
+      ], { duration: 460, easing: "ease-in-out" });
+    });
+  }
+
+  App.prototype.renderDiscoverySlots = function (active, limit) {
+    var doc = this.doc, slots = this.$("discovery-slots");
+    if (slots.__active === active && slots.__limit === limit) return;
+    var hasPrevious = Number.isSafeInteger(slots.__active) && slots.__active >= 0
+      && Number.isSafeInteger(slots.__limit) && slots.__limit > 0;
+    var reachedLimit = hasPrevious && slots.__active < slots.__limit && active >= limit;
+    slots.__active = active;
+    slots.__limit = limit;
+
+    var usable = Number.isSafeInteger(active) && active >= 0 && Number.isSafeInteger(limit) && limit > 0;
+    slots.toggleAttribute("data-unavailable", !usable);
+    var status = this.$("discovery-capacity-status");
+    if (!usable) {
+      status.textContent = "Нет данных";
+      status.removeAttribute("data-full");
+      slots.setAttribute("aria-label", "Загрузка слотов неизвестна");
+      return;
+    }
+
+    var actual = Math.min(limit, DISCOVERY_SLOT_MAX);
+    var filled = Math.min(active, limit) * actual / limit;
+    var group = Math.floor(filled / DISCOVERY_SLOT_GROUP);
+    var count = Math.min(DISCOVERY_SLOT_MAX, Math.max(actual, group ? (group + 1) * DISCOVERY_SLOT_GROUP : actual));
+    var moving = hasPrevious && discoveryMotion(slots);
+    var before = moving && slots.__visible !== count
+      ? Array.from(slots.children).slice(0, slots.__visible).map(function (cell) { return cell.getBoundingClientRect(); })
+      : null;
+    slots.__visible = count;
+    var free = Math.max(0, limit - active);
+    status.textContent = free ? "Свободно " + free : "Все " + limit + " заняты";
+    status.toggleAttribute("data-full", free === 0);
+    slots.title = count > actual ? "Пунктиром показаны ячейки вне текущего лимита" : "";
+    slots.setAttribute("aria-label", "Занято " + active + " из " + limit + " слотов замеров" + (slots.title ? ". " + slots.title : ""));
+    slots.style.setProperty("--slot-columns", String(Math.min(count, 18)));
+    slots.toggleAttribute("data-compact", count > DISCOVERY_SLOT_GROUP);
+    slots.toggleAttribute("data-dense", count > DISCOVERY_SLOT_GROUP * 2);
+    while (slots.children.length < count) {
+      var cell = el(doc, "span", "discovery-slot");
+      add(cell, el(doc, "span", "discovery-slot-fill"), el(doc, "span", "discovery-slot-signal"));
+      slots.appendChild(cell);
+    }
+    var pulsesLeft = moving ? 16 : 0;
+    Array.from(slots.children).forEach(function (cell, index) {
+      cell.hidden = index >= count;
+      if (cell.hidden && cell.__layout) {
+        cell.__layout.cancel();
+        cell.__layout = null;
+      }
+      var fill = Math.max(0, Math.min(1, filled - index));
+      var style = cell.firstElementChild.style;
+      var previous = Number(style.getPropertyValue("--slot-fill"));
+      var signal = cell.lastElementChild;
+      if (previous !== fill) style.setProperty("--slot-fill", String(fill));
+      cell.toggleAttribute("data-occupied", fill > 0);
+      cell.toggleAttribute("data-preview", index >= actual && index < count);
+      if (cell.hidden || fill === 0) {
+        if (signal.__animation) signal.__animation.cancel();
+        signal.__animation = null;
+        return;
+      }
+      if (!pulsesLeft || (!reachedLimit && fill <= previous)) return;
+      pulsesLeft--;
+      if (signal.__animation) signal.__animation.cancel();
+      signal.__animation = signal.animate(reachedLimit ? [
+        { transform: "scale(.84)", opacity: 0 },
+        { transform: "scale(1)", opacity: .95, offset: .34 },
+        { transform: "scale(1)", opacity: 0 }
+      ] : [
+        { transform: "translateX(-70%)", opacity: 0 },
+        { opacity: 1, offset: .26 },
+        { transform: "translateX(68%)", opacity: 0 }
+      ], { duration: reachedLimit ? 440 : 500, delay: reachedLimit ? 180 + Math.min(index % 16, 9) * 43 : 0, easing: "ease-out" });
+    });
+    if (before) animateDiscoverySlots(Array.from(slots.children).slice(0, count), before);
+  };
+
+  function renderDiscoveryReading(value, next, limit, moving) {
+    var previous = value.__number, previousLimit = value.__limit;
+    if (previous === next && previousLimit === limit) return;
+    value.__number = next;
+    value.__limit = limit;
+
+    var reading = value.firstElementChild;
+    if (reading.__animation) {
+      reading.__animation.cancel();
+      reading.__animation = null;
+    }
+    if (value.__outgoing) {
+      value.__outgoing.__animation.cancel();
+      value.__outgoing.remove();
+      value.__outgoing = null;
+    }
+
+    var animate = moving && next !== null;
+    var direction = (previous === next ? limit - previousLimit : next - previous) < 0 ? -1 : 1;
+    var timing = { duration: 360, easing: "ease-out" };
+    if (animate && Number.isFinite(previous)) {
+      var outgoing = reading.cloneNode(true);
+      outgoing.classList.add("metric-reading-outgoing");
+      outgoing.firstElementChild.removeAttribute("class");
+      outgoing.setAttribute("aria-hidden", "true");
+      value.appendChild(outgoing);
+      value.__outgoing = outgoing;
+      outgoing.__animation = outgoing.animate([
+        { opacity: 1, transform: "translateY(0)" },
+        { opacity: 0, transform: "translateY(" + -direction * 85 + "%)" }
+      ], timing);
+      outgoing.__animation.onfinish = function () {
+        outgoing.remove();
+        if (value.__outgoing === outgoing) value.__outgoing = null;
+      };
+    }
+
+    reading.firstElementChild.textContent = next === null ? "—" : String(next);
+    if (reading.children[1]) reading.children[1].textContent = limit === null ? "" : " / " + limit;
+    if (animate) {
+      var animation = reading.animate([
+        { opacity: .25, transform: "translateY(" + direction * 85 + "%)" },
+        { opacity: 1, transform: "translateY(0)" }
+      ], timing);
+      reading.__animation = animation;
+      animation.onfinish = function () {
+        if (reading.__animation === animation) reading.__animation = null;
+      };
+    }
+  }
+
+  App.prototype.renderDiscoveryMetrics = function (m) {
+    var doc = this.doc, root = this.$("overview-metrics"), cpu = this.$("discovery-cpu");
+    var meas = m && m.k.measurements || {};
+    var limit = num(meas.limit), active = num(meas.active), free = num(meas.free_pct);
+    var values = m ? [m.hunting, active, m.queued.length, num(m.k.confirms), num(m.k.probes_used), num(m.k.client_unfit)] : [];
+    var key = JSON.stringify([values, limit, free]);
+    if (!root.children.length) {
+      [["Поиски"], ["Замеры"], ["Очередь"], ["Подтверждения", "families"], ["Зонды", "diagnostics"], ["План не подошёл", "diagnostics"]]
+        .forEach(function (item, index) {
+          var card = el(doc, item[1] ? "a" : "div", "metric-card");
+          if (item[1]) card.href = "#" + item[1];
+          var value = el(doc, "div", "metric-value");
+          var reading = el(doc, "span", "metric-reading");
+          reading.appendChild(el(doc, "span", "metric-number", "—"));
+          if (index === 1) reading.appendChild(el(doc, "span", "metric-limit"));
+          value.appendChild(reading);
+          add(card, el(doc, "span", "metric-label", item[0]), value);
+          if (index === 3) {
+            var flash = el(doc, "span", "discovery-confirmation");
+            flash.setAttribute("aria-hidden", "true");
+            card.appendChild(flash);
+          }
+          root.appendChild(card);
+        });
+    }
+    if (root.__r2oKey === key) return;
+    root.__r2oKey = key;
+
+    var moving = discoveryMotion(root);
+    Array.from(root.children).forEach(function (card, index) {
+      var value = card.querySelector(".metric-value");
+      var next = values[index] == null || index === 1 && !limit ? null : values[index];
+      var previous = value.__number;
+      value.dataset.tone = next > 0 ? ["live", "", "warn", "ok", "", "warn"][index] : "";
+      renderDiscoveryReading(value, next, index === 1 && next !== null ? limit : null, moving);
+      if (moving && index === 3 && Number.isFinite(previous) && next > previous) {
+        var flash = card.querySelector(".discovery-confirmation");
+        if (flash.__animation) flash.__animation.cancel();
+        flash.__animation = flash.animate([{ opacity: .13 }, { opacity: 0 }], { duration: 360, easing: "ease-out" });
+      }
+    });
+
+    this.renderDiscoverySlots(active, limit);
+    var used = free === null ? null : Math.round(Math.max(0, Math.min(100, 100 - free)));
+    var cpuValue = this.$("discovery-cpu-value");
+    var valueText = used === null ? "—" : used + "%";
+    var cpuTitle = used === null ? "Нет свежего замера CPU"
+      : "По самому загруженному ядру, если доступны данные по ядрам.";
+    if (cpuValue.textContent !== valueText) cpuValue.textContent = valueText;
+    if (cpu.title !== cpuTitle) cpu.title = cpuTitle;
+    this.$("discovery-cpu-fill").style.transform = "scaleX(" + (used ?? 0) / 100 + ")";
   };
 
   function searchResultTime(search) {
@@ -2170,7 +2257,7 @@
     var animate = Motion.on() && Motion.Flip;
     var stable = [];
     for (var si = 0; si < listNode.children.length; si++) if (!listNode.children[si].__leaving) stable.push(listNode.children[si]);
-    var wantKeys = running.map(function (x) { return JSON.stringify([x.target, x.family, x.transport, x.ip, x.port]); });
+    var wantKeys = running.map(searchKey);
     if (m.queued.length) wantKeys.push("queue");
     var haveKeys = stable.map(function (r) { return r.__r2oKey; });
     var flipState = animate && stable.length && wantKeys.join("\n") !== haveKeys.join("\n") ? Motion.Flip.getState(stable) : null;
@@ -3459,25 +3546,21 @@
     var fresh = !this.failed && m && m.engine && m.linked && m.snap.live_fresh === true;
     var source = m && m.k.dns_source_status;
     var now = this.serverNow();
-    var rows = configured.filter(function (row) {
-      if (source !== "known" && source !== "activity_unknown" || row.scope !== "router") return false;
-      if (row.activity === "active") return true;
-      var seen = parseTime(row.router_seen_at);
-      return source === "known" && row.activity === "observed" &&
-        seen !== null && seen <= now && now - seen <= 3 * 60 * 1000;
-    });
+    var rows = configured.filter(function (row) { return row.scope === "router"; });
+    var inventory = fresh && (source === "known" || source === "activity_unknown");
     var time = rows.map(function (row) {
       var checked = parseTime(row.checked_at);
-      return { checked: checked, stale: !fresh || (checked && now - checked > 360000) };
+      return { checked: checked, stale: !inventory || (checked !== null && (now - checked > 360000 || checked > now + 5000)) };
     });
-    var key = JSON.stringify([rows, time, fresh, source, configured.length]);
+    var key = JSON.stringify([rows, time, inventory, source]);
     if (root.__r2oKey === key) return;
     root.__r2oKey = key;
-    var message = !fresh || source !== "known" ? "Данные об активности системного DNS недоступны."
-      : rows.length ? "Точки системного DNS роутера — " + rows.length
-        : configured.length ? "Есть настройки зашифрованного DNS. Активность не подтверждена."
-        : "В поддерживаемых настройках роутера зашифрованные DNS-серверы не найдены.";
+    var message = !inventory ? "Текущее состояние системного DNS неизвестно."
+      : !rows.length ? "В доступных настройках роутера зашифрованный DNS не найден."
+        : source === "activity_unknown" ? "Журнал запросов недоступен. Доступность upstream проверяется отдельно."
+          : "";
     if (summary.textContent !== message) summary.textContent = message;
+    summary.hidden = !message;
     var doc = this.doc;
     var protocols = { doh: "DoH", dot: "DoT", doq: "DoQ", doh3: "DoH3" };
     var failures = {
@@ -3489,23 +3572,22 @@
       dns_response: "Некорректный ответ"
     };
     var states = {
-      detected: ["Замечен запрос", ""],
-      checking: ["Проверка", "warn"],
-      direct_ok: ["Доступен напрямую", "ok"],
-      plan_applied: ["Подбор", "warn"],
-      bypass_ok: ["Подбор", "warn"],
-      recovered: ["Обход работает", "ok"],
-      no_route: ["Нет маршрута", ""],
-      failed: ["Ошибка", "bad"],
-      no_bypass: ["Ошибка", "bad"]
+      unknown: ["Состояние неизвестно", "warn"],
+      checking: ["Проверяется", "warn"],
+      available: ["Доступен", "ok"],
+      unavailable: ["Недоступен", "bad"],
+      recovered: ["Восстановлен", "ok"]
     };
     var items = rows.map(function (row, index) {
       var observed = time[index];
-      var state = observed.stale ? ["Устарело", "warn"] : states[row.state] || states.detected;
-      if (!observed.stale && row.activity === "active") state = ["В работе · запросов не видно", ""];
-      if (row.state === "recovered" && (row.dns_answer_confirmed !== true || row.dns_answer_via_plan !== true || row.plan_applied !== true || !row.applied_plan_id || !observed.checked)) {
-        state = observed.stale ? state : states.checking;
-      }
+      var active = inventory ? row.service_active : null;
+      var phase = inventory && row.configured === true && active === true ? row.availability : "unknown";
+      if (phase === "recovered" && (row.dns_answer_confirmed !== true || row.dns_answer_via_plan !== true ||
+          row.plan_applied !== true || !row.applied_plan_id || observed.checked === null)) phase = "unknown";
+      if (phase === "available" && row.dns_answer_confirmed !== true) phase = "unknown";
+      if (phase !== "checking" && observed.stale) phase = "unknown";
+      var state = states[phase] || states.unknown;
+      var last = row.last_result;
       var item = el(doc, "li", "card dns-service");
       var address = str(row.resolved_ip || row.host);
       var family = address.indexOf(":") >= 0 ? "IPv6" : /^\d+(?:\.\d+){3}$/.test(address) ? "IPv4" : "";
@@ -3519,12 +3601,23 @@
       if ((row.protocol === "doh" || row.protocol === "doh3") && row.path && row.path !== "/") endpoint += str(row.path);
       item.appendChild(el(doc, "p", "dns-service-address", endpoint));
       var details = el(doc, "dl", "dns-service-details");
+      var usage = inventory ? row.usage_observed : null;
       var fields = [
-        ["Ответ DNS", typeof row.answer_rtt_ms === "number" ? row.answer_rtt_ms + " мс" : "—", ""],
-        ["Проверка", observed.checked ? localTime(observed.checked) : "—", ""]
+        ["Настройка", inventory && row.configured === true ? "Настроен" : "Неизвестно", ""],
+        ["Служба", active === true ? "Активна" : active === false ? "Выключена" : "Неизвестно", ""],
+        ["Запросы", usage === true ? "Подтверждены" : usage === false ? "Не замечены" : "Неизвестно", ""],
+        ["Ответ DNS", typeof row.answer_rtt_ms === "number" && (phase === "available" || phase === "recovered")
+          ? row.answer_rtt_ms + " мс" : "—", ""],
+        ["Последняя проверка", observed.checked === null ? "—" : localTime(observed.checked), ""]
       ];
+      if (last && states[last.state] && phase !== last.state) {
+        var lastTime = parseTime(last.checked_at);
+        var lastText = states[last.state][0] + (typeof last.answer_rtt_ms === "number" ? " · " + last.answer_rtt_ms + " мс" : "");
+        if (lastTime !== null) lastText += " · " + localTime(lastTime);
+        fields.push(["Последний результат", lastText, ""]);
+      }
       if (row.plan_applied === true && row.applied_plan_id) {
-        fields.push([observed.stale || row.state === "no_route" ? "Последний план" : "Применённый план", str(row.applied_plan_id), "dns-service-plan"]);
+        fields.push([phase === "recovered" ? "Применённый план" : "Последний план", str(row.applied_plan_id), "dns-service-plan"]);
       }
       fields.forEach(function (field) {
         var entry = el(doc, "div", "");
@@ -3532,10 +3625,13 @@
         details.appendChild(entry);
       });
       item.appendChild(details);
-      if (row.status_reason && (row.state !== "direct_ok" || row.failure)) {
+      var showError = inventory && active === true && !observed.stale &&
+        (phase === "unavailable" || phase === "unknown" && row.failure);
+      var message = showError || phase === "checking" ? row.status_reason : last && phase !== last.state ? last.reason : "";
+      if (message) {
         var reason = el(doc, "p", "dns-service-reason");
-        if (failures[row.failure]) reason.appendChild(el(doc, "strong", "", failures[row.failure]));
-        reason.appendChild(doc.createTextNode((failures[row.failure] ? " " : "") + str(row.status_reason)));
+        if (showError && failures[row.failure]) reason.appendChild(el(doc, "strong", "", failures[row.failure]));
+        reason.appendChild(doc.createTextNode((reason.firstChild ? " " : "") + str(message)));
         item.appendChild(reason);
       }
       return item;
@@ -3546,7 +3642,7 @@
     if (extraCount) {
       var label = "Ещё " + count(extraCount, "точка подключения", "точки подключения", "точек подключения");
       var failed = rows.slice(visible).filter(function (row, index) {
-        return !time[visible + index].stale && (row.state === "failed" || row.state === "no_bypass");
+        return !time[visible + index].stale && row.availability === "unavailable";
       }).length;
       if (failed) label += " · с ошибкой " + failed;
       if (more.firstElementChild.textContent !== label) more.firstElementChild.textContent = label;
@@ -3689,7 +3785,7 @@
   };
 
   var api = {
-    model: model, coveredBy: coveredBy, slotsView: slotsView, trackFor: trackFor, shapeLabel: shapeLabel,
+    model: model, coveredBy: coveredBy, trackFor: trackFor, shapeLabel: shapeLabel,
     planGist: planGist, plural: plural, duration: duration,
     telegramRouteName: telegramRouteName,
     telegramFailureStage: telegramFailureStage,

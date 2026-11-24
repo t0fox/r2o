@@ -150,16 +150,30 @@
 
     <main id="app">
       <section class="sheet screen-now" id="now" data-screen="now" data-title="Обзор" data-kicker="Пульт" aria-labelledby="now-title">
-        <div class="overview-hero">
-          <div class="status-panel" id="status-panel" data-tone="idle">
+        <section class="status-panel" id="status-panel" data-tone="idle" aria-labelledby="now-title">
+          <div class="discovery-head">
             <canvas class="pixel-trail" width="1" height="1" aria-hidden="true"></canvas>
-            <span class="eyebrow">Подбор обходов</span>
-            <h1 class="statement" id="now-title">Получаем состояние…</h1>
-            <p class="lede" id="now-lede"></p>
-            <div class="slots" id="slots"></div>
+            <div class="discovery-copy">
+              <span class="eyebrow">Discovery</span>
+              <h1 class="statement" id="now-title">Получаем состояние…</h1>
+              <p class="lede" id="now-lede"></p>
+            </div>
+            <div class="discovery-instrument">
+              <figure class="discovery-capacity">
+                <figcaption class="discovery-capacity-head">
+                  <strong>Слоты замеров</strong><span id="discovery-capacity-status">Нет данных</span>
+                </figcaption>
+                <div class="discovery-slots" id="discovery-slots" role="img" aria-label="Загрузка слотов неизвестна"></div>
+              </figure>
+              <div class="discovery-cpu" id="discovery-cpu" title="Нет свежего замера CPU">
+                <span id="discovery-cpu-label">Нагрузка CPU</span>
+                <span class="discovery-gauge" aria-hidden="true"><span id="discovery-cpu-fill"></span></span>
+                <span id="discovery-cpu-value" class="discovery-cpu-value">—</span>
+              </div>
+            </div>
           </div>
-          <div class="overview-metrics" id="overview-metrics" aria-label="Сводка по R2O"></div>
-        </div>
+          <div class="overview-metrics" id="overview-metrics" aria-label="Показатели Discovery"></div>
+        </section>
 
         <section class="overview-dns" id="dns-protection" aria-labelledby="dns-protection-title">
           <header class="card-head overview-dns-head">
