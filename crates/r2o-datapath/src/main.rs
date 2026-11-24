@@ -1674,8 +1674,7 @@ mod app {
                 "r2o-datapath: уведомления rtnetlink недоступны ({error}); оставляю опрос раз в 30 секунд"
             );
         }
-        if router_runtime
-            && options.protocol_family == libc::AF_INET as u16
+        if (raw.is_some() || router_runtime && options.protocol_family == libc::AF_INET as u16)
             && let Err(error) = route_monitor.r2o_watch_platform()
         {
             eprintln!("r2o-platform: неполная подписка на события сети: {error}");
@@ -2233,16 +2232,22 @@ mod app {
             udp_follow.r2o_age(now, follow_receive_seq);
             if route_ready {
                 match route_monitor.r2o_drain_watch() {
-                    Ok(true) => {
-                        if let Some(worker) = &platform_worker {
-                            worker.notify();
+                    Ok(changes) => {
+                        if changes.pmtu
+                            && let Some(raw) = &raw
+                        {
+                            raw.r2o_invalidate_route_mtu();
                         }
-                        route_watch_notifications = route_watch_notifications.saturating_add(1);
-                        let settled =
-                            (last_route_refresh + R2O_ROUTE_SETTLE_INTERVAL).max(Instant::now());
-                        next_route_refresh = next_route_refresh.min(settled);
+                        if changes.policy {
+                            if let Some(worker) = &platform_worker {
+                                worker.notify();
+                            }
+                            route_watch_notifications = route_watch_notifications.saturating_add(1);
+                            let settled = (last_route_refresh + R2O_ROUTE_SETTLE_INTERVAL)
+                                .max(Instant::now());
+                            next_route_refresh = next_route_refresh.min(settled);
+                        }
                     }
-                    Ok(false) => {}
                     Err(error) => {
                         eprintln!("r2o-datapath: ошибка чтения уведомлений rtnetlink: {error}");
                     }
@@ -2268,6 +2273,11 @@ mod app {
             if let Some((snapshot, route_status)) = route_snapshot {
                 route_gate = snapshot;
                 route_refresh_pending = false;
+                if route_status.changed
+                    && let Some(raw) = &raw
+                {
+                    raw.r2o_invalidate_route_mtu();
+                }
                 r2o_log_routes_refresh(&mut routes_log, &route_gate, &route_status, Instant::now());
                 if let (Some(raw), Some(ifindices)) =
                     (raw.as_ref(), route_gate.r2o_egress_ifindices())

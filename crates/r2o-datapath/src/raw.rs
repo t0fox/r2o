@@ -143,6 +143,10 @@ impl RawSocket {
         Some(mtu)
     }
 
+    pub fn r2o_invalidate_route_mtu(&self) {
+        self.route_mtu_cache.borrow_mut().entries.clear();
+    }
+
     /// Возвращает предел посылки для семейства и адреса назначения.
     pub fn packet_route_maxlen(&self, packet: &[u8]) -> usize {
         let Some((family, destination)) = r2o_packet_route_key(packet) else {
@@ -1991,6 +1995,22 @@ mod tests {
             std::fs::write(path, &output).unwrap();
         }
         assert!(output.contains("hit_declared_cap 1200"));
+    }
+
+    #[test]
+    fn r2o_после_смены_маршрута_pmtu_измеряется_заново() {
+        let socket = тестовый_raw_сокет(false);
+        let destination = [0x20; 16];
+        let lookup = |mtu| {
+            socket
+                .route_mtu_cache
+                .borrow_mut()
+                .r2o_get_or_lookup(6, destination, || mtu)
+        };
+        assert_eq!(lookup(1450), 1450);
+        assert_eq!(lookup(1500), 1450);
+        socket.r2o_invalidate_route_mtu();
+        assert_eq!(lookup(1500), 1500);
     }
 
     #[test]

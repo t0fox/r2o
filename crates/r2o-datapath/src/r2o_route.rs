@@ -746,13 +746,13 @@ impl R2oRouteMonitor {
     }
 
     /// Забирает ограниченную пачку уведомлений; потеря уведомления требует обновления.
-    pub fn r2o_drain_watch(&self) -> std::io::Result<bool> {
+    pub fn r2o_drain_watch(&self) -> std::io::Result<R2oRouteWatchChanges> {
         use std::os::fd::AsRawFd;
         let Some(watch) = self.watch.as_ref() else {
-            return Ok(false);
+            return Ok(R2oRouteWatchChanges::default());
         };
         let mut bytes = [0_u8; 8192];
-        let mut changed = false;
+        let mut changed = R2oRouteWatchChanges::default();
         for _ in 0..256 {
             let received = unsafe {
                 libc::recv(
@@ -763,7 +763,9 @@ impl R2oRouteMonitor {
                 )
             };
             if received > 0 {
-                changed |= r2o_route_watch_relevant(&bytes[..received as usize]);
+                let batch = r2o_route_watch_changes(&bytes[..received as usize]);
+                changed.policy |= batch.policy;
+                changed.pmtu |= batch.pmtu;
                 continue;
             }
             if received == 0 {
@@ -773,7 +775,7 @@ impl R2oRouteMonitor {
             match error.raw_os_error() {
                 Some(libc::EINTR) => continue,
                 Some(libc::ENOBUFS) => {
-                    changed = true;
+                    changed = R2oRouteWatchChanges::all();
                     continue;
                 }
                 // C `d2k_routemark_watch_drain`: любая иная ошибка recv
@@ -781,7 +783,7 @@ impl R2oRouteMonitor {
                 Some(libc::EAGAIN) | _ => return Ok(changed),
             }
         }
-        Ok(true)
+        Ok(R2oRouteWatchChanges::all())
     }
 
     /// Обновляет семейства независимо и сохраняет прежние данные при ошибке.
@@ -1437,22 +1439,46 @@ pub fn r2o_route_parse_lookup(bytes: &[u8]) -> Result<R2oRouteLookup, R2oRoutePa
     Ok(R2oRouteLookup::Pending)
 }
 
-/// Уведомления о линке, адресе, правилах и маршруте по умолчанию требуют обновления.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oRouteWatchChanges {
+    pub policy: bool,
+    pub pmtu: bool,
+}
+
+impl R2oRouteWatchChanges {
+    fn all() -> Self {
+        Self {
+            policy: true,
+            pmtu: true,
+        }
+    }
+}
+
+#[cfg(test)]
 pub fn r2o_route_watch_relevant(bytes: &[u8]) -> bool {
+    r2o_route_watch_changes(bytes).policy
+}
+
+fn r2o_route_watch_changes(bytes: &[u8]) -> R2oRouteWatchChanges {
     let Ok(messages) = r2o_route_messages(bytes) else {
-        return true;
+        return R2oRouteWatchChanges::all();
     };
-    messages.iter().any(|message| {
+    let mut changes = R2oRouteWatchChanges::default();
+    for message in messages {
         if matches!(
             message.kind,
             R2O_RTM_NEWRULE | R2O_RTM_DELRULE | 16 | 17 | 20 | 21
         ) {
             // RTM_NEWLINK, DELLINK, NEWADDR, DELADDR
-            return true;
+            return R2oRouteWatchChanges::all();
         }
-        matches!(message.kind, R2O_RTM_NEWROUTE | R2O_RTM_DELROUTE)
-            && (message.body.len() < R2O_ROUTE_HEADER_LEN || message.body[1] == 0)
-    })
+        if matches!(message.kind, R2O_RTM_NEWROUTE | R2O_RTM_DELROUTE) {
+            // Маршрут к отдельной сети меняет PMTU без смены WAN и правил RPDB.
+            changes.pmtu = true;
+            changes.policy |= message.body.len() < R2O_ROUTE_HEADER_LEN || message.body[1] == 0;
+        }
+    }
+    changes
 }
 
 struct R2oNetlinkMessage<'a> {
@@ -2354,10 +2380,9 @@ mod tests {
     fn r2o_уведомления_обновляют_состояние_только_для_правил_и_маршрутов_по_умолчанию() {
         let mut route = vec![0; R2O_ROUTE_HEADER_LEN];
         route[1] = 24;
-        assert!(!r2o_route_watch_relevant(&r2o_test_message(
-            R2O_RTM_NEWROUTE,
-            &route
-        )));
+        let change = r2o_route_watch_changes(&r2o_test_message(R2O_RTM_NEWROUTE, &route));
+        assert!(!change.policy);
+        assert!(change.pmtu);
         route[1] = 0;
         assert!(r2o_route_watch_relevant(&r2o_test_message(
             R2O_RTM_NEWROUTE,
@@ -2781,7 +2806,10 @@ mod tests {
             watch: Some(std::os::fd::OwnedFd::from(file)),
             sequence: 1,
         };
-        assert!(!monitor.r2o_drain_watch().unwrap());
+        assert_eq!(
+            monitor.r2o_drain_watch().unwrap(),
+            R2oRouteWatchChanges::default()
+        );
     }
 
     #[test]
