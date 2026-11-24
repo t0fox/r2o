@@ -25,13 +25,18 @@ parser.add_argument("--smp", type=int, default=1)
 parser.add_argument("--ram", type=int)
 parser.add_argument("--soak", type=int, default=600)
 parser.add_argument("--measure", action="store_true", help="Замер холодного и тёплого подбора из TLS-фикстуры")
+parser.add_argument("--rpdb", action="store_true", help="Проверка видимости NFQUEUE при разных путях LAN и зонда")
 parser.add_argument("--phase", choices=["install", "reboot", "discovery", "discovery-after-boot"], required=True)
 args = parser.parse_args()
 if args.measure and args.phase not in {"discovery", "discovery-after-boot"}:
     parser.error("--measure применяется к фазам discovery")
+if args.rpdb and (args.measure or args.phase not in {"discovery", "discovery-after-boot"}):
+    parser.error("--rpdb применяется к фазам discovery без --measure")
 discovery_markers = (("KEENETIC_DISCOVERY_MEASURE_PASS",) if args.measure else
+                     ("KEENETIC_RPDB_NFQUEUE_PASS",) if args.rpdb else
                      ("KEENETIC_TLS_DISCOVERY_PASS", "KEENETIC_TLS_REUSE_PASS"))
 discovery_timeout = 420 if args.measure else 250
+discovery_command = "exec /opt/lab/keenetic-discovery.sh" + (" rpdb" if args.rpdb else "")
 ram = args.ram or MODEL_RAM[args.model]
 cmd = [
     args.qemu, "-L", args.qemu_data, "-M", "malta", "-cpu", "34Kf" if args.smp > 1 else "24Kf",
@@ -106,13 +111,13 @@ with Path(args.log).open("wb") as log, subprocess.Popen(
             issue("exec /opt/lab/lifecycle.sh prepare", "PREPARE_PASS", timeout=90)
             issue("exec /opt/lab/lifecycle.sh clean", "CLEAN_INSTALL_PASS", timeout=120)
             if args.phase == "discovery":
-                issue("exec /opt/lab/keenetic-discovery.sh", *discovery_markers, timeout=discovery_timeout)
+                issue(discovery_command, *discovery_markers, timeout=discovery_timeout)
             else:
                 issue("exec /opt/lab/lifecycle.sh uninstall", "UNINSTALL_PASS", timeout=90)
                 issue("exec /opt/lab/lifecycle.sh upgrade", "PUBLISHED_UPGRADE_PASS", timeout=180)
         elif args.phase == "discovery-after-boot":
             expect(b"initrc finished: initrc started", 130)
-            issue("exec /opt/lab/keenetic-discovery.sh", *discovery_markers, timeout=discovery_timeout)
+            issue(discovery_command, *discovery_markers, timeout=discovery_timeout)
         else:
             await_boot()
             issue("exec /opt/lab/lifecycle.sh reboot-network", timeout=60)

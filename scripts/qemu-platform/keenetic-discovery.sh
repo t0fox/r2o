@@ -14,7 +14,7 @@ if [ "${1:-}" != isolated ]; then
     timestamps=$(cat /proc/sys/net/ipv4/tcp_timestamps)
     trap 'printf "%s\n" "$timestamps" >/proc/sys/net/ipv4/tcp_timestamps' EXIT
     printf '0\n' >/proc/sys/net/ipv4/tcp_timestamps
-    /opt/bin/busybox-bootstrap unshare -n /opt/bin/sh "$0" isolated
+    /opt/bin/busybox-bootstrap unshare -n /opt/bin/sh "$0" isolated "${1:-}"
     exit
 fi
 ip() { /opt/bin/ip "$@"; }
@@ -119,6 +119,26 @@ stop() {
     daemon=''
 }
 uptime_s() { cut -d. -f1 /proc/uptime; }
+if [ "${2:-}" = rpdb ]; then
+    # У клиента остаётся маршрут до сервера, для метки зонда маршрута нет.
+    ip route add unreachable default table 80
+    ip rule add pref 90 fwmark 46 lookup 80
+    launch
+    sequence() {
+        awk '$1 == 52692 && $2 != 0 && $3 == 0 && $6 == 0 && $7 == 0 {print $8}' /proc/net/netfilter/nfnetlink_queue
+    }
+    before=$(sequence)
+    request routed || true
+    after=$(sequence)
+    if [ -z "$before" ] || [ -z "$after" ] || [ "$after" -le "$before" ] || application routed ||
+        ! grep -q 'RPDB допускает разные пути' datapath.log || grep -q 'наблюдение TLS:' controller.log; then
+        cat routed.log datapath.log controller.log
+        exit 1
+    fi
+    stop
+    echo "KEENETIC_RPDB_NFQUEUE_PASS before=$before after=$after"
+    exit 0
+fi
 launch
 if [ -r "$LAB/tls/measure-discovery.sh" ]; then
     . "$LAB/tls/measure-discovery.sh"
