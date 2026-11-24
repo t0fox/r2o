@@ -17,7 +17,10 @@ def report(path):
     process = None
     uptime = None
     responses = 0
-    for line in path.read_text(errors="replace").splitlines():
+    log = path.read_text(errors="replace")
+    # Опрос Keenetic может вывести заголовок ещё записываемого замера.
+    _, snapshot, exported = log.rpartition("\nHOST_COMMAND cat /tmp/r2o-soak.log\n")
+    for line in (exported if snapshot else log).splitlines():
         marker = re.fullmatch(r"SOAK_SAMPLE elapsed_s=(\d+)", line)
         if marker:
             elapsed = int(marker[1])

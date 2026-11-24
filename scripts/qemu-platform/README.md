@@ -16,6 +16,8 @@ zig cc -target mipsel-linux-musleabi -mcpu=mips32r2+soft_float -static -Os \
 zig cc -target x86_64-linux-musl -static -Os scripts/qemu-platform/probe.c -o probe-x86_64
 ```
 
+Архив `r2o-qemu-platform-seeds.tar.gz` содержит готовые ядра, начальные файловые системы, пакеты стенда и тестовые клиенты. Перед запуском распакуйте его в отдельный каталог и выполните там `sha256sum -c SHA256SUMS`. Пути в командах ниже указывают на файлы из `keenetic/` или `openwrt/` этого архива. Оригинальные SquashFS Keenetic загружаются отдельно.
+
 ## Keenetic Viva и Hopper
 
 Используйте `keenetic49-virt-ppe.elf`, `initramfs.gz` и подготовленное дерево Entware из утверждённого стенда Keenetic. Дерево содержит `bin/opkg`, `bin/busybox-bootstrap`, `feed/`, `lab/opkg.conf` и `lab/xtables-legacy-multi`. Точные исходники и сборка ядра приводятся в `sources.md` архива стенда. `prepare-rootfs.py` извлекает SquashFS из оригинальной прошивки модели и проверяет хеш.
@@ -36,6 +38,8 @@ done
 Для Hopper создайте отдельный диск и замените `KN-1910` на `KN-3810` и `viva` на `hopper`. Runner записывает изменения в тестовый USB-диск и монтирует прошивку только для чтения. Исходный NDM не завершает старт на Malta из-за несовместимости модулей и платы. `nix-keenetic` воспроизводит OPKG lifecycle и вызывает оригинальные скрипты R2O. Запросы к системному NDM/NDNS по штатному IPC и аппаратный PPE/WHNAT остаются вне покрытия. Проверки с программным vendor `xt_PPE` содержатся также в предыдущем регрессионном сценарии стенда.
 
 Для TLS-фикстуры `R2O_LAB_TLS_DIR` указывает на дерево с распакованным `openssl-util` и его зависимостями Entware в `opt/`, архивом `python-fixture.tar.gz` с тестовым Python Entware и `tls-origin.py` под именем `peer.py`, тестовыми `cert.pem` и `key.pem`, а также `xt_u32.ko`, `xt_length.ko` и `xt_connmark.ko` из используемой сборки ядра. Запустите отдельный диск с `--phase discovery`. Сертификат нужен для `a.example.com`, который используется только внутри гостя. В OpenWrt эквивалент запускается штатным тестом `scripts/test-geneva-midpoint-netns.sh DATAPATH CONTROLLER --lan-discovery`.
+
+TLS-сценарий сначала проверяет сервер и контрольный отказ, затем ждёт автоматический подбор с пустым каталогом. Успех подтверждает полный ответ LAN-клиенту с проверенным сертификатом, HTTP 200 и заданным телом. Второй запрос выполняется после перезапуска datapath и controller и проверяет повторное применение сохранённой стратегии.
 
 ## OpenWrt
 
