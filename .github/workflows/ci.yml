@@ -142,11 +142,11 @@ jobs:
               test_shell='bash'
             fi
             status=0
-            if [ "$test_name" = test-router-firewall.sh ] || [ "$test_name" = test-router-dns-route-netns.sh ]; then
-              sudo sh "$test" || status=$?
-            else
-              "$test_shell" "$test" || status=$?
-            fi
+            case "$test_name" in
+              test-router-firewall.sh|test-router-dns-route-netns.sh|test-router-flowtable-netns.sh)
+                sudo sh "$test" || status=$? ;;
+              *) "$test_shell" "$test" || status=$? ;;
+            esac
             if [ "$status" -ne 0 ]; then
               failed+=("$test ($status)")
             fi

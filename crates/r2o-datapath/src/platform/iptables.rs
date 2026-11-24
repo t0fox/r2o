@@ -338,8 +338,11 @@ fn mangle(
         "-p ipv6-icmp --icmpv6-type 3/0"
     };
     rules.push("R2O_IN", format!("{icmp} {target}"));
-    if ppe {
-        ppe_rules(platform, version, &mut rules);
+    if ppe
+        && value("R2O_PPE_DEOFFLOAD", "1") != "0"
+        && let Some(target) = ppe_target(platform, version)
+    {
+        ppe_rules(platform, version, &target, &mut rules);
     }
     rules.hook("POSTROUTING", "-j R2O_OUT".into());
     rules.hook("FORWARD", "-j R2O_IN".into());
@@ -352,12 +355,9 @@ fn mangle(
     rules
 }
 
-fn ppe_rules(platform: &Platform, version: u8, rules: &mut Rules) {
-    if platform.kind != Kind::Keenetic
-        || platform.software_path.is_empty()
-        || value("R2O_PPE_DEOFFLOAD", "1") == "0"
-    {
-        return;
+pub(super) fn ppe_target(platform: &Platform, version: u8) -> Option<String> {
+    if platform.kind != Kind::Keenetic {
+        return None;
     }
     let feature = if version == 4 {
         "ip_tables_targets"
@@ -370,8 +370,26 @@ fn ppe_rules(platform: &Platform, version: u8, rules: &mut Rules) {
         || !fs::read_to_string(platform.proc.join("net").join(feature))
             .is_ok_and(|text| text.lines().any(|line| line == ppe))
     {
-        return;
+        return None;
     }
+    Some(ppe)
+}
+
+fn ppe_rules(platform: &Platform, version: u8, ppe: &str, rules: &mut Rules) {
+    let early = number::<u32>(&value("R2O_PPE_CONNSKIP", "30"))
+        .unwrap_or(30)
+        .max(u32::from(platform.early));
+    let http = number::<u32>(&value("R2O_PPE_HTTP_CONNSKIP", "1000000"))
+        .unwrap_or(1000000)
+        .max(early);
+    let voice = early.max(u32::from(platform.voice_window.1));
+    let emit = |rules: &mut Rules, matches: &str, depth| {
+        let rule = format!(
+            "{matches} -m connskip --connskip {depth} -m comment --comment {PPE_TAG} -j {ppe}"
+        );
+        rules.hook("PREROUTING", rule.clone());
+        rules.hook("FORWARD", rule);
+    };
     for endpoint in platform
         .software_path
         .iter()
@@ -384,18 +402,35 @@ fn ppe_rules(platform: &Platform, version: u8, rules: &mut Rules) {
             ..
         } = endpoint;
         let depth = if *protocol == "tcp" && has_port(&platform.http, *port) {
-            number::<u32>(&value("R2O_PPE_HTTP_CONNSKIP", "1000000")).unwrap_or(1000000)
+            http
         } else {
-            number::<u32>(&value("R2O_PPE_CONNSKIP", "30"))
-                .unwrap_or(30)
-                .max(u32::from(platform.early))
-                .max(u32::from(platform.voice_window.1))
+            voice
         };
-        let rule = format!(
-            "-p {protocol} -m conntrack --ctorigdst {address} --ctorigdstport {port} -m connskip --connskip {depth} -m comment --comment {PPE_TAG} -j {ppe}"
+        emit(
+            rules,
+            &format!("-p {protocol} -m conntrack --ctorigdst {address} --ctorigdstport {port}"),
+            depth,
         );
-        rules.hook("PREROUTING", rule.clone());
-        rules.hook("FORWARD", rule);
+    }
+    // Правила ставятся до NFQUEUE в обоих hooks, как в прежнем адаптере PPE.
+    // Для ответа проверяем исходный порт сервера, для запроса — порт назначения.
+    let ports = [
+        Some(("tcp", &platform.http, http)),
+        Some(("tcp", &platform.ports, early)),
+        Some(("udp", &platform.ports, early)),
+        (platform.ports != "0:65535" || voice > early).then_some(("udp", &platform.voice, voice)),
+    ];
+    for (protocol, ports, depth) in ports.into_iter().flatten() {
+        for (direction, field) in [("ORIGINAL", "dports"), ("REPLY", "sports")] {
+            emit(
+                rules,
+                &format!(
+                    "-p {protocol} -m conntrack ! --ctstate DNAT --ctdir {direction} -m multiport --{field} {ports} -m multiport ! --{field} {}",
+                    platform.dns
+                ),
+                depth,
+            );
+        }
     }
 }
 
@@ -585,8 +620,21 @@ pub(super) fn fingerprint(platform: &Platform, ipv6: bool, hash: &mut Sha256) ->
             "{version}:{table}:{:?}:{:?}",
             state.chains, state.hooks
         ));
+        if table == "mangle" && value("R2O_PPE_DEOFFLOAD", "1") != "0" {
+            // После перезагрузки NDM цель PPE может появиться после базовых цепочек.
+            hash.update(ppe_target(platform, version).unwrap_or_default());
+        }
     }
     Ok(())
+}
+
+pub(super) fn ppe_installed(version: u8) -> Result<bool> {
+    Ok(list(version, "mangle")?.lines().any(|line| {
+        line.split_ascii_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|words| words[0] == "--comment" && words[1].trim_matches('"') == PPE_TAG)
+    }))
 }
 
 pub(super) fn install(
@@ -623,8 +671,11 @@ pub(super) fn install(
             let result = (Iptables { version, table }).apply(&render(&before, &desired));
             if let Err(err) = result {
                 let needs_broadcast = version == 4 && err.to_string().contains("addrtype");
-                let optional_ppe =
-                    platform.kind == Kind::Keenetic && !platform.software_path.is_empty();
+                let optional_ppe = desired
+                    .hooks
+                    .values()
+                    .flatten()
+                    .any(|(_, rule)| rule.contains(PPE_TAG));
                 if table != "mangle" || !(needs_broadcast || optional_ppe) {
                     return Err(err);
                 }
@@ -733,5 +784,30 @@ mod tests {
         assert!(supports_wait("iptables v1.4.21"));
         assert!(supports_wait("ip6tables v1.8.11 (legacy)"));
         assert!(!supports_wait("iptables: unknown vendor release"));
+    }
+
+    #[test]
+    fn ppe_keeps_a_window_for_unknown_flows_in_both_directions() {
+        let mut platform = Platform::detect().unwrap();
+        platform.software_path.clear();
+        platform.ports = "0:65535".into();
+        let mut rules = Rules::default();
+        ppe_rules(&platform, 4, "PPE", &mut rules);
+        for chain in ["PREROUTING", "FORWARD"] {
+            let rules = &rules.hooks[chain];
+            for protocol in ["tcp", "udp"] {
+                for (direction, field) in [("ORIGINAL", "dports"), ("REPLY", "sports")] {
+                    assert!(rules.iter().any(|(_, rule)| {
+                        rule.starts_with(&format!("-p {protocol} "))
+                            && rule.contains(&format!(
+                                "--ctdir {direction} -m multiport --{field} 0:65535"
+                            ))
+                            && rule.contains("-m connskip --connskip ")
+                            && rule.ends_with("-j PPE")
+                    }));
+                }
+            }
+            assert!(rules.iter().all(|(_, rule)| !rule.contains("--ctorigdst")));
+        }
     }
 }

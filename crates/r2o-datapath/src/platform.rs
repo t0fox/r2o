@@ -765,6 +765,15 @@ fn checked(binary: &str, args: &[&str], output: Output) -> Result<String> {
 }
 
 fn invoke(binary: &str, args: &[&str], input: Option<&str>) -> Result<Output> {
+    invoke_before(binary, args, input, Instant::now() + Duration::from_secs(2))
+}
+
+fn invoke_before(
+    binary: &str,
+    args: &[&str],
+    input: Option<&str>,
+    deadline: Instant,
+) -> Result<Output> {
     let mut command = Command::new(binary);
     if binary == "ndmc" {
         command
@@ -784,7 +793,6 @@ fn invoke(binary: &str, args: &[&str], input: Option<&str>) -> Result<Output> {
         .process_group(0);
     let mut child = command.spawn()?;
     // На старых роутерах ndmc или resolver могут зависнуть после смены WAN.
-    let deadline = Instant::now() + Duration::from_secs(2);
     let done = std::sync::atomic::AtomicBool::new(false);
     let pid = child.id() as i32;
     std::thread::scope(|scope| {
@@ -895,6 +903,11 @@ pub fn cli(args: &[String]) -> Result<()> {
             }
             if platform.kind == Kind::Keenetic {
                 keenetic::offload_status(&platform);
+            } else if platform.kind == Kind::OpenWrt && platform.backend == Backend::Nft {
+                match nft::admission_status(&platform, ipv6) {
+                    Ok(status) => println!("fw4_admission={status}"),
+                    Err(err) => return Err(err),
+                }
             }
             if let Some(reason) = optional(&platform.run.join("platform.offload-error"))? {
                 println!("offload=limited ({reason})");
@@ -903,7 +916,8 @@ pub fn cli(args: &[String]) -> Result<()> {
         Some("dns-route") => platform.dns_route(&args[1..])?,
         Some("ppe") => match args.get(1).map(String::as_str) {
             Some("status") => keenetic::offload_status(&platform),
-            Some("ensure" | "remove") => {
+            Some("ensure") => platform.reconcile(false, false)?,
+            Some("remove") => {
                 let _lock = platform.lock()?;
                 if platform.backend == Backend::Iptables {
                     iptables::clear_ppe()?;

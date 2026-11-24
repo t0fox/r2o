@@ -29,11 +29,28 @@ pub(super) fn offload_status(platform: &Platform) {
     let fastnat = fs::read_to_string(platform.proc.join("sys/net/netfilter/nf_conntrack_fastnat"))
         .map(|value| value.trim().to_owned())
         .unwrap_or_else(|_| "unknown".into());
-    let target = value("R2O_PPE_TARGET", "PPE");
-    let present = fs::read_to_string(platform.proc.join("net/ip_tables_targets"))
-        .is_ok_and(|contents| contents.lines().any(|line| line == target));
+    let state = |version| {
+        if value("R2O_PPE_DEOFFLOAD", "1") == "0" {
+            return "disabled";
+        }
+        if iptables::ppe_target(platform, version).is_none() {
+            return "unavailable";
+        }
+        match iptables::ppe_installed(version) {
+            Ok(true) => "installed",
+            Ok(false) => "missing",
+            Err(_) => "unknown",
+        }
+    };
+    let present = iptables::ppe_target(platform, 4).is_some();
+    let v4 = state(4);
+    let v6 = if platform.use_ipv6() {
+        state(6)
+    } else {
+        "disabled"
+    };
     println!(
-        "PPE: target={} FastNAT={fastnat} lan_coverage=unverified",
+        "PPE: target={} ipv4_rules={v4} ipv6_rules={v6} FastNAT={fastnat} lan_coverage=unverified",
         if present { "present" } else { "unavailable" }
     );
 }
@@ -131,17 +148,62 @@ fn addresses(text: &str) -> BTreeSet<IpAddr> {
 }
 
 pub(super) fn dns_exclusions(previous: &str) -> Result<String> {
-    let text = command("ndmc", &["-c", "show dns-proxy"], None)?;
+    let dump = command("ndmc", &["-c", "more temp:ndnproxymain.conf"], None)
+        .and_then(|text| {
+            upstreams(&text)?;
+            Ok(text)
+        })
+        .or_else(|_| command("ndmc", &["-c", "show dns-proxy"], None))?;
     let deadline = Instant::now() + Duration::from_secs(2);
-    merge_exclusions(&text, previous, |host| {
-        if Instant::now() >= deadline {
-            return BTreeSet::new();
-        }
-        command("nslookup", &[host, "127.0.0.1"], None)
-            .ok()
+    merge_exclusions(&dump, previous, |host| {
+        bootstrap_addresses(host, &dump, |host, server| {
+            let now = Instant::now();
+            if now >= deadline {
+                return BTreeSet::new();
+            }
+            let args = [host, &server.to_string()];
+            invoke_before(
+                "nslookup",
+                &args,
+                None,
+                deadline.min(now + Duration::from_millis(500)),
+            )
+            .and_then(|output| checked("nslookup", &args, output))
             .map(|text| addresses(&text))
             .unwrap_or_default()
+        })
     })
+}
+
+fn bootstrap_addresses(
+    host: &str,
+    dump: &str,
+    mut lookup: impl FnMut(&str, IpAddr) -> BTreeSet<IpAddr>,
+) -> BTreeSet<IpAddr> {
+    // Для bootstrap используем только обычные глобальные DNS из NDM.
+    // Доменные и зашифрованные upstream нельзя опрашивать как DNS на :53.
+    let servers = dump.lines().filter_map(|line| {
+        let mut words = line.split_whitespace();
+        if words.next()? != "dns_server" || words.next()? != "=" {
+            return None;
+        }
+        let (address, port) = host_port(words.next()?, 53)?;
+        let address: IpAddr = address.parse().ok()?;
+        (port == 53
+            && words.next() == Some(".")
+            && words.next().is_none()
+            && !address.is_loopback()
+            && !address.is_unspecified()
+            && !address.is_multicast())
+        .then_some(address)
+    });
+    std::iter::once(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .chain(servers.take(2))
+        .find_map(|server| {
+            let found = lookup(host, server);
+            (!found.is_empty()).then_some(found)
+        })
+        .unwrap_or_default()
 }
 
 fn merge_exclusions(
@@ -198,6 +260,34 @@ mod tests {
             .unwrap(),
             "dns.example 192.0.2.8 443\n"
         );
+    }
+
+    #[test]
+    fn dead_loopback_resolver_uses_only_configured_global_plain_dns() {
+        let dump = "dns_server = 192.0.2.1 example.lan\ndns_server = 192.0.2.2:853 .\n\
+                    dns_server = 127.0.0.1 # https://dns.example/dns-query\n\
+                    dns_server = 192.0.2.3 .\n";
+        let mut calls = Vec::new();
+        let assigned_ip: IpAddr = "198.51.100.2".parse().unwrap();
+        let merged = merge_exclusions(dump, "", |host| {
+            bootstrap_addresses(host, dump, |host, server| {
+                calls.push((host.to_owned(), server));
+                if server.is_loopback() {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([assigned_ip])
+                }
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                ("dns.example".into(), "127.0.0.1".parse().unwrap()),
+                ("dns.example".into(), "192.0.2.3".parse().unwrap())
+            ]
+        );
+        assert!(merged.contains("dns.example 198.51.100.2 443\n"));
     }
 
     #[test]

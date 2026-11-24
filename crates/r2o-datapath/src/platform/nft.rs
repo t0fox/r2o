@@ -369,47 +369,29 @@ fn offload_diff(existing: &str, desired: &[String]) -> String {
     edits
 }
 
-pub(super) fn offload(platform: &Platform, ipv6: bool, remove_rules: bool) -> Result<()> {
-    let selected: Vec<_> = platform
+fn port_match(ports: &str) -> String {
+    if ports.contains(',') {
+        let mut members: Vec<_> = ports.split(',').collect();
+        // nft list сортирует значения набора численно, включая интервалы.
+        members.sort_unstable_by_key(|member| {
+            member
+                .split(':')
+                .next()
+                .and_then(|port| port.parse::<u16>().ok())
+        });
+        format!("{{ {} }}", nft_ports(&members.join(",")))
+    } else {
+        nft_ports(ports)
+    }
+}
+
+fn admission_rules(platform: &Platform, ipv6: bool) -> Vec<String> {
+    let mut desired = Vec::new();
+    for endpoint in platform
         .software_path
         .iter()
-        .filter(|endpoint| !remove_rules && (endpoint.version() == 4 || ipv6))
-        .collect();
-    let Some(forward) = fw4_chain("forward")? else {
-        return Ok(());
-    };
-    let admission = forward
-        .lines()
-        .filter_map(handle)
-        .find(|(rule, _)| matches!(*rule, ADMISSION | ADMISSION_ALTERNATE | OFFLOAD_JUMP));
-    let own = fw4_chain(OFFLOAD_CHAIN)?;
-    if let Some(ref chain) = own
-        && !chain
-            .lines()
-            .any(|line| line.trim_start().starts_with("comment \"r2o-managed\""))
+        .filter(|ep| ep.version() == 4 || ipv6)
     {
-        return Err(error("fw4: цепочка r2o_offload принадлежит другой службе"));
-    }
-    if selected.is_empty() {
-        if let Some((OFFLOAD_JUMP, id)) = admission {
-            Nft.apply(&format!(
-                "replace rule inet fw4 forward handle {id} {ADMISSION}\ndelete chain inet fw4 {OFFLOAD_CHAIN}\n"
-            ))?;
-        } else if own.is_some() {
-            Nft.apply(&format!("delete chain inet fw4 {OFFLOAD_CHAIN}\n"))?;
-        }
-        return Ok(());
-    }
-    let Some((current, id)) = admission else {
-        if forward.contains("flow add") || forward.contains("flow offload") {
-            return Err(error(
-                "неподдерживаемое правило admission fw4, штатное ускорение сохранено",
-            ));
-        }
-        return Ok(());
-    };
-    let mut desired = Vec::new();
-    for endpoint in selected {
         let family = if endpoint.version() == 4 { "ip" } else { "ip6" };
         let Endpoint {
             address,
@@ -419,7 +401,81 @@ pub(super) fn offload(platform: &Platform, ipv6: bool, remove_rules: bool) -> Re
         } = endpoint;
         desired.push(format!("meta l4proto {protocol} ct original {family} daddr {address} ct original proto-dst {port} return"));
     }
+
+    let family = if ipv6 { "" } else { "meta nfproto ipv4 " };
+    let dns = port_match(&platform.dns);
+    let http = port_match(&platform.http);
+    // HTTP остаётся видимым для следующего запроса на том же соединении.
+    desired.push(format!("{family}meta l4proto tcp ct status != dnat ct original proto-dst != {dns} ct original proto-dst {http} return"));
+
+    let general = ("{ tcp, udp }", platform.ports.as_str(), platform.early);
+    let voice = ("udp", platform.voice.as_str(), platform.voice_window.1);
+    for (protocols, ports, window) in [general, voice] {
+        if window == 0
+            || protocols == "udp" && platform.ports == "0:65535" && window <= platform.early
+        {
+            continue;
+        }
+        let ports = if ports == "0:65535" {
+            String::new()
+        } else {
+            format!("ct original proto-dst {} ", port_match(ports))
+        };
+        // Оба направления имеют своё окно NFQUEUE. Общий предел сохраняет
+        // ускорение длинной передачи при редких пакетах обратного направления.
+        let cap = u32::from(window) * 4;
+        for direction in ["original", "reply"] {
+            desired.push(format!("{family}meta l4proto {protocols} ct status != dnat ct original proto-dst != {dns} {ports}ct {direction} packets 0-{window} ct packets 1-{cap} return"));
+        }
+    }
     desired.push(ADMISSION.into());
+    desired
+}
+
+fn offload_plan(platform: &Platform, ipv6: bool, remove_rules: bool) -> Result<(String, bool)> {
+    let Some(forward) = fw4_chain("forward")? else {
+        return Ok((String::new(), false));
+    };
+    let mut admissions = forward.lines().filter_map(handle).filter(|(rule, _)| {
+        *rule == OFFLOAD_JUMP || rule.contains("flow add ") || rule.contains("flow offload ")
+    });
+    let admission = admissions.next();
+    let own = fw4_chain(OFFLOAD_CHAIN)?;
+    if let Some(ref chain) = own
+        && !chain
+            .lines()
+            .any(|line| line.trim_start().starts_with("comment \"r2o-managed\""))
+    {
+        return Err(error("fw4: цепочка r2o_offload принадлежит другой службе"));
+    }
+    if remove_rules {
+        if let Some((_, id)) = forward
+            .lines()
+            .filter_map(handle)
+            .find(|(rule, _)| *rule == OFFLOAD_JUMP)
+        {
+            return Ok((
+                format!(
+                    "replace rule inet fw4 forward handle {id} {ADMISSION}\ndelete chain inet fw4 {OFFLOAD_CHAIN}\n"
+                ),
+                true,
+            ));
+        } else if own.is_some() {
+            return Ok((format!("delete chain inet fw4 {OFFLOAD_CHAIN}\n"), false));
+        }
+    }
+    let Some((current, id)) = admission else {
+        return Ok((String::new(), false));
+    };
+    if remove_rules {
+        return Ok((String::new(), false));
+    }
+    if !matches!(current, ADMISSION | ADMISSION_ALTERNATE | OFFLOAD_JUMP)
+        || admissions.next().is_some()
+    {
+        return Err(error("неподдерживаемая конфигурация admission fw4"));
+    }
+    let desired = admission_rules(platform, ipv6);
     let mut rules = if own.is_none() {
         format!("add chain inet fw4 {OFFLOAD_CHAIN} {{ comment \"r2o-managed\"; }}\n")
     } else {
@@ -433,11 +489,23 @@ pub(super) fn offload(platform: &Platform, ipv6: bool, remove_rules: bool) -> Re
         )
         .unwrap();
     }
-    if rules.is_empty() {
-        Ok(())
-    } else {
-        Nft.apply(&rules)
+    Ok((rules, true))
+}
+
+pub(super) fn offload(platform: &Platform, ipv6: bool, remove_rules: bool) -> Result<()> {
+    let (rules, _) = offload_plan(platform, ipv6, remove_rules)?;
+    if !rules.is_empty() {
+        Nft.apply(&rules)?;
     }
+    Ok(())
+}
+
+pub(super) fn admission_status(platform: &Platform, ipv6: bool) -> Result<&'static str> {
+    let (edits, active) = offload_plan(platform, ipv6, false)?;
+    if !edits.is_empty() {
+        return Err(error("правила admission fw4 отсутствуют или изменены"));
+    }
+    Ok(if active { "bounded" } else { "absent" })
 }
 
 pub(super) fn restore_fw4(platform: &Platform) -> Result<()> {
