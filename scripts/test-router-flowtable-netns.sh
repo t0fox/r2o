@@ -11,8 +11,10 @@ LAN="r2o-flow-lan-$$"
 WAN="r2o-flow-wan-$$"
 PIDS=
 SERVER=
+CLIENT=
 cleanup() {
     if [ -n "$SERVER" ]; then kill "$SERVER" 2>/dev/null || :; wait "$SERVER" 2>/dev/null || :; fi
+    if [ -n "$CLIENT" ]; then kill "$CLIENT" 2>/dev/null || :; wait "$CLIENT" 2>/dev/null || :; fi
     for pid in $PIDS; do kill "$pid" 2>/dev/null || :; done
     for pid in $PIDS; do wait "$pid" 2>/dev/null || :; done
     ip netns del "$LAN" 2>/dev/null || :
@@ -206,11 +208,76 @@ nft -a list chain inet fw4 r2o_offload >"$TEMP/chain"
 platform up
 nft -a list chain inet fw4 r2o_offload | cmp "$TEMP/chain" -
 
+# Accounting is attached when a conntrack entry is created. Keep the same
+# client socket across recovery and compare it with a fresh tuple.
+sysctl -qw net.netfilter.nf_conntrack_acct=0
+ip netns exec "$WAN" python3 - "$TEMP" <<'PY' &
+import pathlib, socket, sys
+root = pathlib.Path(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
+    server.bind(("198.18.0.2", 443))
+    server.settimeout(10)
+    (root / "acct-server").touch()
+    first = server.recvfrom(256)
+    second = server.recvfrom(256)
+    fresh = server.recvfrom(256)
+    assert [first[0], second[0], fresh[0]] == [b"old", b"old", b"fresh"]
+    assert first[1] == second[1] != fresh[1]
+PY
+SERVER=$!
+for _ in $(seq 1 40); do [ ! -f "$TEMP/acct-server" ] || break; sleep 0.1; done
+ip netns exec "$LAN" python3 - "$TEMP" <<'PY' &
+import pathlib, socket, sys, time
+root = pathlib.Path(sys.argv[1])
+
+def await_signal(name):
+    end = time.monotonic() + 8
+    while not (root / name).exists():
+        assert time.monotonic() < end, name
+        time.sleep(.05)
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as old:
+    old.connect(("198.18.0.2", 443))
+    old.send(b"old")
+    (root / "acct-old").touch()
+    await_signal("acct-recovered")
+    old.send(b"old")
+    (root / "acct-sent").touch()
+    await_signal("acct-fresh")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as fresh:
+        fresh.sendto(b"fresh", ("198.18.0.2", 443))
+PY
+CLIENT=$!
+for _ in $(seq 1 40); do [ ! -f "$TEMP/acct-old" ] || break; sleep 0.1; done
+test -f "$TEMP/acct-old"
+seq4() { awk '$1 == 34000 { print $8 }' /proc/net/netfilter/nfnetlink_queue; }
+before=$(seq4)
+platform event
+for _ in $(seq 1 40); do
+    if platform status >"$TEMP/status" 2>/dev/null; then break; fi
+    sleep 0.1
+done
+grep -q 'conntrack_accounting=enabled' "$TEMP/status"
+if [ -r /proc/net/nf_conntrack ]; then
+    grep -Eq '^conntrack_entries=sampled .*without_full_counters=[1-9]' "$TEMP/status"
+fi
+touch "$TEMP/acct-recovered"
+for _ in $(seq 1 40); do [ ! -f "$TEMP/acct-sent" ] || break; sleep 0.1; done
+test -f "$TEMP/acct-sent"
+[ "$(seq4)" = "$before" ]
+touch "$TEMP/acct-fresh"
+wait "$CLIENT"
+CLIENT=
+wait "$SERVER"
+SERVER=
+[ "$(seq4)" -gt "$before" ]
+echo 'CONNTRACK_EXISTING_AND_FRESH_PASS'
+
 if [ -n "${R2O_HTTP3_LAN_BIN:-}" ]; then
     http3() {
         R2O_H3_LAN="$LAN" R2O_H3_WAN="$WAN" R2O_H3_ORIGIN="$1" \
             R2O_H3_CONTROL="$TEMP/control$2" R2O_H3_EXPECT_HELLO="$3" \
-            R2O_H3_INSTALL_PLAN="${4:-0}" \
+            R2O_H3_INSTALL_PLAN="${4:-0}" R2O_H3_ORIGIN_FAIL="${5:-0}" \
             "$R2O_HTTP3_LAN_BIN" --exact r2o_http3_lan --ignored --nocapture || {
                 cat "$TEMP"/datapath*.log >&2
                 return 1
@@ -233,6 +300,7 @@ if [ -n "${R2O_HTTP3_LAN_BIN:-}" ]; then
     sleep 1
     http3 198.18.0.2:443 4 1 1
     http3 '[2001:db8:2::2]:443' 6 1 1
+    http3 198.18.0.2:443 4 1 1 1
 fi
 
 platform down

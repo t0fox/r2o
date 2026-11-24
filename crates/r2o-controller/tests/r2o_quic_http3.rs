@@ -4280,8 +4280,8 @@ async fn r2o_http3_silent_udp_peer_timeout_matches_d2o() {
 #[ignore = "requires router, LAN and WAN network namespaces"]
 fn r2o_http3_lan() {
     use r2k_core::control::{
-        COMMAND_SET_NAME, EVENT_APPLIED, EVENT_HELLO, SHAPE_QUIC, decode_ack, decode_applied,
-        decode_hello, encode_set_name, read_frame,
+        COMMAND_SET_NAME, EVENT_APPLIED, EVENT_HELLO, KEY_LEN, SHAPE_QUIC, decode_ack,
+        decode_applied, decode_hello, encode_set_name, read_frame,
     };
     use std::io::Write;
     use std::os::fd::AsRawFd;
@@ -4310,6 +4310,11 @@ fn r2o_http3_lan() {
     let address: SocketAddr = std::env::var("R2O_H3_ORIGIN").unwrap().parse().unwrap();
     let expect_hello = std::env::var("R2O_H3_EXPECT_HELLO").unwrap() == "1";
     let install_plan = std::env::var("R2O_H3_INSTALL_PLAN").as_deref() == Ok("1");
+    let status = if std::env::var("R2O_H3_ORIGIN_FAIL").as_deref() == Ok("1") {
+        503
+    } else {
+        200
+    };
     let mut control = UnixStream::connect(std::env::var("R2O_H3_CONTROL").unwrap()).unwrap();
     control
         .set_read_timeout(Some(Duration::from_secs(3)))
@@ -4379,7 +4384,7 @@ fn r2o_http3_lan() {
                 stream
                     .send_response(
                         http::Response::builder()
-                            .status(200)
+                            .status(status)
                             .header(http::header::CONTENT_LENGTH, BODY.len())
                             .body(())
                             .unwrap(),
@@ -4407,31 +4412,53 @@ fn r2o_http3_lan() {
             };
             let socket = UdpSocket::bind(bind).unwrap();
             socket.connect(address).unwrap();
-            r2o_quic_http3_get(socket, address, HOST, "/lan", Duration::from_secs(5), roots).await
+            let local = socket.local_addr().unwrap();
+            let result =
+                r2o_quic_http3_get(socket, address, HOST, "/lan", Duration::from_secs(5), roots)
+                    .await;
+            (local, result)
         })
     });
-    let result = client.join().unwrap();
+    let (local, result) = client.join().unwrap();
     let _ = done.send(());
     origin.join().unwrap();
     assert!(result.handshake_confirmed && result.complete, "{result:?}");
     assert_eq!(
         (result.status, result.body_bytes, result.peer_name),
-        (200, BODY.len() as u64, 1)
+        (status, BODY.len() as u64, 1)
     );
     control
         .set_read_timeout(Some(Duration::from_millis(300)))
         .unwrap();
     let mut saw_hello = false;
     let mut saw_applied = false;
+    let mut applied_events = Vec::new();
     let expect_applied = expect_hello && install_plan;
+    let mut endpoints =
+        [local, address].map(|addr| (r2k_core::addr::Address::new(addr.ip()).bytes(), addr.port()));
+    endpoints.sort_unstable();
+    let [(low, low_port), (high, high_port)] = endpoints;
+    let matches_flow = |key: &[u8; KEY_LEN]| {
+        key[0] == if address.is_ipv4() { 4 } else { 6 }
+            && key[1..17] == low
+            && key[17..33] == high
+            && key[33..35] == low_port.to_be_bytes()
+            && key[35..37] == high_port.to_be_bytes()
+            && key[37] == 17
+    };
     while let Ok(frame) = read_frame(&mut control) {
         if frame.kind == EVENT_HELLO {
             let hello = decode_hello(&frame).unwrap();
-            if hello.host.as_deref() == Some(HOST.as_bytes()) && hello.quic_snapshot.is_some() {
+            if matches_flow(&hello.key)
+                && hello.host.as_deref() == Some(HOST.as_bytes())
+                && hello.quic_snapshot.is_some()
+            {
                 saw_hello = true;
             }
         } else if frame.kind == EVENT_APPLIED {
-            saw_applied |= decode_applied(&frame).unwrap().plan_id == PLAN_ID;
+            let applied = decode_applied(&frame).unwrap();
+            saw_applied |= matches_flow(&applied.key) && applied.plan_id == PLAN_ID;
+            applied_events.push(applied);
         }
         if expect_hello && saw_hello && (!expect_applied || saw_applied) {
             break;
@@ -4441,9 +4468,14 @@ fn r2o_http3_lan() {
         saw_hello, expect_hello,
         "SNI ожидается только при сопоставимом RPDB"
     );
-    assert_eq!(saw_applied, expect_applied, "APPLIED плана HTTP/3");
+    assert_eq!(
+        saw_applied, expect_applied,
+        "APPLIED для {local} → {address}, события {applied_events:?}"
+    );
+    let application_available = (200..300).contains(&result.status) && result.complete;
+    assert_eq!(application_available, status == 200);
     println!(
-        "HTTP/3 {address}: 200, {} байт, QUIC ClientHello={saw_hello}, APPLIED={saw_applied}",
+        "HTTP/3 {address}: {status}, {} байт, QUIC ClientHello={saw_hello}, APPLIED={saw_applied}, LAN application={application_available}",
         BODY.len()
     );
 }
