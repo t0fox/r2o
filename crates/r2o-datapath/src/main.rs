@@ -33,9 +33,10 @@ mod app {
     use r2o_datapath::r2o_icmp_guard::R2oIcmpGuard;
     use r2o_datapath::r2o_quic::R2oQuicSessions;
     use r2o_datapath::r2o_route::{
-        R2O_ROUTE_REFRESH_INTERVAL, R2O_ROUTE_SETTLE_INTERVAL, R2oRouteFamily, R2oRouteGate,
-        R2oRouteMonitor, R2oRoutePacket, R2oRoutePolicy, R2oRouteRefreshStatus, R2oRoutedFlows,
-        R2oRoutesChange, R2oRoutesRefreshLog, r2o_routes_change_line, r2o_routes_quiet_line,
+        R2O_ROUTE_REFRESH_INTERVAL, R2O_ROUTE_SETTLE_INTERVAL, R2oEffectiveRoute, R2oPolicyCheck,
+        R2oRouteCheck, R2oRouteFamily, R2oRouteGate, R2oRouteMonitor, R2oRoutePacket,
+        R2oRoutePolicy, R2oRouteRefreshStatus, R2oRoutedFlows, R2oRoutesChange,
+        R2oRoutesRefreshLog, r2o_routes_change_line, r2o_routes_quiet_line,
     };
     use r2o_datapath::r2o_udp_hold::{
         R2oUdpDeferredEnqueueError, R2oUdpDeferredResends, R2oUdpDeferredVerdicts,
@@ -1691,20 +1692,33 @@ mod app {
         }
         let (_, route_status) = route_monitor.r2o_refresh_with_status(&mut route_gate);
         r2o_log_routes_refresh(&mut routes_log, &route_gate, &route_status, Instant::now());
-        let (request_route_refresh, route_refresh_requests) = std::sync::mpsc::channel();
+        enum RouteRequest {
+            Refresh(u64),
+            Check(u64, R2oRouteCheck),
+        }
+        let (route_requests, route_request_rx) = std::sync::mpsc::sync_channel(16);
         let (send_route_snapshot, route_snapshots) = std::sync::mpsc::channel();
+        let (send_route_check, route_checks) = std::sync::mpsc::sync_channel(16);
         let mut worker_gate = route_gate.clone();
         std::thread::Builder::new()
             .name("r2o-rtnetlink".into())
             .spawn(move || {
                 let mut monitor = R2oRouteMonitor::default();
-                while let Ok(generation) = route_refresh_requests.recv() {
-                    let (_, status) = monitor.r2o_refresh_with_status(&mut worker_gate);
-                    if send_route_snapshot
-                        .send((generation, worker_gate.clone(), status))
-                        .is_err()
-                    {
-                        break;
+                while let Ok(request) = route_request_rx.recv() {
+                    match request {
+                        RouteRequest::Refresh(generation) => {
+                            let (_, status) = monitor.r2o_refresh_with_status(&mut worker_gate);
+                            if send_route_snapshot
+                                .send((generation, worker_gate.clone(), status))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        RouteRequest::Check(generation, query) => {
+                            let result = monitor.r2o_check_effective_route(query);
+                            let _ = send_route_check.try_send((generation, query, result));
+                        }
                     }
                 }
             })?;
@@ -1840,6 +1854,9 @@ mod app {
         let mut next_diagnostics = Instant::now();
         let mut diagnostic_write_failed = false;
         let mut rpdb_observe_only_packets = 0u64;
+        let mut rpdb_checked_packets = [0u64; 4];
+        let mut effective_routes =
+            HashMap::<R2oRouteCheck, (Instant, Option<R2oEffectiveRoute>)>::new();
         let mut rpdb_observe_only_flows: Option<R2oRoutedFlows> = None;
         let mut route_scope_packets_skipped = 0u64;
         let nfq_health_enabled =
@@ -2016,6 +2033,16 @@ mod app {
                             "discovery_events": control.discovery_events(),
                         })),
                         "rpdb_observe_only_packets": rpdb_observe_only_packets,
+                        "rpdb_effective_routes": {
+                            "equivalent_packets": rpdb_checked_packets[0],
+                            "different_packets": rpdb_checked_packets[1],
+                            "unavailable_packets": rpdb_checked_packets[2],
+                            "pending_packets": rpdb_checked_packets[3],
+                            "cache_entries": effective_routes.len(),
+                            "cache_capacity": effective_routes.capacity(),
+                            "observe_only_flow_keys": rpdb_observe_only_flows.as_ref().map_or(0, R2oRoutedFlows::len),
+                            "observe_only_capacity": rpdb_observe_only_flows.as_ref().map_or(0, R2oRoutedFlows::capacity),
+                        },
                         "route_scope_packets_skipped": route_scope_packets_skipped,
                         "process_packet_skip_reasons": r2o_datapath::reason_stats::reason_snapshot(),
                     });
@@ -2313,13 +2340,16 @@ mod app {
             if route_ready {
                 match route_monitor.r2o_drain_watch() {
                     Ok(changes) => {
+                        if changes.pmtu || changes.policy {
+                            effective_routes.clear();
+                            route_generation = route_generation.wrapping_add(1);
+                        }
                         if changes.pmtu
                             && let Some(raw) = &raw
                         {
                             raw.r2o_invalidate_route_mtu();
                         }
                         if changes.policy {
-                            route_generation = route_generation.wrapping_add(1);
                             route_gate.r2o_invalidate_policy();
                             route_context_reported = false;
                             if let Some(worker) = &platform_worker {
@@ -2338,18 +2368,38 @@ mod app {
             }
             let route_now = Instant::now();
             if !route_refresh_pending && route_now >= next_route_refresh {
-                route_refresh_pending = request_route_refresh.send(route_generation).is_ok();
-                last_route_refresh = route_now;
-                next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
-                if !route_refresh_pending {
-                    eprintln!("r2o-datapath: поток обновления маршрутов остановлен");
+                match route_requests.try_send(RouteRequest::Refresh(route_generation)) {
+                    Ok(()) => {
+                        route_refresh_pending = true;
+                        last_route_refresh = route_now;
+                        next_route_refresh = route_now + R2O_ROUTE_REFRESH_INTERVAL;
+                    }
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => (),
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        next_route_refresh = route_now + R2O_ROUTE_REFRESH_INTERVAL;
+                        route_gate.r2o_invalidate_policy();
+                        effective_routes.clear();
+                        eprintln!("r2o-datapath: поток обновления маршрутов остановлен");
+                    }
+                }
+            }
+            for (generation, query, result) in route_checks.try_iter() {
+                if generation == route_generation
+                    && let Some(entry) = effective_routes.get_mut(&query)
+                {
+                    *entry = (route_now, Some(result));
                 }
             }
             let route_snapshot = match route_snapshots.try_recv() {
                 Ok((generation, snapshot, status)) => {
                     route_refresh_pending = false;
                     // A dump begun before invalidation cannot authorize a packet.
-                    (generation == route_generation).then_some((snapshot, status))
+                    if generation == route_generation {
+                        Some((snapshot, status))
+                    } else {
+                        next_route_refresh = route_now;
+                        None
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -2358,6 +2408,10 @@ mod app {
                 }
             };
             if let Some((snapshot, route_status)) = route_snapshot {
+                if route_status.changed {
+                    effective_routes.clear();
+                    route_generation = route_generation.wrapping_add(1);
+                }
                 route_gate = snapshot;
                 if route_status.changed
                     && let Some(raw) = &raw
@@ -2573,28 +2627,76 @@ mod app {
                     let now = Instant::now();
                     let controller_probe = r2o_is_controller_probe(packet.mark, options.probe_mark);
                     let original_from_queue = r2o_datapath_payload(&packet, options.mark);
-                    let rpdb_mismatch = router_runtime
-                        && options.mode == RuntimeMode::Apply
-                        && route_gate.r2o_policy_needs_check(route_family)
-                        && matches!(
-                            queue_hook,
-                            Some(
-                                r2o_datapath::netlink::R2O_NF_INET_LOCAL_OUT
-                                    | r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING
-                            )
+                    let outbound = matches!(
+                        queue_hook,
+                        Some(
+                            r2o_datapath::netlink::R2O_NF_INET_LOCAL_OUT
+                                | r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING
                         )
-                        && !route_gate.r2o_policy_allows_plan(
-                            R2oRoutePacket {
-                                family: route_family,
-                                outbound: true,
-                                mark: queue_mark,
-                                probe_mark: options.probe_mark,
-                                datapath_mark: options.mark,
-                                output_ifindex: queue_outdev,
-                            },
-                            measure_mark,
-                        );
-                    let rpdb_observe_only = if rpdb_mismatch {
+                    );
+                    let mut verified_path = false;
+                    let mut rpdb_blocks_apply = false;
+                    if router_runtime
+                        && options.mode == RuntimeMode::Apply
+                        && outbound
+                        && (route_gate.r2o_policy_needs_check(route_family)
+                            || rpdb_observe_only_flows.is_some())
+                    {
+                        let context = R2oRoutePacket {
+                            family: route_family,
+                            outbound,
+                            mark: queue_mark,
+                            probe_mark: options.probe_mark,
+                            datapath_mark: options.mark,
+                            output_ifindex: queue_outdev,
+                        };
+                        let policy = route_gate.r2o_policy_check(context, measure_mark);
+                        if policy == R2oPolicyCheck::MatchingSelectors {
+                            verified_path = true;
+                        } else {
+                            let mut result = Some(R2oEffectiveRoute::Unavailable);
+                            if policy == R2oPolicyCheck::LookupRequired
+                                && let Some(query) = original_from_queue.and_then(|bytes| {
+                                    R2oRouteCheck::new(bytes, context, measure_mark)
+                                })
+                            {
+                                if let Some((_, value)) =
+                                    effective_routes.get(&query).filter(|(at, _)| {
+                                        now.saturating_duration_since(*at) < Duration::from_secs(10)
+                                    })
+                                {
+                                    result = *value;
+                                } else if route_requests
+                                    .try_send(RouteRequest::Check(route_generation, query))
+                                    .is_ok()
+                                {
+                                    // Состояние ограничено даже при потоке новых адресов.
+                                    if effective_routes.len() == 256
+                                        && !effective_routes.contains_key(&query)
+                                        && let Some(oldest) = effective_routes
+                                            .iter()
+                                            .min_by_key(|(_, (at, _))| *at)
+                                            .map(|(key, _)| *key)
+                                    {
+                                        effective_routes.remove(&oldest);
+                                    }
+                                    effective_routes.insert(query, (now, None));
+                                    result = None;
+                                }
+                            }
+                            let index = match result {
+                                Some(R2oEffectiveRoute::Equivalent) => 0,
+                                Some(R2oEffectiveRoute::Different) => 1,
+                                Some(R2oEffectiveRoute::Unavailable) => 2,
+                                None => 3,
+                            };
+                            rpdb_checked_packets[index] =
+                                rpdb_checked_packets[index].saturating_add(1);
+                            verified_path = index == 0;
+                            rpdb_blocks_apply = !verified_path;
+                        }
+                    }
+                    let rpdb_observe_only = if rpdb_blocks_apply {
                         if let Some(bytes) = original_from_queue {
                             rpdb_observe_only_flows
                                 .get_or_insert_with(R2oRoutedFlows::new_passive)
@@ -2605,6 +2707,13 @@ mod app {
                                 );
                         }
                         true
+                    } else if verified_path {
+                        if let (Some(bytes), Some(flows)) =
+                            (original_from_queue, rpdb_observe_only_flows.as_mut())
+                        {
+                            flows.r2o_forget_packet(bytes);
+                        }
+                        false
                     } else {
                         original_from_queue.is_some_and(|bytes| {
                             rpdb_observe_only_flows
@@ -2616,7 +2725,7 @@ mod app {
                         rpdb_observe_only_packets = rpdb_observe_only_packets.saturating_add(1);
                         if !route_context_reported {
                             eprintln!(
-                                "r2o-datapath: {family_name} RPDB допускает разные пути LAN, зонда и raw; продолжаю наблюдение без применения плана"
+                                "r2o-datapath: {family_name} RPDB не подтвердил общий маршрут LAN, зонда и raw; продолжаю наблюдение без применения плана"
                             );
                             route_context_reported = true;
                         }

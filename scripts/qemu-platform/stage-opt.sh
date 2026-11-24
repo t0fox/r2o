@@ -23,6 +23,7 @@ case "$platform" in
         cp "$base/lab/xtables-legacy-multi" "$opt/lab/"
         mkdir -p "$opt/etc/ndm/netfilter.d" "$opt/etc/init.d"
         install -m755 "$here/keenetic-initrc" "$opt/etc/initrc"
+        install -m755 "$here/keenetic-rpdb.sh" "$opt/lab/keenetic-rpdb.sh"
         if [ -n "${R2O_LAB_TLS_DIR:-}" ]; then
             cp -a "$R2O_LAB_TLS_DIR" "$opt/lab/tls"
             install -m755 "$here/keenetic-discovery.sh" "$opt/lab/keenetic-discovery.sh"

@@ -6,6 +6,11 @@ use std::convert::TryInto;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+mod effective;
+#[cfg(target_os = "linux")]
+pub use effective::{R2oEffectiveRoute, R2oRouteCheck};
+
 pub const R2O_ROUTE_OTHER_DEV: u32 = u32::MAX;
 pub const R2O_ROUTE_OUTSIDE: u32 = u32::MAX - 1;
 
@@ -384,15 +389,23 @@ struct R2oRouteRuleContext {
     mark: u32,
     mask: u32,
     contextual: bool,
+    opaque: bool,
 }
 
 impl R2oRouteRuleContext {
-    fn separates(self, marks: [u32; 3]) -> bool {
+    fn may_separate(self, marks: [u32; 3]) -> bool {
         let matches = marks.map(|mark| ((mark ^ self.mark) & self.mask) == 0);
         // При одинаковом назначении селектор по метке даёт одинаковый
         // ответ для трёх трактов, в том числе у инвертированных правил.
         matches[0] != matches[1] || matches[0] != matches[2] || self.contextual && matches[0]
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oPolicyCheck {
+    MatchingSelectors,
+    LookupRequired,
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -423,13 +436,13 @@ impl R2oRouteGate {
         changed
     }
 
-    pub fn r2o_policy_allows_plan(&self, packet: R2oRoutePacket, measure_mark: u32) -> bool {
+    pub fn r2o_policy_check(&self, packet: R2oRoutePacket, measure_mark: u32) -> R2oPolicyCheck {
         let index = usize::from(packet.family == R2oRouteFamily::Ipv6);
         let Some(rules) = &self.r2o_context[index] else {
-            return false;
+            return R2oPolicyCheck::Unavailable;
         };
         if rules.is_empty() {
-            return true;
+            return R2oPolicyCheck::MatchingSelectors;
         }
         let mark = packet.mark.unwrap_or(0);
         let local =
@@ -447,10 +460,19 @@ impl R2oRouteGate {
             packet.probe_mark
         };
         let marks = [client, probe, packet.datapath_mark];
-        !rules.iter().any(|rule| {
-            rule.separates(marks)
-                || measure_mark != 0 && rule.separates([client, measure_mark, packet.datapath_mark])
-        })
+        let mut check = R2oPolicyCheck::MatchingSelectors;
+        for rule in rules {
+            if rule.may_separate(marks)
+                || measure_mark != 0
+                    && rule.may_separate([client, measure_mark, packet.datapath_mark])
+            {
+                if rule.opaque {
+                    return R2oPolicyCheck::Unavailable;
+                }
+                check = R2oPolicyCheck::LookupRequired;
+            }
+        }
+        check
     }
 
     pub fn r2o_invalidate_policy(&mut self) {
@@ -1207,6 +1229,17 @@ impl R2oRoutedFlows {
         self.flows.len()
     }
 
+    pub fn capacity(&self) -> usize {
+        self.flows.capacity()
+    }
+
+    pub fn r2o_forget_packet(&mut self, packet: &[u8]) {
+        if let Some(key) = r2o_route_flow_key(packet) {
+            self.flows.remove(&key);
+            self.flows.remove(&key.r2o_reverse());
+        }
+    }
+
     /// C `fl->routed`: поток уже пропущен ядром по метке маршрутизатора.
     /// Ключ канонический (low/high), поэтому проверяются оба направления.
     pub fn r2o_is_routed_key(&self, key: &[u8; r2k_core::control::KEY_LEN]) -> bool {
@@ -1471,17 +1504,26 @@ pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRoute
         let mut mask = None;
         // src_len и TOS могут различаться между LAN, raw и локальным зондом.
         let mut contextual = message.body[2] != 0 || message.body[3] != 0;
+        let mut opaque = false;
         for (kind, value) in r2o_route_attributes(message.body, R2O_FIB_RULE_HEADER_LEN)? {
             match kind {
                 // Назначение одинаково; приоритет, таблица и протокол записи
                 // описывают правило, а не контекст отправителя.
-                0 | 1 | 4 | 6 | R2O_FRA_FWMARK | 15 | R2O_FRA_FWMASK | 18 | 21 => {}
+                0 | 1 | 2 | 4 | 6 | R2O_FRA_FWMARK | 15 | R2O_FRA_FWMASK | 18 | 21 => {}
                 13 | 14 if value == u32::MAX.to_ne_bytes() => {}
-                // iif/oif, UID, L4, l3mdev и неизвестные селекторы.
-                _ => contextual = true,
+                // Ограничение oif проверяет ядро при поиске маршрута.
+                17 => contextual = true,
+                // Без полного входного контекста нельзя моделировать iif, VRF, UID и L4.
+                _ => {
+                    contextual = true;
+                    opaque = true;
+                }
             }
             if value.len() < 4 {
-                contextual |= matches!(kind, R2O_FRA_FWMARK | R2O_FRA_FWMASK);
+                if matches!(kind, R2O_FRA_FWMARK | R2O_FRA_FWMASK) {
+                    contextual = true;
+                    opaque = true;
+                }
                 continue;
             }
             let value = u32::from_ne_bytes(
@@ -1502,6 +1544,7 @@ pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRoute
                 mark: policy_mark & policy_mask,
                 mask: policy_mask,
                 contextual,
+                opaque,
             });
         }
         let Some(mark) = mark.or_else(|| mask.map(|_| 0)) else {
@@ -1761,10 +1804,13 @@ mod tests {
     }
 
     #[test]
-    fn r2o_policy_rejects_iif_and_separate_marks_without_rejecting_a_shared_policy() {
+    fn r2o_policy_distinguishes_lookup_from_unavailable_context() {
         let mut gate = R2oRouteGate::default();
         let packet = r2o_packet(true, Some(0x22), Some(5));
-        assert!(!gate.r2o_policy_allows_plan(packet, 0x2f));
+        assert_eq!(
+            gate.r2o_policy_check(packet, 0x2f),
+            R2oPolicyCheck::Unavailable
+        );
 
         let mut body = [0; R2O_FIB_RULE_HEADER_LEN].to_vec();
         body[0] = R2oRouteFamily::Ipv4.r2o_id();
@@ -1772,15 +1818,27 @@ mod tests {
         r2o_test_attr(&mut body, R2O_FRA_FWMASK, &0xf0_u32.to_ne_bytes());
         let batch = r2o_route_parse_rules(&r2o_test_message(R2O_RTM_NEWRULE, &body)).unwrap();
         gate.r2o_set_context(R2oRouteFamily::Ipv4, Some(batch.context));
-        assert!(gate.r2o_policy_allows_plan(packet, 0x2f));
-        assert!(!gate.r2o_policy_allows_plan(packet, 0x30));
-        assert!(!gate.r2o_policy_allows_plan(r2o_packet(true, None, Some(5)), 0x2f));
+        assert_eq!(
+            gate.r2o_policy_check(packet, 0x2f),
+            R2oPolicyCheck::MatchingSelectors
+        );
+        assert_eq!(
+            gate.r2o_policy_check(packet, 0x30),
+            R2oPolicyCheck::LookupRequired
+        );
+        assert_eq!(
+            gate.r2o_policy_check(r2o_packet(true, None, Some(5)), 0x2f),
+            R2oPolicyCheck::LookupRequired
+        );
 
         // FRA_IIFNAME: LAN может совпасть, сокеты роутера — нет.
         r2o_test_attr(&mut body, 3, b"lan\0");
         let batch = r2o_route_parse_rules(&r2o_test_message(R2O_RTM_NEWRULE, &body)).unwrap();
         gate.r2o_set_context(R2oRouteFamily::Ipv4, Some(batch.context));
-        assert!(!gate.r2o_policy_allows_plan(packet, 0x2f));
+        assert_eq!(
+            gate.r2o_policy_check(packet, 0x2f),
+            R2oPolicyCheck::Unavailable
+        );
     }
 
     fn route_status(

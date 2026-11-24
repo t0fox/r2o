@@ -26,17 +26,23 @@ parser.add_argument("--ram", type=int)
 parser.add_argument("--soak", type=int, default=600)
 parser.add_argument("--measure", action="store_true", help="Замер холодного и тёплого подбора из TLS-фикстуры")
 parser.add_argument("--rpdb", action="store_true", help="Проверка видимости NFQUEUE при разных путях LAN и зонда")
+parser.add_argument("--rpdb-effective", action="store_true", help="Проверка реальных маршрутов IPv4/IPv6 в профиле Viva")
 parser.add_argument("--phase", choices=["install", "reboot", "discovery", "discovery-after-boot"], required=True)
 args = parser.parse_args()
 if args.measure and args.phase not in {"discovery", "discovery-after-boot"}:
     parser.error("--measure применяется к фазам discovery")
 if args.rpdb and (args.measure or args.phase not in {"discovery", "discovery-after-boot"}):
     parser.error("--rpdb применяется к фазам discovery без --measure")
+if args.rpdb_effective and (args.measure or args.rpdb or args.phase not in {"discovery", "discovery-after-boot"}):
+    parser.error("--rpdb-effective применяется к фазам discovery отдельно от --rpdb и --measure")
 discovery_markers = (("KEENETIC_DISCOVERY_MEASURE_PASS",) if args.measure else
+                     ("KEENETIC_EFFECTIVE_RPDB_PASS",) if args.rpdb_effective else
                      ("KEENETIC_RPDB_NFQUEUE_PASS",) if args.rpdb else
                      ("KEENETIC_TLS_DISCOVERY_PASS", "KEENETIC_TLS_REUSE_PASS"))
 discovery_timeout = 420 if args.measure else 250
 discovery_command = "exec /opt/lab/keenetic-discovery.sh" + (" rpdb" if args.rpdb else "")
+if args.rpdb_effective:
+    discovery_command = "exec /opt/lab/keenetic-rpdb.sh"
 ram = args.ram or MODEL_RAM[args.model]
 cmd = [
     args.qemu, "-L", args.qemu_data, "-M", "malta", "-cpu", "34Kf" if args.smp > 1 else "24Kf",
