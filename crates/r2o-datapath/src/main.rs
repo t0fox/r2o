@@ -1717,7 +1717,9 @@ mod app {
                         }
                         RouteRequest::Check(generation, query) => {
                             let result = monitor.r2o_check_effective_route(query);
-                            let _ = send_route_check.try_send((generation, query, result));
+                            if send_route_check.send((generation, query, result)).is_err() {
+                                break;
+                            }
                         }
                     }
                 }
@@ -1855,6 +1857,12 @@ mod app {
         let mut diagnostic_write_failed = false;
         let mut rpdb_observe_only_packets = 0u64;
         let mut rpdb_checked_packets = [0u64; 4];
+        const ROUTE_CHECK_LIMIT: usize = 16;
+        const ROUTE_PROOF_TTL: Duration = Duration::from_secs(10);
+        let mut route_checks_in_flight = 0usize;
+        let mut route_checks_started = 0u64;
+        let mut route_checks_deferred = 0u64;
+        let mut next_proof_cleanup = Instant::now() + ROUTE_PROOF_TTL;
         let mut effective_routes =
             HashMap::<R2oRouteCheck, (Instant, Option<R2oEffectiveRoute>)>::new();
         let mut rpdb_observe_only_flows: Option<R2oRoutedFlows> = None;
@@ -2038,6 +2046,9 @@ mod app {
                             "different_packets": rpdb_checked_packets[1],
                             "unavailable_packets": rpdb_checked_packets[2],
                             "pending_packets": rpdb_checked_packets[3],
+                            "checks_started": route_checks_started,
+                            "checks_in_flight": route_checks_in_flight,
+                            "checks_deferred_packets": route_checks_deferred,
                             "cache_entries": effective_routes.len(),
                             "cache_capacity": effective_routes.capacity(),
                             "observe_only_flow_keys": rpdb_observe_only_flows.as_ref().map_or(0, R2oRoutedFlows::len),
@@ -2383,7 +2394,23 @@ mod app {
                     }
                 }
             }
+            if route_now >= next_proof_cleanup {
+                effective_routes.retain(|_, (at, value)| {
+                    value.is_none() || route_now.saturating_duration_since(*at) < ROUTE_PROOF_TTL
+                });
+                if effective_routes.is_empty() {
+                    effective_routes.shrink_to_fit();
+                }
+                if let Some(flows) = rpdb_observe_only_flows.as_mut() {
+                    flows.r2o_expire(route_now);
+                    if flows.len() == 0 {
+                        rpdb_observe_only_flows = None;
+                    }
+                }
+                next_proof_cleanup = route_now + ROUTE_PROOF_TTL;
+            }
             for (generation, query, result) in route_checks.try_iter() {
+                route_checks_in_flight -= 1;
                 if generation == route_generation
                     && let Some(entry) = effective_routes.get_mut(&query)
                 {
@@ -2661,26 +2688,34 @@ mod app {
                                 })
                             {
                                 if let Some((_, value)) =
-                                    effective_routes.get(&query).filter(|(at, _)| {
-                                        now.saturating_duration_since(*at) < Duration::from_secs(10)
+                                    effective_routes.get(&query).filter(|(at, value)| {
+                                        value.is_none()
+                                            || now.saturating_duration_since(*at) < ROUTE_PROOF_TTL
                                     })
                                 {
                                     result = *value;
-                                } else if route_requests
-                                    .try_send(RouteRequest::Check(route_generation, query))
-                                    .is_ok()
+                                } else if route_checks_in_flight < ROUTE_CHECK_LIMIT
+                                    && route_requests
+                                        .try_send(RouteRequest::Check(route_generation, query))
+                                        .is_ok()
                                 {
                                     // Состояние ограничено даже при потоке новых адресов.
                                     if effective_routes.len() == 256
                                         && !effective_routes.contains_key(&query)
                                         && let Some(oldest) = effective_routes
                                             .iter()
+                                            .filter(|(_, (_, result))| result.is_some())
                                             .min_by_key(|(_, (at, _))| *at)
                                             .map(|(key, _)| *key)
                                     {
                                         effective_routes.remove(&oldest);
                                     }
                                     effective_routes.insert(query, (now, None));
+                                    route_checks_in_flight += 1;
+                                    route_checks_started = route_checks_started.saturating_add(1);
+                                    result = None;
+                                } else {
+                                    route_checks_deferred = route_checks_deferred.saturating_add(1);
                                     result = None;
                                 }
                             }

@@ -26,9 +26,12 @@ parser.add_argument("--ram", type=int)
 parser.add_argument("--soak", type=int, default=600)
 parser.add_argument("--measure", action="store_true", help="Замер холодного и тёплого подбора из TLS-фикстуры")
 parser.add_argument("--rpdb", action="store_true", help="Проверка видимости NFQUEUE при разных путях LAN и зонда")
+parser.add_argument("--tls6", action="store_true", help="Полный HTTPS-прогон IPv6 с правилами Viva")
 parser.add_argument("--rpdb-effective", action="store_true", help="Проверка реальных маршрутов IPv4/IPv6 в профиле Viva")
 parser.add_argument("--phase", choices=["install", "reboot", "discovery", "discovery-after-boot"], required=True)
 args = parser.parse_args()
+if args.tls6 and (args.rpdb_effective or args.rpdb or args.measure or args.phase not in {"discovery", "discovery-after-boot"}):
+    parser.error("--tls6 применяется отдельно к фазам discovery")
 if args.measure and args.phase not in {"discovery", "discovery-after-boot"}:
     parser.error("--measure применяется к фазам discovery")
 if args.rpdb and (args.measure or args.phase not in {"discovery", "discovery-after-boot"}):
@@ -41,6 +44,8 @@ discovery_markers = (("KEENETIC_DISCOVERY_MEASURE_PASS",) if args.measure else
                      ("KEENETIC_TLS_DISCOVERY_PASS", "KEENETIC_TLS_REUSE_PASS"))
 discovery_timeout = 420 if args.measure else 250
 discovery_command = "exec /opt/lab/keenetic-discovery.sh" + (" rpdb" if args.rpdb else "")
+if args.tls6:
+    discovery_command = "exec /opt/lab/keenetic-discovery.sh ipv6"
 if args.rpdb_effective:
     discovery_command = "exec /opt/lab/keenetic-rpdb.sh"
 ram = args.ram or MODEL_RAM[args.model]

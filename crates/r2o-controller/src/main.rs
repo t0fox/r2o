@@ -17907,7 +17907,7 @@ impl DiscoveryWorker {
             }
             let mut own_probes = 0;
             let geneva_midpoint = if !trigger_planned
-                && target.family == 4
+                && matches!(target.family, 4 | 6)
                 && control::r2k_link_shape_tcp_base(target.shape) == SHAPE_LEGACY
                 && r2o_control_wire() == control::WireProfile::V48
             {

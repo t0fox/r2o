@@ -63,15 +63,48 @@ client /opt/bin/ip addr add 203.0.113.2/30 dev lanp
 client /opt/bin/ip link set lanp up
 client /opt/bin/ip route add default via 203.0.113.1
 sysctl -qw net.ipv4.ip_forward=1
+family=ipv4
+server_address=198.51.100.2
+tcp_table=/proc/net/tcp
+queue=52692
+filter=/opt/sbin/iptables
+server_hello='0>>22&0x3c@20>>24=22'
+drop_length=122:65535
+if [ "${2:-}" = ipv6 ]; then
+    family=ipv6
+    server_address='[2001:db8:2::2]'
+    tcp_table=/proc/net/tcp6
+    export IPV6_ENABLED=1 QUEUE_NUM6=52693
+    queue=$QUEUE_NUM6
+    filter=/opt/sbin/ip6tables
+    server_hello='60>>24=22'
+    drop_length=142:65535
+    sysctl -qw net.ipv6.conf.all.forwarding=1
+    ip -6 addr add 2001:db8:1::1/64 dev rlan nodad
+    ip -6 addr add 2001:db8:2::1/64 dev rwan nodad
+    origin /opt/bin/ip -6 addr add 2001:db8:2::2/64 dev wanp nodad
+    client /opt/bin/ip -6 addr add 2001:db8:1::2/64 dev lanp nodad
+    origin /opt/bin/ip -6 route add default via 2001:db8:2::1
+    client /opt/bin/ip -6 route add default via 2001:db8:1::1
+    ip -6 route add default dev rwan
+    ip -6 route add default dev rwan table 16385
+    ip -6 rule add pref 9 fwmark 0x3001 lookup 301
+    ip -6 rule add pref 1150 fwmark 0xffffaaa lookup 4096
+    ip -6 rule add pref 1151 fwmark 0xffffaaa blackhole
+    ip -6 rule add pref 2152 oif rwan lookup 16385
+    ip -6 rule add pref 2166 from 2001:db8:2::1 lookup 16385
+fi
 cp "$LAB/tls/cert.pem" "$LAB/tls/key.pem" "$root/"
 tar -xzf "$LAB/tls/python-fixture.tar.gz" -C "$root"
 cd "$root"
+origin_script=$root/peer.py
+[ "$family" != ipv6 ] || origin_script=$LAB/tls-origin.py
 PYTHONHOME="$root/opt" LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$root/opt/lib" \
-    /opt/bin/ip netns exec tlstestwan "$root/opt/bin/python3" "$root/peer.py" "$root" \
+    /opt/bin/ip netns exec tlstestwan "$root/opt/bin/python3" "$origin_script" "$root" "$family" \
         </dev/null >server.log 2>&1 &
 server=$!
 attempt=0
-until origin /opt/bin/awk '$2 ~ /:01BB$/ && $4 == "0A" {ready=1} END {exit !ready}' /proc/net/tcp; do
+until origin /opt/bin/awk '$2 ~ /:01BB$/ && $4 == "0A" {ready=1} END {exit !ready}' "$tcp_table"; do
     attempt=$((attempt+1))
     if [ "$attempt" -ge 25 ] || ! kill -0 "$server"; then
         cat server.log
@@ -82,7 +115,7 @@ done
 request() {
     request_host=${2:-a.example.com}
     printf 'GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$request_host" |
-        client /opt/bin/busybox-bootstrap timeout 6 "$openssl" s_client -connect "${3:-198.51.100.2}:443" \
+        client /opt/bin/busybox-bootstrap timeout 6 "$openssl" s_client -connect "${3:-$server_address}:443" \
         -servername "$request_host" -tls1_2 -cipher ECDHE-RSA-AES128-GCM-SHA256 -groups X25519 \
         -alpn h2 -no_ticket -CAfile cert.pem -verify_hostname "$request_host" -verify_return_error \
         -brief -ign_eof >"$1.log" 2>&1
@@ -93,20 +126,24 @@ application() {
 }
 request clear || true
 application clear || { cat clear.log server.log; exit 1; }
-origin /opt/sbin/iptables -t mangle -A OUTPUT -p tcp --sport 443 \
-    -m u32 --u32 '0>>22&0x3c@20>>24=22' -j CONNMARK --set-mark 1
-origin /opt/sbin/iptables -A INPUT -p tcp --dport 443 -m connmark --mark 0 \
-    -m length --length 122:65535 -j DROP
+origin "$filter" -t mangle -A OUTPUT -p tcp --sport 443 \
+    -m u32 --u32 "$server_hello" -j CONNMARK --set-mark 1
+origin "$filter" -A INPUT -p tcp --dport 443 -m connmark --mark 0 \
+    -m length --length "$drop_length" -j DROP
 request blocked || true
 if grep -q 'CONNECTION ESTABLISHED' blocked.log; then echo 'Контрольная блокировка не сработала'; exit 1; fi
 launch() {
-    "$dp" --mode apply --queue 52692 --family ipv4 --mark 45 --probe-mark 46 --controller-only \
+    "$dp" --mode apply --queue "$queue" --family "$family" --mark 45 --probe-mark 46 --controller-only \
         --control "$root/dp.sock" </dev/null >datapath.log 2>&1 &
     daemon=$!
     sleep 1
     "$dp" --platform up
-    "$controller" --serve "$root/dp.sock" "$root/catalog.json" --discover --mark 46 --measure-mark 46 \
-        --live "$root/live.json" --no-diagnostics </dev/null >controller.log 2>&1 &
+    if [ "$family" = ipv6 ]; then
+        set -- --serve-both --serve6 "$root/dp.sock" --live6 "$root/live.json" "$root/catalog.json"
+    else
+        set -- --serve "$root/dp.sock" "$root/catalog.json" --live "$root/live.json" --no-diagnostics
+    fi
+    "$controller" "$@" --discover --mark 46 --measure-mark 46 </dev/null >controller.log 2>&1 &
     watcher=$!
     sleep 1
 }
@@ -141,7 +178,7 @@ if [ "${2:-}" = rpdb ]; then
     exit 0
 fi
 launch
-if [ -r "$LAB/tls/measure-discovery.sh" ]; then
+if [ "$family" = ipv4 ] && [ -r "$LAB/tls/measure-discovery.sh" ]; then
     . "$LAB/tls/measure-discovery.sh"
     measure_discovery cold a.example.com 198.51.100.2 "$root" "$root/controller.log" "$watcher" "$daemon" || { tail -60 controller.log datapath.log; exit 1; }
     measure_discovery warm b.example.net 198.51.100.6 "$root" "$root/controller.log" "$watcher" "$daemon" || { tail -60 controller.log datapath.log; exit 1; }
