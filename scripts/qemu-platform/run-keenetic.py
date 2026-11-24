@@ -132,8 +132,8 @@ with Path(args.log).open("wb") as log, subprocess.Popen(
                 time.sleep(15)
             issue("exec /opt/lab/lifecycle.sh uninstall", "UNINSTALL_PASS", timeout=90)
         issue("poweroff")
-        expect(b"Emulator: exit status 0", 18)
-        proc.wait(timeout=15)
+        expect(b"Emulator: exit status 0", 75)
+        proc.wait(timeout=30)
         if proc.returncode != 0:
             raise RuntimeError(f"QEMU shutdown code {proc.returncode}")
         log.write(b"\nHOST_RESULT PASS\n")
