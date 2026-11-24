@@ -24,7 +24,7 @@ cat > "$TEMP/firewall" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = ipv6-enabled ]; then printf '0\n'; exit 0; fi
 printf 'firewall:%s\n' "$*" >> "$EVENTS"
-exit 4
+[ "$1" = stop ]
 EOF
 chmod 0755 "$TEMP/manager" "$TEMP/firewall"
 
@@ -34,5 +34,9 @@ env EVENTS="$TEMP/events" R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/root/config" \
     R2O_RUNTIME_DIR="$TEMP/runtime" \
     sh "$ROOT/router/S99r2o" telegram-reapply
 
-[ -f "$TEMP/events" ] && { echo "telegram-reapply запустил остановленный Telegram" >&2; cat "$TEMP/events" >&2; exit 1; }
-echo "telegram-reapply не запускает остановленный процесс"
+[ "$(cat "$TEMP/events")" = firewall:stop ] || {
+    echo "telegram-reapply установил правила без готового listener" >&2
+    cat "$TEMP/events" >&2
+    exit 1
+}
+echo "telegram-reapply снимает оставшиеся правила и не запускает остановленный процесс"

@@ -31,6 +31,24 @@ pub async fn run() {
         .expect("не удалось установить CryptoProvider rustls ring");
 
     let args: Vec<_> = std::env::args().collect();
+    #[cfg(target_os = "linux")]
+    if let [_, command, family] = args.as_slice()
+        && command == "--check-transparent-sockets"
+    {
+        let ipv6 = match family.as_str() {
+            "4" => false,
+            "6" => true,
+            _ => {
+                eprintln!("ожидается 4 или 6");
+                std::process::exit(2);
+            }
+        };
+        if let Err(error) = r2o_telegram::transparent::check_socket_capabilities(ipv6).await {
+            eprintln!("IPv{family}: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let [_, command, host, address, ca_bundle] = args.as_slice()
         && command == "--check-instagram-ip"
     {

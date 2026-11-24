@@ -4,7 +4,6 @@
 set -u
 umask 077
 
-SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
@@ -19,7 +18,6 @@ HEALTH=${TG_WATCHDOG_HEALTH:-$RUNTIME/d2ktg.health}
 STATE=${TG_WATCHDOG_STATE:-$STATE_DIR/telegram-health.failures}
 RESTARTS=${TG_WATCHDOG_RESTARTS:-$STATE_DIR/telegram-health.restarts}
 LIMITED=${TG_WATCHDOG_LIMITED:-$STATE_DIR/telegram-health.restart-limited}
-TG_FIREWALL=${R2O_TG_FIREWALL:-${TG_WATCHDOG_DIR:-$SCRIPT_DIR}/r2o-tg-firewall.sh}
 TG_ENABLED=${TG_ENABLED:-0}
 TG_MODE=${TG_MODE:-local}
 
@@ -129,8 +127,14 @@ tick() {
         rm -f "$STATE" "$LIMITED"
         return 0
     }
-    if [ -x "$TG_FIREWALL" ]; then
-        "$TG_FIREWALL" heal >/dev/null 2>&1 || true
+    # Init проверяет listener под той же блокировкой, что и stop.
+    if ! "$INIT" telegram-reapply >/dev/null 2>&1; then
+        if [ "${firewall_failed:-0}" = 0 ]; then
+            watchdog_log "не удалось восстановить Telegram firewall; см. telegram-firewall.ipv4/ipv6"
+        fi
+        firewall_failed=1
+    else
+        firewall_failed=0
     fi
     if health_is_fresh; then
         failures=0

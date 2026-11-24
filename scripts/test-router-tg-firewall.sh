@@ -47,7 +47,7 @@ done
 
 run_tg() {
     env PATH="$TEMP/bin:/usr/bin:/bin" NFT_STATE="$TEMP/nft" \
-        R2O_OPENWRT_RELEASE="$TEMP/openwrt_release" "$@"
+        R2O_OPENWRT_RELEASE="$TEMP/openwrt_release" R2O_RUNTIME_DIR="$TEMP/nft-runtime" "$@"
 }
 table() { cat "$TEMP/nft/inet_r2o_tg" 2>/dev/null; }
 
@@ -111,95 +111,104 @@ mkdir -p "$TEMP/iptables-bin" "$TEMP/iptables-state"
 for tool in iptables ip6tables; do
     cat > "$TEMP/iptables-bin/$tool" <<'EOF'
 #!/bin/sh
-tool=${0##*/}
-state="$IPT_STATE/$tool"
-[ "${1:-}" = -w ] && shift
-table=filter
-if [ "${1:-}" = -t ]; then table=$2; shift 2; fi
-op=$1; shift
-case "$op" in
-    -C)
-        chain=$1; shift
-        grep -Fqx -- "$table $chain $*" "$state" 2>/dev/null ;;
-    -I)
-        chain=$1; shift
-        [ "${1:-}" = 1 ] && shift
-        printf '%s %s %s\n' "$table" "$chain" "$*" >> "$state" ;;
-    -D)
-        chain=$1; shift
-        [ -f "$state" ] || exit 1
-        grep -Fvx -- "$table $chain $*" "$state" > "$state.tmp" || true
-        mv "$state.tmp" "$state" ;;
-    *) exit 1 ;;
-esac
+[ "$1" = -t ] && [ "$3" = -S ] || exit 2
+[ "$2" = nat ] || exit 0
+if [ "${0##*/}" = ip6tables ] && [ "${NO_IPV6_NAT:-0}" = 1 ]; then
+    echo 'Table does not exist' >&2
+    exit 3
+fi
+cat "$IPT_STATE/${0##*/}"
 EOF
-    chmod 0755 "$TEMP/iptables-bin/$tool"
+    chmod +x "$TEMP/iptables-bin/$tool"
+    printf '%s
+' '-N FOREIGN' '-A OUTPUT -d 203.0.113.3/32 -j FOREIGN' > "$TEMP/iptables-state/$tool"
 done
-cat > "$TEMP/iptables-bin/ipset" <<'EOF'
-#!/bin/sh
-printf '%s\n' "$*" >> "$IPT_STATE/ipset-calls"
-mkdir -p "$IPT_STATE/ipsets"
-case "$1" in
-    create) [ -f "$IPT_STATE/ipsets/$2" ] || : > "$IPT_STATE/ipsets/$2" ;;
-    flush) : > "$IPT_STATE/ipsets/$2" ;;
-    add) printf '%s\n' "$3" >> "$IPT_STATE/ipsets/$2" ;;
-    swap)
-        [ "${IPSET_FAIL_SWAP:-}" != "$3" ] || exit 1
-        mv "$IPT_STATE/ipsets/$2" "$IPT_STATE/ipsets/.swap"
-        mv "$IPT_STATE/ipsets/$3" "$IPT_STATE/ipsets/$2"
-        mv "$IPT_STATE/ipsets/.swap" "$IPT_STATE/ipsets/$3" ;;
-    destroy)
-        shift
-        [ "$#" -eq 1 ] || exit 1
-        for set in "$@"; do rm -f "$IPT_STATE/ipsets/$set"; done ;;
-    list) [ -f "$IPT_STATE/ipsets/$2" ] || exit 1 ;;
-    save)
-        [ -f "$IPT_STATE/ipsets/$2" ] || exit 1
-        while IFS= read -r entry; do printf 'add %s %s\n' "$2" "$entry"; done < "$IPT_STATE/ipsets/$2" ;;
-    *) exit 1 ;;
-esac
+cat > "$TEMP/iptables-bin/restore" <<'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+assert sys.argv[1:] == ["--noflush"]
+tool = Path(sys.argv[0]).name.removesuffix("-restore")
+path = Path(os.environ["IPT_STATE"]) / tool
+rules = path.read_text().splitlines()
+lines = sys.stdin.read().splitlines()
+assert lines[0] == "*nat" and lines[-1] == "COMMIT"
+for line in lines[1:-1]:
+    op, chain, *args = line.split()
+    if op.startswith(":"):
+        assert "-N " + op[1:] not in rules
+        rules.insert(0, "-N " + op[1:])
+    elif op == "-X":
+        rules.remove("-N " + chain)
+    elif op == "-F":
+        rules = [rule for rule in rules if not rule.startswith(f"-A {chain} ")]
+    elif op == "-I":
+        assert args.pop(0) == "1"
+        rules.insert(0, " ".join(["-A", chain, *args]))
+    elif op == "-D":
+        rules.remove("-A " + line[3:])
+    else:
+        assert op == "-A"
+        rules.append(line)
+if os.getenv("REJECT_RESTORE") == tool:
+    print("restore rejected", file=sys.stderr)
+    sys.exit(2)
+order = ["-N", "-A PREROUTING", "-A OUTPUT", "-A R2O_TG"]
+rules.sort(key=lambda rule: next(i for i, prefix in enumerate(order) if rule.startswith(prefix)))
+path.write_text("\n".join(rules) + "\n")
 EOF
-printf '#!/bin/sh\nexit 0\n' > "$TEMP/iptables-bin/conntrack"
-chmod 0755 "$TEMP/iptables-bin/ipset" "$TEMP/iptables-bin/conntrack"
+chmod +x "$TEMP/iptables-bin/restore"
+ln -s restore "$TEMP/iptables-bin/iptables-restore"
+ln -s restore "$TEMP/iptables-bin/ip6tables-restore"
+printf '#!/bin/sh
+exit 1
+' > "$TEMP/iptables-bin/ipset"
+chmod +x "$TEMP/iptables-bin/ipset"
 run_iptables() {
     env PATH="$TEMP/iptables-bin:/usr/bin:/bin" IPT_STATE="$TEMP/iptables-state" \
-        R2O_FW=iptables R2O_CONFIG=/dev/null R2O_DIR="$TEMP/root" "$@"
+        R2O_RUNTIME_DIR="$TEMP/iptables-runtime" R2O_FW=iptables \
+        R2O_TG_DC_MAP_ENDPOINTS_PATH="$MANIFEST" sh "$TG_FW" "$@"
 }
-run_iptables sh "$TG_FW" start || fail "не удалось запустить iptables"
-[ "$(grep -c 'REDIRECT --to-port 1443' "$TEMP/iptables-state/iptables")" -eq 6 ] || fail "правила перенаправления IPv4 неполны"
-[ "$(grep -c 'REDIRECT --to-port 1443' "$TEMP/iptables-state/ip6tables")" -eq 6 ] || fail "правила перенаправления IPv6 неполны"
-grep -qF -- '--mark 0x31' "$TEMP/iptables-state/iptables" || fail "не установлено D2O-исключение исходящих пакетов IPv4"
-grep -qF -- '--mark 0x31' "$TEMP/iptables-state/ip6tables" || fail "не установлено D2O-исключение исходящих пакетов IPv6"
-MANIFEST=$TEMP/telegram-dc-endpoints.tsv
-printf 'r2o-tg-dc-options-v1 1 2\n149.154.175.52 443\n2001:67c:4e8::1 5222\n' > "$MANIFEST"
-run_iptables env R2O_TG_DC_MAP_ENDPOINTS_PATH="$MANIFEST" sh "$TG_FW" sync-dc-map || fail "синхронизация точных пар в ipset завершилась ошибкой"
-grep -Eq 'add r2o_tg_pair4_next_[0-9]+ 149\.154\.175\.52,tcp:443 -exist' "$TEMP/iptables-state/ipset-calls" || fail "IPv4-пара не добавлена в ipset"
-grep -Eq 'add r2o_tg_pair6_next_[0-9]+ 2001:67c:4e8::1,tcp:5222 -exist' "$TEMP/iptables-state/ipset-calls" || fail "IPv6-пара не добавлена в ipset"
-: > "$TEMP/iptables-state/ipset-calls"
-run_iptables env R2O_TG_DC_MAP_ENDPOINTS_PATH="$MANIFEST" sh "$TG_FW" sync-dc-map || fail "повторная синхронизация карты DC в ipset завершилась ошибкой"
-! grep -q '^swap ' "$TEMP/iptables-state/ipset-calls" || fail "неизменённые пары DC повторно применены через ipset"
-if find "$TEMP/iptables-state/ipsets" -name 'r2o_tg_pair*_next_*' -print -quit | grep -q .; then
-    fail "после синхронизации остались временные ipset"
+v4=$TEMP/iptables-state/iptables
+v6=$TEMP/iptables-state/ip6tables
+export NO_IPV6_NAT=1
+printf 'r2o-tg-dc-options-v1 1 2
+149.154.175.52 5222
+2001:67c:4e8::1 443
+' > "$MANIFEST"
+run_iptables sync-dc-map
+! grep -q REDIRECT "$v4" || fail "синхронизация карты создала правила без активного перехвата"
+run_iptables start
+grep -qF -- '-d 149.154.175.52/32 -p tcp -m tcp --dport 5222 -j REDIRECT --to-ports 1443' "$v4"
+if grep -qF -- '-d 149.154.175.52/32 -p tcp -m tcp --dport 443' "$v4"; then
+    fail "несовпадающий порт динамического адреса перехвачен"
 fi
-cp "$TEMP/iptables-state/ipsets/r2o_tg_pair4" "$TEMP/iptables-state/pair4-before-failure"
-cp "$TEMP/iptables-state/ipsets/r2o_tg_pair6" "$TEMP/iptables-state/pair6-before-failure"
-printf 'r2o-tg-dc-options-v1 1 3\n149.154.175.53 443\n2001:67c:4e8::2 5222\n' > "$MANIFEST"
-if run_iptables env IPSET_FAIL_SWAP=r2o_tg_pair6 R2O_TG_DC_MAP_ENDPOINTS_PATH="$MANIFEST" sh "$TG_FW" sync-dc-map >/dev/null 2>&1; then
-    fail "ошибка замены IPv6-набора не передана вызывающему коду"
-fi
-cmp -s "$TEMP/iptables-state/pair4-before-failure" "$TEMP/iptables-state/ipsets/r2o_tg_pair4" || fail "отказ IPv6-замены не откатил IPv4-набор"
-cmp -s "$TEMP/iptables-state/pair6-before-failure" "$TEMP/iptables-state/ipsets/r2o_tg_pair6" || fail "отказ IPv6-замены изменил прежние IPv6-пары"
-if find "$TEMP/iptables-state/ipsets" -name 'r2o_tg_pair*_next_*' -print -quit | grep -q .; then
-    fail "после отката остались временные ipset"
-fi
-before=$(wc -l < "$TEMP/iptables-state/ipset-calls")
-printf 'r2o-tg-dc-options-v1 1 2\n149.154.175.52 81\n' > "$MANIFEST"
-if run_iptables env R2O_TG_DC_MAP_ENDPOINTS_PATH="$MANIFEST" sh "$TG_FW" sync-dc-map >/dev/null 2>&1; then
-    fail "повреждённая карта DC принята для ipset"
-fi
-[ "$(wc -l < "$TEMP/iptables-state/ipset-calls")" -eq "$before" ] || fail "проверка карты DC изменила ipset до валидации"
-run_iptables sh "$TG_FW" stop || fail "не удалось остановить iptables"
-[ ! -s "$TEMP/iptables-state/iptables" ] || fail "IPv4 rules remain after stop"
-[ ! -s "$TEMP/iptables-state/ip6tables" ] || fail "IPv6 rules remain after stop"
-
-echo "Проверки жизненного цикла nftables и iptables для Telegram прошли"
+if grep -q REDIRECT "$v6"; then fail "IPv6 перенаправление без IPv6 NAT"; fi
+grep -q 'exit=3' "$TEMP/iptables-runtime/telegram-firewall.ipv6"
+grep -qE '^active ' "$TEMP/iptables-runtime/telegram-firewall.ipv4"
+export NO_IPV6_NAT=0
+run_iptables heal
+grep -qF -- '-d 2001:67c:4e8::1/128 -p tcp -m tcp --dport 443 -j REDIRECT --to-ports 1443' "$v6"
+grep -qF -- '! --mark 0x31' "$v4"
+cp "$v6" "$TEMP/last-good"
+printf 'r2o-tg-dc-options-v1 1 3
+149.154.175.53 443
+2001:67c:4e8::2 5222
+' > "$MANIFEST"
+export REJECT_RESTORE=ip6tables
+run_iptables sync-dc-map
+unset REJECT_RESTORE
+cmp "$v6" "$TEMP/last-good"
+grep -qF -- '-d 149.154.175.53/32 -p tcp -m tcp --dport 443' "$v4"
+grep -qF 'restore rejected' "$TEMP/iptables-runtime/telegram-firewall.ipv6"
+run_iptables heal
+run_iptables stop
+run_iptables stop
+for listing in "$v4" "$v6"; do
+    grep -qF -- '-A OUTPUT -d 203.0.113.3/32 -j FOREIGN' "$listing"
+    if grep -q R2O_TG "$listing"; then fail "после stop остались правила Telegram"; fi
+done
+[ ! -e "$TEMP/iptables-runtime/telegram-firewall.lock" ]
+echo "Проверки транзакций nftables и iptables для Telegram прошли"

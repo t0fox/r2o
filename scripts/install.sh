@@ -382,10 +382,19 @@ check_runtime_dependencies() {
     else
         need_runtime_tool iptables "$ipt_package" -V
         if [ "$ipv6_enabled" -eq 1 ]; then need_runtime_tool ip6tables "$ip6t_package" -V; fi
-        if [ "$telegram_enabled" -eq 1 ]; then need_runtime_tool ipset ipset --version; fi
+        if [ "$telegram_enabled" -eq 1 ] && ! command -v iptables-restore >/dev/null 2>&1; then
+            case " $runtime_packages " in *" $ipt_package "*) ;; *) runtime_packages="$runtime_packages $ipt_package" ;; esac
+        fi
     fi
     # shellcheck disable=SC2086
     install_packages $runtime_packages
+
+    if [ "$backend" = iptables ] && ! ipset --version >/dev/null 2>&1; then
+        # Нужен для временных маршрутов DNS. Telegram может работать без него.
+        if ! (install_packages ipset); then
+            say "не установлен ipset. Временные маршруты DNS недоступны до установки штатного пакета ipset"
+        fi
+    fi
 
     if [ "$backend" = nft ]; then
         rule_module=nft_queue
@@ -406,7 +415,14 @@ check_runtime_dependencies() {
     nfqueue_rule_ready >/dev/null 2>&1 || try_module "$rule_module"
     conntrack -C >/dev/null 2>&1 || try_module nf_conntrack_netlink
     if [ "$backend" = iptables ] && [ "$telegram_enabled" -eq 1 ]; then
-        ipset list -n >/dev/null 2>&1 || try_module ip_set
+        # Старые Keenetic могут иметь IPv4 NAT без IPv6 NAT и без ipset.
+        # Используем только модули своей прошивки. Проверку фактического
+        # REDIRECT и прав выполняет адаптер службы.
+        iptables -t nat -S OUTPUT >/dev/null 2>&1 || try_module iptable_nat
+        iptables -j REDIRECT --help >/dev/null 2>&1 || try_module ipt_REDIRECT
+        if [ "$ipv6_enabled" = 1 ] && command -v ip6tables >/dev/null 2>&1; then
+            ip6tables -t nat -S OUTPUT >/dev/null 2>&1 || try_module ip6table_nat
+        fi
     fi
 
     if [ "$PLATFORM" = openwrt ]; then
@@ -414,10 +430,6 @@ check_runtime_dependencies() {
         nfqueue_core_ready || kernel_packages="$kernel_packages kmod-nfnetlink-queue"
         nfqueue_rule_ready >/dev/null 2>&1 || kernel_packages="$kernel_packages $rule_package"
         conntrack -C >/dev/null 2>&1 || kernel_packages="$kernel_packages kmod-nf-conntrack-netlink"
-        if [ "$backend" = iptables ] && [ "$telegram_enabled" -eq 1 ] &&
-            ! ipset list -n >/dev/null 2>&1; then
-            kernel_packages="$kernel_packages kmod-ipt-ipset"
-        fi
         if [ -n "$kernel_packages" ]; then
             # shellcheck disable=SC2086
             install_packages $kernel_packages
@@ -442,10 +454,11 @@ check_runtime_dependencies() {
             runtime_failure ip6tables "$ip6t_package" -t mangle -S PREROUTING
         fi
         if [ "$telegram_enabled" -eq 1 ]; then
-            runtime_failure iptables "$ipt_package" -t nat -S OUTPUT
-        fi
-        if [ "$telegram_enabled" -eq 1 ]; then
-            runtime_failure ipset ipset list -n
+            command -v iptables-restore >/dev/null 2>&1 ||
+                die "нет iptables-restore из пакета $ipt_package. Переустановите этот пакет из репозитория прошивки"
+            if ! iptables -t nat -S OUTPUT >/dev/null; then
+                say "Telegram IPv4 NAT недоступен. Проверьте модуль iptable_nat в прошивке"
+            fi
         fi
     fi
 }

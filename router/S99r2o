@@ -227,6 +227,9 @@ R2O_FW=$(R2O_DIR="$ROOT" R2O_CONFIG="$CONF" "$SCRIPT_DIR/r2o-firewall.sh" backen
     die "не удалось определить FW_BACKEND для дочерних процессов"
 case "$R2O_FW" in nft|iptables) ;; *) die "адаптер вернул неизвестный FW_BACKEND: $R2O_FW" ;; esac
 export R2O_FW
+R2O_RUNTIME_DIR=$RUNTIME
+R2O_TG_MANAGER=$MANAGER
+export R2O_RUNTIME_DIR R2O_TG_MANAGER
 
 configure_ipv6() {
     IPV6_ENABLED_RUNTIME=$(R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" \
@@ -1112,11 +1115,11 @@ telegram_unlock() {
 }
 
 telegram_stop_locked() {
+    if [ -x "$TG_FIREWALL" ]; then
+        "$TG_FIREWALL" stop || { say "не удалось снять Telegram firewall; listener оставлен запущенным"; return 1; }
+    fi
     telegram_watchdog_stop
     stop_component r2o-telegram "$TG_PID" || return 1
-    if [ -x "$TG_FIREWALL" ]; then
-        "$TG_FIREWALL" stop || true
-    fi
     rm -f "$TG_STATS_SOCKET"
     write_telegram_status stopped
 }
@@ -1137,14 +1140,12 @@ telegram_start_locked() {
     log_maintenance_start || say "ротация журналов не запустилась"
     if component_running r2o-telegram "$TG_PID"; then
         if telegram_ready; then
-            "$TG_FIREWALL" heal || { write_telegram_status error; return 1; }
-            "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
-            write_telegram_status local
-            telegram_watchdog_start || say "сторож Telegram не запустился"
-            return 0
+            telegram_apply_firewall
+            return $?
         fi
     fi
-    stop_component r2o-telegram "$TG_PID"
+    "$TG_FIREWALL" stop || { write_telegram_status error; return 1; }
+    stop_component r2o-telegram "$TG_PID" || return 1
     rm -f "$TG_STATS_SOCKET" "$RUNTIME/d2ktg.health"
     write_telegram_status connecting || return 1
     export_telegram_config
@@ -1177,10 +1178,9 @@ telegram_start_locked() {
         return 1
     fi
     if ! "$TG_FIREWALL" start; then
-        stop_component r2o-telegram "$TG_PID"
-        rm -f "$TG_STATS_SOCKET"
-        write_telegram_status error
-        say "не удалось установить Telegram firewall"
+        write_telegram_status firewall_error
+        telegram_watchdog_start || say "сторож Telegram не запустился"
+        say "Telegram listener готов, ни один стек firewall не активирован"
         return 1
     fi
     "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
@@ -1243,14 +1243,13 @@ telegram_disable() {
 
 telegram_restart() {
     telegram_lock || return 1
-    if component_running r2o-telegram "$TG_PID" && telegram_ready; then
-        write_telegram_status local
-        telegram_unlock
-        return 0
+    if telegram_ready; then
+        telegram_apply_firewall
+        result=$?
+    else
+        telegram_stop_locked && telegram_start_locked
+        result=$?
     fi
-    telegram_stop_locked
-    telegram_start_locked
-    result=$?
     telegram_unlock
     return "$result"
 }
@@ -1331,15 +1330,26 @@ heal_reapply() {
     return "$heal_rc"
 }
 
-telegram_reapply() {
-    [ "$TG_ENABLED" = 1 ] || return 0
-    component_running r2o-telegram "$TG_PID" || return 0
-    "$TG_FIREWALL" heal || return 1
-    if telegram_ready; then
-        "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
-        telegram_watchdog_start || say "сторож Telegram не запустился"
+telegram_apply_firewall() {
+    if ! "$TG_FIREWALL" heal; then
+        write_telegram_status firewall_error
+        return 1
     fi
+    "$TG_FIREWALL" sync-dc-map || say "не удалось синхронизировать динамическую карту Telegram DC"
+    if [ "$(cat "$TG_STATUS" 2>/dev/null)" != local ]; then write_telegram_status local; fi
+    telegram_watchdog_start || say "сторож Telegram не запустился"
 }
+
+telegram_reapply() (
+    telegram_lock || exit 1
+    trap telegram_unlock EXIT
+    [ "$TG_ENABLED" = 1 ] || exit 0
+    if telegram_ready; then
+        telegram_apply_firewall
+    elif ! component_running r2o-telegram "$TG_PID"; then
+        "$TG_FIREWALL" stop
+    fi
+)
 
 firewall_heal() {
     if component_running r2o-datapath "$DP_PID" || component_running r2o-datapath "$DP4_PID"; then

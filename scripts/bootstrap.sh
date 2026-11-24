@@ -3,7 +3,7 @@ set -eu
 set -f
 
 # Контрольную сумму этого файла закрепляет сценарий GitHub Pages.
-INSTALL_SHA256='e0455404e0c1f01b0782c5b477de153eed536e3209688876c9df671094a35e5d'
+INSTALL_SHA256='75de7f5fb185ffdd403ac1764ead632fa5ae397d67af6ec955d9f4c399f36fee'
 source_url=https://raw.githubusercontent.com/t0fox/r2o/${R2O_BOOTSTRAP_REF:-main}/scripts/install.sh
 export PATH="/opt/bin:/opt/sbin:$PATH"
 # Прямой GitHub первым, затем резервные HTTPS-зеркала с проверкой SHA-256.

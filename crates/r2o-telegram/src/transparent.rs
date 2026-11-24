@@ -259,6 +259,36 @@ fn original_destination_option(stream: &TcpStream, level: libc::c_int) -> io::Re
     })
 }
 
+/// Проверка сокетов firewall без внешней сети и без изменения правил ядра.
+#[cfg(target_os = "linux")]
+pub(crate) async fn check_socket_capabilities(ipv6: bool) -> io::Result<()> {
+    let listener = if ipv6 {
+        tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await?
+    } else {
+        tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?
+    };
+    let address = listener.local_addr()?;
+    let socket = if ipv6 {
+        tokio::net::TcpSocket::new_v6()?
+    } else {
+        tokio::net::TcpSocket::new_v4()?
+    };
+    crate::outbound::set_socket_mark(&socket, 0x31)
+        .map_err(|error| io::Error::new(error.kind(), format!("SO_MARK: {error}")))?;
+    let _client =
+        tokio::time::timeout(std::time::Duration::from_secs(1), socket.connect(address)).await??;
+    let (server, _) = listener.accept().await?;
+    let destination = original_destination(&server)
+        .map_err(|error| io::Error::new(error.kind(), format!("SO_ORIGINAL_DST: {error}")))?;
+    if address != destination {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("SO_ORIGINAL_DST: {destination} вместо {address}"),
+        ));
+    }
+    Ok(())
+}
+
 /// Получить исходный адрес назначения, сохранённый nftables REDIRECT.
 pub fn original_destination(stream: &TcpStream) -> io::Result<SocketAddr> {
     #[cfg(target_os = "linux")]

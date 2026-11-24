@@ -137,7 +137,7 @@ async fn connect_marked_tcp(
 }
 
 #[cfg(target_os = "linux")]
-fn set_socket_mark(socket: &TcpSocket, mark: u32) -> io::Result<()> {
+pub(crate) fn set_socket_mark(socket: &TcpSocket, mark: u32) -> io::Result<()> {
     let rc = unsafe {
         libc::setsockopt(
             socket.as_raw_fd(),

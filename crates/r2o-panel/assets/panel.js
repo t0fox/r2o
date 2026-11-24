@@ -1363,6 +1363,7 @@
     if (tm) {
       var metaWord = st === "local" ? "Работает"
         : st === "connected" ? "Подключён"
+          : st === "firewall_error" ? "Ошибка firewall"
           : st === "connecting" ? "Подключение"
             : st === "unavailable" ? "Нет маршрута" : info.word;
       var tgKey = JSON.stringify([st, metaWord]);
@@ -2999,6 +3000,7 @@
     connected: { word: "Подключён", lamp: "ok", on: true, note: "Прокси работает. Получен подтверждённый ответ Telegram." },
     connecting: { word: "Подключается", lamp: "warn", on: true, note: "Прокси запускается и проверяет доступные маршруты." },
     local: { word: "Локальный прокси", lamp: "warn", on: true, note: "Прокси работает. Подтверждённого ответа Telegram пока нет." },
+    firewall_error: { word: "Ошибка firewall", lamp: "bad", on: true, note: "Прокси запущен. Не удалось активировать перехват." },
     unavailable: { word: "Маршрут недоступен", lamp: "bad", on: true, note: "Прокси работает, но активный маршрут Telegram недоступен." },
     stopped: { word: "Остановлен", lamp: "idle", on: false, note: "Прокси выключен. Служба не запущена." },
     not_configured: { word: "Не настроен", lamp: "idle", on: false, note: "Прокси не настроен. Для C11 укажите TG_MODE=local в конфигурации." }
@@ -3118,7 +3120,10 @@
     diagnosticCenters.setAttribute("data-tg-check-centers", "");
     diagnostics.append(diagnosticSummary, diagnosticState, diagnosticTime, diagnosticCenters);
 
-    root.append(hero, stats, diagnostics, flowCard, routes);
+    var firewall = el(doc, "div", "tg-check-time");
+    firewall.setAttribute("data-tg-firewall", "");
+    firewall.hidden = true;
+    root.append(hero, firewall, stats, diagnostics, flowCard, routes);
     if (global.R2oTelegramFlow && global.R2oTelegramFlow.mountTelegramFlow) {
       root.__flow = global.R2oTelegramFlow.mountTelegramFlow(canvas);
     }
@@ -3229,6 +3234,23 @@
   function renderTelegramDiagnostics(root, report) {
     if (!root) return;
     report = report && typeof report === "object" ? report : { state: "never" };
+    var firewall = root.parentNode.querySelector("[data-tg-firewall]");
+    if (firewall) {
+      var capabilities = report.firewall || {};
+      var lines = ["ipv4", "ipv6"].flatMap(function (family) {
+        var entry = capabilities[family];
+        if (!entry) return [];
+        var state = entry.state === "active" ? "перехват активен" : "перехват недоступен";
+        return [el(root.ownerDocument, "p", "", family === "ipv4" ? "IPv4 — " + state : "IPv6 — " + state),
+          el(root.ownerDocument, "p", "", str(entry.message))];
+      });
+      var firewallKey = JSON.stringify(capabilities);
+      if (firewall.__r2oKey !== firewallKey) {
+        firewall.__r2oKey = firewallKey;
+        firewall.replaceChildren.apply(firewall, lines);
+      }
+      firewall.hidden = !lines.length;
+    }
     var key = JSON.stringify(report);
     if (root.__r2oKey === key) return;
     var running = report.running === true || report.state === "running";
@@ -3370,6 +3392,7 @@
     if (ui.badge) {
       var badgeText = st === "not_configured" ? "Не настроен"
         : st === "unavailable" ? "Нет маршрута"
+          : st === "firewall_error" ? "Ошибка firewall"
           : st === "connecting" ? "Подключение"
             : info.on ? "Работает" : "Остановлен";
       if (ui.badge.textContent !== badgeText) {

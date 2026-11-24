@@ -2749,6 +2749,7 @@ fn telegram_status(
         "connected" => "connected",
         "connecting" => "connecting",
         "local" => "local",
+        "firewall_error" => "firewall_error",
         "stopped" => "stopped",
         "not_configured" => "not_configured",
         _ => "connecting",
@@ -3401,16 +3402,28 @@ fn telegram_diagnostics_snapshot(config: &Config) -> Value {
         .live_path
         .with_file_name("telegram-diagnostics-progress.json");
     let saved = config.state_dir.join("telegram-diagnostics.json");
-    if config.telegram_check_running.load(Ordering::Acquire) {
-        if let Some(report) = read_telegram_diagnostics(&progress) {
-            return report;
+    let mut report = if config.telegram_check_running.load(Ordering::Acquire) {
+        read_telegram_diagnostics(&progress).unwrap_or_else(|| json!({"state":"running"}))
+    } else {
+        let mut report = read_telegram_diagnostics(&saved).unwrap_or_else(|| json!({"state":"never"}));
+        if report["running"] == true {
+            report["running"] = json!(false);
+            report["interrupted"] = json!(true);
         }
-        return json!({"state":"running"});
-    }
-    let mut report = read_telegram_diagnostics(&saved).unwrap_or_else(|| json!({"state":"never"}));
-    if report["running"] == true {
-        report["running"] = json!(false);
-        report["interrupted"] = json!(true);
+        report
+    };
+    for (key, file) in [
+        ("ipv4", "telegram-firewall.ipv4"),
+        ("ipv6", "telegram-firewall.ipv6"),
+    ] {
+        let path = config.live_path.with_file_name(file);
+        if let Ok(raw) = read_regular_file(&path, 4096) {
+            let line = String::from_utf8_lossy(&raw);
+            let (state, message) = line.trim_end().split_once(' ').unwrap_or(("", ""));
+            if matches!(state, "active" | "unavailable") {
+                report["firewall"][key] = json!({"state": state, "message": message});
+            }
+        }
     }
     report
 }

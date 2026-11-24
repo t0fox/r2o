@@ -194,12 +194,13 @@ sleep 2
 [ "$(wc -l < "$TEMP/root/state/telegram-health.restarts")" -eq 2 ] || \
     fail "сторож продолжал перезапуски после достижения лимита"
 
+# Пока правила ещё могут перенаправлять пакеты, процесс нельзя останавливать.
+run_service telegram-enable
+active_pid=$(cat "$TEMP/root/run/r2o-telegram.pid")
 touch "$TEMP/firewall-fail"
-run_service telegram-disable
-grep -q '^TG_ENABLED=0$' "$TEMP/root/config" || fail "ошибка firewall изменила сохранённое состояние отключения"
-[ ! -e "$TEMP/root/run/r2o-telegram.pid" ] || fail "ошибка firewall оставила Telegram listener запущенным"
-[ ! -e "$TEMP/root/run/r2o-telegram-watchdog.pid" ] || fail "ошибка firewall оставила сторож Telegram запущенным"
-grep -q '^stopped$' "$TEMP/root/state/telegram.status" || fail "ошибка firewall не завершила остановку Telegram"
+if run_service telegram-disable; then fail "ошибка снятия firewall скрыта"; fi
+grep -q '^TG_ENABLED=0$' "$TEMP/root/config"
+kill -0 "$active_pid" || fail "listener остановлен до снятия REDIRECT"
 rm -f "$TEMP/firewall-fail"
 run_service telegram-disable
 grep -q '^TG_ENABLED=0$' "$TEMP/root/config"
