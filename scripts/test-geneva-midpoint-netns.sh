@@ -177,8 +177,31 @@ PY
   verified recovered
   echo 'После сохранения плана HTTPS прошёл'
   if [ -n "$lan" ]; then
-    "$dp" --platform down
     printf 'LAN_TLS_DISCOVERY_PASS elapsed_seconds=%s\n' "$((SECONDS - discovery_started))"
+    kill "$watcher" "$daemon"
+    wait "$watcher" || true
+    wait "$daemon" || true
+    watcher=
+    daemon=
+    repeat_started=$SECONDS
+    "$dp" --mode apply --queue 52692 --family ipv4 --mark 45 --probe-mark 46 --controller-only --control "$lab/dp.sock" >"$lab/datapath-repeat.log" 2>&1 &
+    daemon=$!
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        "$dp" --platform status >/dev/null 2>&1 && [ -S "$lab/dp.sock" ] && break
+        sleep .1
+    done
+    "$dp" --platform status
+    "$controller" --serve "$lab/dp.sock" "$lab/catalog.json" --discover --mark 46 --measure-mark 46 --live "$lab/discovery-repeat.json" --no-diagnostics >"$lab/controller-repeat.log" 2>&1 &
+    watcher=$!
+    for ((attempt = 0; attempt < 5; attempt++)); do
+        client repeat || true
+        verified repeat && break
+        kill -0 "$daemon" "$watcher"
+        sleep 1
+    done
+    verified repeat
+    printf 'LAN_TLS_REUSE_PASS elapsed_seconds=%s\n' "$((SECONDS - repeat_started))"
+    "$dp" --platform down
   fi
   exit
 fi

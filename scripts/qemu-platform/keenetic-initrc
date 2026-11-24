@@ -1,0 +1,54 @@
+#!/opt/bin/busybox-bootstrap sh
+set -eu
+PATH=/opt/bin:/opt/sbin:/opt/usr/bin:/opt/usr/sbin:/opt/lab/bootstrap-bin:/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+unset LD_LIBRARY_PATH
+
+if [ "${1:-start}" = stop ]; then
+    [ ! -x /opt/etc/init.d/S99r2o ] || /opt/etc/init.d/rc.unslung stop
+    awk '$1 == 2000 { found=1 } END { exit found }' /proc/net/netfilter/nfnetlink_queue
+    echo R2O_STOP_PASS
+    exit 0
+fi
+/opt/bin/busybox-bootstrap mkdir -p /opt/lab/bootstrap-bin
+/opt/bin/busybox-bootstrap --install -s /opt/lab/bootstrap-bin
+if ! /bin/sh -c 'exit 0' >/tmp/r2o-native-sh.log 2>&1; then
+    echo KEENETIC_SHELL_OVERLAY
+    cat /tmp/r2o-native-sh.log
+    cp /opt/bin/busybox-bootstrap /tmp/r2o-bootstrap-sh
+    mount --bind /tmp/r2o-bootstrap-sh /bin/sh
+fi
+echo "KERNEL=$(uname -r)"
+if timeout 3 /bin/ndmc -c 'show version' >/tmp/ndmc-original.txt 2>&1; then
+    echo NATIVE_NDMC=answered
+else
+    echo NATIVE_NDMC=failed
+    cat /tmp/ndmc-original.txt
+fi
+
+if [ ! -x /opt/bin/busybox ]; then
+    mkdir -p /opt/tmp /opt/var/opkg-lists
+    /opt/bin/opkg -f /opt/lab/opkg.conf update
+    /opt/bin/opkg -f /opt/lab/opkg.conf install entware-opt busybox ca-bundle ip-full iptables ipset
+    /opt/bin/opkg -f /opt/lab/opkg.conf list-installed | grep '^entware-opt '
+    /opt/bin/busybox | head -1
+    /opt/bin/busybox ln -sf busybox /opt/bin/sh
+    /opt/bin/busybox ln -sf ../libexec/ip-full /opt/bin/ip
+    echo ENTWARE_INSTALL_PASS
+fi
+if [ ! -e /tmp/r2o-fastnat-before ]; then
+    cat /proc/sys/net/netfilter/nf_conntrack_fastnat >/tmp/r2o-fastnat-before
+fi
+if [ -x /opt/lab/xtables-legacy-multi ]; then
+    for applet in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do
+        ln -sf /opt/lab/xtables-legacy-multi "/opt/sbin/$applet"
+    done
+    /opt/sbin/iptables --version
+fi
+if [ "$1" = start ] && [ -x /opt/etc/init.d/S99r2o ]; then
+    result=0
+    /opt/etc/init.d/rc.unslung start </dev/null >/tmp/r2o-autoboot.log 2>&1 || result=$?
+    cat /tmp/r2o-autoboot.log
+    [ "$result" -eq 0 ]
+    echo R2O_BOOT_INITRC_PASS
+fi

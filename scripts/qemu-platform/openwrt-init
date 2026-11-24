@@ -1,0 +1,59 @@
+#!/bin/sh /etc/rc.common
+START=98
+
+start() {
+    (exec </dev/null >/dev/ttyS0 2>&1; run_acceptance) &
+}
+
+run_acceptance() {
+    set -eu
+    trap 'code=$?; echo "OPENWRT_ACCEPTANCE_EXIT=$code"; sync; poweroff -f' EXIT
+    mkdir -p /opt
+    if [ ! -b /dev/sdb ]; then
+        IFS=: read -r major minor </sys/class/block/sdb/dev
+        mknod /dev/sdb b "$major" "$minor"
+    fi
+    mount -t ext4 /dev/sdb /opt
+    export LAB=/opt/lab
+    . "$LAB/settings"
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+    if [ ! -e /opt/lab/reboot-expected ]; then
+        apk add --no-network --allow-untrusted /lab/packages/*.apk
+        /sbin/kmodloader
+        # У стенда нет Ethernet-адаптеров, поэтому br-lan должен допускать пустой мост.
+        uci set 'network.@device[0].bridge_empty=1'
+        uci commit network
+        /etc/init.d/network reload
+        uci set 'firewall.@defaults[0].forward=ACCEPT'
+        uci set 'firewall.@defaults[0].flow_offloading=1'
+        uci set firewall.r2otest=zone
+        uci set firewall.r2otest.name=r2otest
+        uci set firewall.r2otest.input=ACCEPT
+        uci set firewall.r2otest.output=ACCEPT
+        uci set firewall.r2otest.forward=ACCEPT
+        uci add_list firewall.r2otest.device=rlan
+        uci add_list firewall.r2otest.device=rwan
+        uci commit firewall
+        uci add_list 'dhcp.@dnsmasq[0].server=/lab.invalid/198.18.0.2'
+        uci commit dhcp
+        /etc/init.d/firewall restart
+        /etc/init.d/dnsmasq restart
+        "$LAB/lifecycle.sh" prepare
+        "$LAB/lifecycle.sh" clean
+        ip netns exec r2olan nslookup lab.invalid 192.168.77.1 | grep '198.18.0.2'
+        echo OPENWRT_SYSTEM_DNS_PASS
+        "$LAB/lifecycle.sh" uninstall
+        "$LAB/lifecycle.sh" upgrade
+        touch /opt/lab/reboot-expected
+        echo OPENWRT_FIRST_BOOT_PASS
+    else
+        "$LAB/lifecycle.sh" reboot-network
+        # S99r2o запускается procd по ссылке, установленной штатным установщиком.
+        "$LAB/lifecycle.sh" rebooted
+        "$LAB/soak.sh" "${LAB_SOAK_SECONDS:-600}" /opt/lab/openwrt-soak.log || { cat /opt/lab/openwrt-soak.log; exit 1; }
+        cat /opt/lab/openwrt-soak.log
+        "$LAB/lifecycle.sh" uninstall
+        echo OPENWRT_SECOND_BOOT_PASS
+    fi
+}
