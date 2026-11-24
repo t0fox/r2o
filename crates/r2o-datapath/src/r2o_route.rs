@@ -379,6 +379,22 @@ pub struct R2oRoutePacket {
     pub output_ifindex: Option<u32>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct R2oRouteRuleContext {
+    mark: u32,
+    mask: u32,
+    contextual: bool,
+}
+
+impl R2oRouteRuleContext {
+    fn separates(self, marks: [u32; 3]) -> bool {
+        let matches = marks.map(|mark| ((mark ^ self.mark) & self.mask) == 0);
+        // При одинаковом назначении селектор по метке даёт одинаковый
+        // ответ для трёх трактов, в том числе у инвертированных правил.
+        matches[0] != matches[1] || matches[0] != matches[2] || self.contextual && matches[0]
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct R2oRouteGate {
     r2o_rules_v4: Option<Vec<R2oFwSelector>>,
@@ -386,9 +402,60 @@ pub struct R2oRouteGate {
     r2o_default_ifindices_v4: Option<Vec<u32>>,
     r2o_default_ifindices_v6: Option<Vec<u32>>,
     r2o_policy: Option<R2oRoutePolicy>,
+    r2o_context: [Option<Vec<R2oRouteRuleContext>>; 2],
 }
 
 impl R2oRouteGate {
+    pub fn r2o_policy_needs_check(&self, family: R2oRouteFamily) -> bool {
+        self.r2o_context[usize::from(family == R2oRouteFamily::Ipv6)]
+            .as_ref()
+            .is_none_or(|rules| !rules.is_empty())
+    }
+
+    fn r2o_set_context(
+        &mut self,
+        family: R2oRouteFamily,
+        rules: Option<Vec<R2oRouteRuleContext>>,
+    ) -> bool {
+        let slot = &mut self.r2o_context[usize::from(family == R2oRouteFamily::Ipv6)];
+        let changed = *slot != rules;
+        *slot = rules;
+        changed
+    }
+
+    pub fn r2o_policy_allows_plan(&self, packet: R2oRoutePacket, measure_mark: u32) -> bool {
+        let index = usize::from(packet.family == R2oRouteFamily::Ipv6);
+        let Some(rules) = &self.r2o_context[index] else {
+            return false;
+        };
+        if rules.is_empty() {
+            return true;
+        }
+        let mark = packet.mark.unwrap_or(0);
+        let local =
+            mark != 0 && [packet.probe_mark, packet.datapath_mark, measure_mark].contains(&mark);
+        let client = if local {
+            self.r2o_policy
+                .filter(|policy| policy.found)
+                .map_or(0, |policy| policy.mark)
+        } else {
+            mark
+        };
+        let probe = if packet.probe_mark == 0 {
+            packet.datapath_mark
+        } else {
+            packet.probe_mark
+        };
+        let marks = [client, probe, packet.datapath_mark];
+        !rules.iter().any(|rule| {
+            rule.separates(marks)
+                || measure_mark != 0 && rule.separates([client, measure_mark, packet.datapath_mark])
+        })
+    }
+
+    pub fn r2o_invalidate_policy(&mut self) {
+        self.r2o_context = [None, None];
+    }
     /// Сохраняет успешно прочитанный набор правил конкретного семейства.
     ///
     /// Возвращает C `d2k_routemark_set.changed`: изменились ли длина или
@@ -634,6 +701,7 @@ pub enum R2oRouteParseError {
 pub struct R2oRouteRuleBatch {
     pub selectors: Vec<R2oFwSelector>,
     pub done: bool,
+    context: Vec<R2oRouteRuleContext>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -807,22 +875,30 @@ impl R2oRouteMonitor {
         let mut v4_ok = false;
         let mut found4 = 0;
         match self.r2o_dump_rules(R2oRouteFamily::Ipv4) {
-            Ok((rules, found)) => {
+            Ok((rules, found, context)) => {
                 v4_ok = true;
                 found4 = found;
                 changed |= gate.r2o_set_rules(R2oRouteFamily::Ipv4, rules);
+                changed |= gate.r2o_set_context(R2oRouteFamily::Ipv4, context);
             }
-            Err(error) => errors.push(format!("правила Ipv4: {error}")),
+            Err(error) => {
+                changed |= gate.r2o_set_context(R2oRouteFamily::Ipv4, None);
+                errors.push(format!("правила Ipv4: {error}"));
+            }
         }
         let mut v6_ok = false;
         let mut found6 = 0;
         match self.r2o_dump_rules(R2oRouteFamily::Ipv6) {
-            Ok((rules, found)) => {
+            Ok((rules, found, context)) => {
                 v6_ok = true;
                 found6 = found;
                 changed |= gate.r2o_set_rules(R2oRouteFamily::Ipv6, rules);
+                changed |= gate.r2o_set_context(R2oRouteFamily::Ipv6, context);
             }
-            Err(error) => errors.push(format!("правила Ipv6: {error}")),
+            Err(error) => {
+                changed |= gate.r2o_set_context(R2oRouteFamily::Ipv6, None);
+                errors.push(format!("правила Ipv6: {error}"));
+            }
         }
         let status =
             r2o_route_merge_status(previous4, previous6, v4_ok, found4, v6_ok, found6, changed);
@@ -878,8 +954,9 @@ impl R2oRouteMonitor {
     fn r2o_dump_rules(
         &mut self,
         family: R2oRouteFamily,
-    ) -> std::io::Result<(Vec<R2oFwSelector>, usize)> {
+    ) -> std::io::Result<(Vec<R2oFwSelector>, usize, Option<Vec<R2oRouteRuleContext>>)> {
         let mut selectors = Vec::new();
+        let mut context = Some(Vec::new());
         let mut found = 0_usize;
         let sequence = self.r2o_next_sequence();
         let request = r2o_route_rule_request(family, sequence);
@@ -892,6 +969,7 @@ impl R2oRouteMonitor {
                 Err(R2oRouteParseError::Kernel(code)) if r2o_rules_error_is_empty_success(code) => {
                     selectors.clear();
                     found = 0;
+                    context = None;
                     return Ok(true);
                 }
                 Err(error) => return Err(r2o_parse_io_error(error)),
@@ -901,9 +979,16 @@ impl R2oRouteMonitor {
             let mut truncated = false;
             r2o_extend_rule_selectors(&mut selectors, batch.selectors, &mut truncated);
             let _ = truncated;
+            if let Some(rules) = &mut context {
+                if rules.len() + batch.context.len() <= R2O_ROUTE_RULE_CAPACITY {
+                    rules.extend(batch.context);
+                } else {
+                    context = None;
+                }
+            }
             Ok(batch.done)
         })?;
-        Ok((selectors, found))
+        Ok((selectors, found, context))
     }
 
     fn r2o_lookup_default(&mut self, family: R2oRouteFamily) -> std::io::Result<R2oRouteLookup> {
@@ -1346,11 +1431,13 @@ fn r2o_extend_rule_selectors(
 pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRouteParseError> {
     let messages = r2o_route_messages(bytes)?;
     let mut selectors = Vec::new();
+    let mut context = Vec::new();
     for message in messages {
         if message.kind == R2O_NLMSG_DONE {
             return Ok(R2oRouteRuleBatch {
                 selectors,
                 done: true,
+                context,
             });
         }
         if message.kind == R2O_NLMSG_ERROR {
@@ -1373,8 +1460,19 @@ pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRoute
         );
         let mut mark = None;
         let mut mask = None;
+        // src_len и TOS могут различаться между LAN, raw и локальным зондом.
+        let mut contextual = message.body[2] != 0 || message.body[3] != 0;
         for (kind, value) in r2o_route_attributes(message.body, R2O_FIB_RULE_HEADER_LEN)? {
+            match kind {
+                // Назначение одинаково; приоритет, таблица и протокол записи
+                // описывают правило, а не контекст отправителя.
+                0 | 1 | 4 | 6 | R2O_FRA_FWMARK | 15 | R2O_FRA_FWMASK | 18 | 21 => {}
+                13 | 14 if value == u32::MAX.to_ne_bytes() => {}
+                // iif/oif, UID, L4, l3mdev и неизвестные селекторы.
+                _ => contextual = true,
+            }
             if value.len() < 4 {
+                contextual |= matches!(kind, R2O_FRA_FWMARK | R2O_FRA_FWMASK);
                 continue;
             }
             let value = u32::from_ne_bytes(
@@ -1387,6 +1485,15 @@ pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRoute
                 R2O_FRA_FWMASK => mask = Some(value),
                 _ => {}
             }
+        }
+        let policy_mark = mark.unwrap_or(0);
+        let policy_mask = mask.unwrap_or(if policy_mark == 0 { 0 } else { u32::MAX });
+        if contextual || policy_mask != 0 {
+            context.push(R2oRouteRuleContext {
+                mark: policy_mark & policy_mask,
+                mask: policy_mask,
+                contextual,
+            });
         }
         let Some(mark) = mark.or_else(|| mask.map(|_| 0)) else {
             continue;
@@ -1404,6 +1511,7 @@ pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRoute
     Ok(R2oRouteRuleBatch {
         selectors,
         done: false,
+        context,
     })
 }
 
@@ -1641,6 +1749,29 @@ mod tests {
             datapath_mark: 0x2d,
             output_ifindex,
         }
+    }
+
+    #[test]
+    fn r2o_policy_rejects_iif_and_separate_marks_without_rejecting_a_shared_policy() {
+        let mut gate = R2oRouteGate::default();
+        let packet = r2o_packet(true, Some(0x22), Some(5));
+        assert!(!gate.r2o_policy_allows_plan(packet, 0x2f));
+
+        let mut body = [0; R2O_FIB_RULE_HEADER_LEN].to_vec();
+        body[0] = R2oRouteFamily::Ipv4.r2o_id();
+        r2o_test_attr(&mut body, R2O_FRA_FWMARK, &0x20_u32.to_ne_bytes());
+        r2o_test_attr(&mut body, R2O_FRA_FWMASK, &0xf0_u32.to_ne_bytes());
+        let batch = r2o_route_parse_rules(&r2o_test_message(R2O_RTM_NEWRULE, &body)).unwrap();
+        gate.r2o_set_context(R2oRouteFamily::Ipv4, Some(batch.context));
+        assert!(gate.r2o_policy_allows_plan(packet, 0x2f));
+        assert!(!gate.r2o_policy_allows_plan(packet, 0x30));
+        assert!(!gate.r2o_policy_allows_plan(r2o_packet(true, None, Some(5)), 0x2f));
+
+        // FRA_IIFNAME: LAN может совпасть, сокеты роутера — нет.
+        r2o_test_attr(&mut body, 3, b"lan\0");
+        let batch = r2o_route_parse_rules(&r2o_test_message(R2O_RTM_NEWRULE, &body)).unwrap();
+        gate.r2o_set_context(R2oRouteFamily::Ipv4, Some(batch.context));
+        assert!(!gate.r2o_policy_allows_plan(packet, 0x2f));
     }
 
     fn route_status(

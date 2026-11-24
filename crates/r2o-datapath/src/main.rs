@@ -1666,6 +1666,16 @@ mod app {
             }
         }
         let router_runtime = std::env::var("R2O_PLATFORM_RUNTIME").as_deref() == Ok("1");
+        let route_family = if options.protocol_family == libc::AF_INET6 as u16 {
+            R2oRouteFamily::Ipv6
+        } else {
+            R2oRouteFamily::Ipv4
+        };
+        let measure_mark = std::env::var("MEASURE_MARK")
+            .ok()
+            .and_then(|mark| parse_mark(&mark))
+            .unwrap_or(0);
+        let mut route_context_reported = false;
         let mut route_monitor = R2oRouteMonitor::default();
         let mut route_watch_notifications = 0_u64;
         let mut routes_log = R2oRoutesRefreshLog::default();
@@ -2246,6 +2256,8 @@ mod app {
                             raw.r2o_invalidate_route_mtu();
                         }
                         if changes.policy {
+                            route_gate.r2o_invalidate_policy();
+                            route_context_reported = false;
                             if let Some(worker) = &platform_worker {
                                 worker.notify();
                             }
@@ -2494,6 +2506,49 @@ mod app {
                     let now = Instant::now();
                     let controller_probe = r2o_is_controller_probe(packet.mark, options.probe_mark);
                     let original_from_queue = r2o_datapath_payload(&packet, options.mark);
+                    if router_runtime
+                        && options.mode == RuntimeMode::Apply
+                        && route_gate.r2o_policy_needs_check(route_family)
+                        && matches!(
+                            queue_hook,
+                            Some(
+                                r2o_datapath::netlink::R2O_NF_INET_LOCAL_OUT
+                                    | r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING
+                            )
+                        )
+                        && !route_gate.r2o_policy_allows_plan(
+                            R2oRoutePacket {
+                                family: route_family,
+                                outbound: true,
+                                mark: queue_mark,
+                                probe_mark: options.probe_mark,
+                                datapath_mark: options.mark,
+                                output_ifindex: queue_outdev,
+                            },
+                            measure_mark,
+                        )
+                    {
+                        if !route_context_reported {
+                            eprintln!(
+                                "r2o-datapath: {family_name} RPDB допускает разные пути LAN, зонда и raw; поток передан ядру"
+                            );
+                            route_context_reported = true;
+                        }
+                        if let Some(bytes) = original_from_queue {
+                            routed_flows.r2o_skip_packet(
+                                bytes,
+                                r2o_datapath::r2o_route::R2O_ROUTE_OUTSIDE,
+                                now,
+                            );
+                        }
+                        send_verdicts(
+                            &mut socket,
+                            std::slice::from_ref(&packet_id),
+                            NF_ACCEPT,
+                            false,
+                        )?;
+                        continue;
+                    }
                     if options.mode == RuntimeMode::Apply
                         && let Some(bytes) = original_from_queue
                         && r2o_udp_handle_late_tail(
