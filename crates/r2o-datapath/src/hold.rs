@@ -227,6 +227,7 @@ enum HoldKind {
 #[derive(Default)]
 pub struct HoldTable {
     syns: Vec<SynAnchor>,
+    next_syn_expiry: Option<Instant>,
     http_requests: Vec<HttpRequestFlow>,
     slots: Vec<HeldFlow>,
     capture: CaptureTable,
@@ -482,8 +483,7 @@ impl HoldTable {
             own_packets,
         } = options;
         let mut released = self.flush(now, revision, false);
-        self.syns
-            .retain(|anchor| now.saturating_duration_since(anchor.seen) < SYN_TRACK_TTL);
+        self.expire_syn_anchors(now);
         self.http_requests
             .retain(|flow| now.saturating_duration_since(flow.seen) <= HTTP_FLOW_IDLE);
         let Some((view, tcp, key, source, destination)) = parse_tcp(packet) else {
@@ -492,6 +492,7 @@ impl HoldTable {
                 outcome: HoldOutcome::Pass,
             };
         };
+        let mut anchor_index = self.syn_index(&key);
 
         if tcp.flags & 0x02 != 0 && tcp.flags & 0x10 == 0 {
             if let Some(index) = self.slot_index(&key) {
@@ -499,14 +500,24 @@ impl HoldTable {
             }
             self.capture.forget(&key);
             self.http_requests.retain(|flow| flow.key != key);
-            self.remember_syn(key, source, tcp.sequence, now, controller_probe);
+            self.remember_syn(
+                anchor_index,
+                key,
+                source,
+                tcp.sequence,
+                now,
+                controller_probe,
+            );
             return FeedResult {
                 released,
                 outcome: HoldOutcome::Pass,
             };
         }
 
-        if let Some(anchor_index) = self.syn_index(&key) {
+        if let Some(anchor_index) = anchor_index {
+            if now < self.syns[anchor_index].seen {
+                self.note_syn_expiry(now);
+            }
             self.syns[anchor_index].seen = now;
             self.syns[anchor_index].controller_probe |= controller_probe;
             if source != self.syns[anchor_index].client && tcp.flags & 0x12 == 0x12 {
@@ -534,7 +545,7 @@ impl HoldTable {
         if observe_http
             && source.port != 80
             && tcp.flags & 0x10 != 0
-            && let Some(anchor_index) = self.syn_index(&key)
+            && let Some(anchor_index) = anchor_index
             && self.syns[anchor_index].client == source
         {
             self.observe_http_ack(
@@ -554,30 +565,29 @@ impl HoldTable {
             };
         }
 
-        let mut anchor_index = self.syn_index(&key);
         if anchor_index.is_none()
             && observe_http
             && destination.port == 80
             && (payload.starts_with(b"GET ") || payload.starts_with(b"HEAD "))
         {
-            self.remember_syn(
+            anchor_index = self.remember_syn(
+                None,
                 key,
                 source,
                 tcp.sequence.wrapping_sub(1),
                 now,
                 controller_probe,
             );
-            anchor_index = self.syn_index(&key);
         }
         if anchor_index.is_none() && observe_tls && tls_record_head(payload) {
-            self.remember_syn(
+            anchor_index = self.remember_syn(
+                None,
                 key,
                 source,
                 tcp.sequence.wrapping_sub(1),
                 now,
                 controller_probe,
             );
-            anchor_index = self.syn_index(&key);
             if let Some(index) = anchor_index {
                 self.syns[index].attempted = true;
             }
@@ -1132,16 +1142,40 @@ impl HoldTable {
         max_ms.min(millis.min(i32::MAX as u128) as i32)
     }
 
+    fn note_syn_expiry(&mut self, seen: Instant) {
+        let deadline = seen + SYN_TRACK_TTL;
+        self.next_syn_expiry = Some(
+            self.next_syn_expiry
+                .map_or(deadline, |next| next.min(deadline)),
+        );
+    }
+
+    fn expire_syn_anchors(&mut self, now: Instant) {
+        if self.next_syn_expiry.is_none_or(|deadline| now < deadline) {
+            return;
+        }
+        // Продление срока якоря может оставить прежний срок в качестве нижней границы.
+        let mut next_expiry: Option<Instant> = None;
+        self.syns.retain(|anchor| {
+            let deadline = anchor.seen + SYN_TRACK_TTL;
+            if now >= deadline {
+                return false;
+            }
+            next_expiry = Some(next_expiry.map_or(deadline, |next| next.min(deadline)));
+            true
+        });
+        self.next_syn_expiry = next_expiry;
+    }
+
     fn remember_syn(
         &mut self,
+        existing: Option<usize>,
         key: TcpFlowKey,
         client: Endpoint,
         sequence: u32,
         now: Instant,
         controller_probe: bool,
-    ) {
-        self.syns
-            .retain(|anchor| now.saturating_duration_since(anchor.seen) < SYN_TRACK_TTL);
+    ) -> Option<usize> {
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         let anchor = SynAnchor {
             key,
@@ -1160,10 +1194,17 @@ impl HoldTable {
                 sequence.wrapping_add(1),
             ),
         };
-        if let Some(existing) = self.syn_index(&key) {
+        if let Some(existing) = existing {
             self.syns[existing] = anchor;
+            self.note_syn_expiry(now);
+            Some(existing)
         } else if self.syns.len() < SYN_TRACK_CAPACITY {
+            let index = self.syns.len();
             self.syns.push(anchor);
+            self.note_syn_expiry(now);
+            Some(index)
+        } else {
+            None
         }
     }
 
@@ -1901,6 +1942,34 @@ mod tests {
         let mut fragment = packet.clone();
         fragment[6] = 0x20;
         assert!(parse_tcp(&fragment).is_none());
+    }
+
+    #[test]
+    fn syn_якоря_истекают_в_точный_срок_после_обновления() {
+        use super::{SYN_TRACK_TTL, parse_tcp};
+
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let first = tcp_packet(100, 0x02, b"");
+        let (_, _, first_key, _, _) = parse_tcp(&first).unwrap();
+        let mut second = first.clone();
+        second[20..22].copy_from_slice(&50_001u16.to_be_bytes());
+        let (_, _, second_key, _, _) = parse_tcp(&second).unwrap();
+        let ack = tcp_packet(101, 0x10, b"");
+        let second_seen = now + Duration::from_secs(1);
+        let first_refreshed = now + Duration::from_secs(2);
+        hold.feed(1, &first, now, 0, true, false);
+        hold.feed(2, &second, second_seen, 0, true, false);
+        hold.feed(3, &ack, first_refreshed, 0, true, false);
+
+        hold.feed(4, &[], second_seen + SYN_TRACK_TTL, 0, true, false);
+        assert!(hold.syn_index(&second_key).is_none());
+        assert!(hold.syn_index(&first_key).is_some());
+
+        hold.feed(5, &ack, second_seen, 0, true, false);
+        hold.feed(6, &[], second_seen + SYN_TRACK_TTL, 0, true, false);
+        assert!(hold.syns.is_empty());
+        assert!(hold.next_syn_expiry.is_none());
     }
 
     #[test]
