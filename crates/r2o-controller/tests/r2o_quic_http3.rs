@@ -4308,7 +4308,7 @@ fn r2o_http3_lan() {
     let lan = std::env::var("R2O_H3_LAN").unwrap();
     let wan = std::env::var("R2O_H3_WAN").unwrap();
     let address: SocketAddr = std::env::var("R2O_H3_ORIGIN").unwrap().parse().unwrap();
-    let expect_hello = std::env::var("R2O_H3_EXPECT_HELLO").unwrap() == "1";
+    let expect_applied = std::env::var("R2O_H3_EXPECT_APPLIED").unwrap() == "1";
     let install_plan = std::env::var("R2O_H3_INSTALL_PLAN").as_deref() == Ok("1");
     let status = if std::env::var("R2O_H3_ORIGIN_FAIL").as_deref() == Ok("1") {
         503
@@ -4433,7 +4433,6 @@ fn r2o_http3_lan() {
     let mut saw_hello = false;
     let mut saw_applied = false;
     let mut applied_events = Vec::new();
-    let expect_applied = expect_hello && install_plan;
     let mut endpoints =
         [local, address].map(|addr| (r2k_core::addr::Address::new(addr.ip()).bytes(), addr.port()));
     endpoints.sort_unstable();
@@ -4460,13 +4459,13 @@ fn r2o_http3_lan() {
             saw_applied |= matches_flow(&applied.key) && applied.plan_id == PLAN_ID;
             applied_events.push(applied);
         }
-        if expect_hello && saw_hello && (!expect_applied || saw_applied) {
+        if expect_applied && saw_hello && saw_applied {
             break;
         }
     }
-    assert_eq!(
-        saw_hello, expect_hello,
-        "SNI ожидается только при сопоставимом RPDB"
+    assert!(
+        saw_hello,
+        "ClientHello должен наблюдаться на обоих маршрутах"
     );
     assert_eq!(
         saw_applied, expect_applied,

@@ -276,15 +276,15 @@ echo 'CONNTRACK_EXISTING_AND_FRESH_PASS'
 if [ -n "${R2O_HTTP3_LAN_BIN:-}" ]; then
     http3() {
         R2O_H3_LAN="$LAN" R2O_H3_WAN="$WAN" R2O_H3_ORIGIN="$1" \
-            R2O_H3_CONTROL="$TEMP/control$2" R2O_H3_EXPECT_HELLO="$3" \
-            R2O_H3_INSTALL_PLAN="${4:-0}" R2O_H3_ORIGIN_FAIL="${5:-0}" \
+            R2O_H3_CONTROL="$TEMP/control$2" R2O_H3_EXPECT_APPLIED="$3" \
+            R2O_H3_INSTALL_PLAN="${4:-$3}" R2O_H3_ORIGIN_FAIL="${5:-0}" \
             "$R2O_HTTP3_LAN_BIN" --exact r2o_http3_lan --ignored --nocapture || {
                 cat "$TEMP"/datapath*.log >&2
                 return 1
             }
     }
-    http3 198.18.0.2:443 4 1
-    http3 '[2001:db8:2::2]:443' 6 1
+    http3 198.18.0.2:443 4 0
+    http3 '[2001:db8:2::2]:443' 6 0
 
     # Одинаковые назначение, fwmark и oif скрывают различие шлюзов.
     ip -n "$WAN" addr add 198.18.0.3/24 dev origin
@@ -293,13 +293,14 @@ if [ -n "${R2O_HTTP3_LAN_BIN:-}" ]; then
     ip route get 198.18.0.2 mark "$MARK" | grep -Eq 'dev rwan( |$)'
     ip route get 198.18.0.2 from 203.0.113.2 iif rlan mark "$MARK" | grep -Eq 'via 198\.18\.0\.3 dev rwan( |$)'
     sleep 1
+    # План установлен, но при несовпадении RPDB остаётся только наблюдение.
     http3 198.18.0.2:443 4 0 1
     grep -q 'RPDB допускает разные пути' "$TEMP/datapath4.log"
 
     ip rule del priority 100
     sleep 1
-    http3 198.18.0.2:443 4 1 1
-    http3 '[2001:db8:2::2]:443' 6 1 1
+    http3 198.18.0.2:443 4 1
+    http3 '[2001:db8:2::2]:443' 6 1
     http3 198.18.0.2:443 4 1 1 1
 fi
 
