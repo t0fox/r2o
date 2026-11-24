@@ -229,6 +229,8 @@ pub struct HoldTable {
     syns: Vec<SynAnchor>,
     next_syn_expiry: Option<Instant>,
     http_requests: Vec<HttpRequestFlow>,
+    next_http_expiry: Option<Instant>,
+    next_http_cut: Option<Instant>,
     slots: Vec<HeldFlow>,
     capture: CaptureTable,
     incomplete_diagnostics: VecDeque<R2oIncompleteCaptureDiagnostic>,
@@ -367,9 +369,11 @@ impl HoldTable {
 
     pub fn sweep_http_responses(&mut self, now: Instant) -> Vec<HttpResponseEvent> {
         let mut events = Vec::new();
-        if events.try_reserve(self.http_requests.len()).is_err() {
+        if self.next_http_cut.is_none_or(|deadline| now <= deadline) {
             return events;
         }
+        self.expire_http_requests(now);
+        let mut next_cut: Option<Instant> = None;
         for flow in &mut self.http_requests {
             if flow.response_reported || flow.response.is_invalid() {
                 continue;
@@ -391,10 +395,13 @@ impl HoldTable {
             } else {
                 response_next
             };
-            if !seq_after(body_end, delivered)
-                || now.saturating_duration_since(flow.response_progress)
-                    <= flow.rtt.saturating_mul(3).max(Duration::from_secs(2))
-            {
+            if !seq_after(body_end, delivered) {
+                continue;
+            }
+            let deadline =
+                flow.response_progress + flow.rtt.saturating_mul(3).max(Duration::from_secs(2));
+            if now <= deadline || events.try_reserve(1).is_err() {
+                next_cut = Some(next_cut.map_or(deadline, |next| next.min(deadline)));
                 continue;
             }
             let delivered_body = if seq_after(delivered, body_start) {
@@ -405,6 +412,7 @@ impl HoldTable {
             let body_bytes = flow.response.body_bytes().max(delivered_body);
             events.push(finish_http_response(flow, 4, Some(body_bytes)).0);
         }
+        self.next_http_cut = next_cut;
         events
     }
 
@@ -484,14 +492,16 @@ impl HoldTable {
         } = options;
         let mut released = self.flush(now, revision, false);
         self.expire_syn_anchors(now);
-        self.http_requests
-            .retain(|flow| now.saturating_duration_since(flow.seen) <= HTTP_FLOW_IDLE);
         let Some((view, tcp, key, source, destination)) = parse_tcp(packet) else {
             return FeedResult {
                 released,
                 outcome: HoldOutcome::Pass,
             };
         };
+        let http_port = source.port == 80 || destination.port == 80;
+        if http_port {
+            self.expire_http_requests(now);
+        }
         let mut anchor_index = self.syn_index(&key);
 
         if tcp.flags & 0x02 != 0 && tcp.flags & 0x10 == 0 {
@@ -499,7 +509,9 @@ impl HoldTable {
                 released.extend(self.remove_slot(index));
             }
             self.capture.forget(&key);
-            self.http_requests.retain(|flow| flow.key != key);
+            if http_port {
+                self.http_requests.retain(|flow| flow.key != key);
+            }
             self.remember_syn(
                 anchor_index,
                 key,
@@ -544,6 +556,7 @@ impl HoldTable {
         let payload = &packet[tcp.payload.clone()];
         if observe_http
             && source.port != 80
+            && destination.port == 80
             && tcp.flags & 0x10 != 0
             && let Some(anchor_index) = anchor_index
             && self.syns[anchor_index].client == source
@@ -608,12 +621,14 @@ impl HoldTable {
         };
         let anchor = self.syns[anchor_index];
         if source != anchor.client {
-            if self.http_requests.iter().any(|flow| {
-                flow.key == key
-                    && flow.client == destination
-                    && flow.generation == anchor.generation
-                    && flow.answered
-            }) {
+            if source.port == 80
+                && self.http_requests.iter().any(|flow| {
+                    flow.key == key
+                        && flow.client == destination
+                        && flow.generation == anchor.generation
+                        && flow.answered
+                })
+            {
                 self.http80.dropped = self.http80.dropped.saturating_add(1);
                 return FeedResult {
                     released,
@@ -646,6 +661,7 @@ impl HoldTable {
             };
         }
         if observe_http
+            && destination.port == 80
             && tcp.flags & 0x05 != 0
             && let Some(event) = self.observe_http_client_close(key, anchor, source, &tcp, now)
         {
@@ -680,7 +696,8 @@ impl HoldTable {
         }
         let offset = tcp.sequence.wrapping_sub(anchor.sequence.wrapping_add(1));
         let r2o_http_followup = anchor.r2o_http_requests.is_checked();
-        let r2o_http_capture_active = self.capture.r2o_http_capture_active(key, anchor.generation);
+        let r2o_http_capture_active =
+            destination.port == 80 && self.capture.r2o_http_capture_active(key, anchor.generation);
         let r2o_http_request_candidate = if destination.port == 80
             && source == anchor.client
             && slot_index.is_none()
@@ -1167,6 +1184,22 @@ impl HoldTable {
         self.next_syn_expiry = next_expiry;
     }
 
+    fn expire_http_requests(&mut self, now: Instant) {
+        if self.next_http_expiry.is_none_or(|deadline| now <= deadline) {
+            return;
+        }
+        let mut next_expiry: Option<Instant> = None;
+        self.http_requests.retain(|flow| {
+            let deadline = flow.seen + HTTP_FLOW_IDLE;
+            if now > deadline {
+                return false;
+            }
+            next_expiry = Some(next_expiry.map_or(deadline, |next| next.min(deadline)));
+            true
+        });
+        self.next_http_expiry = next_expiry;
+    }
+
     fn remember_syn(
         &mut self,
         existing: Option<usize>,
@@ -1232,13 +1265,12 @@ impl HoldTable {
             return;
         }
         self.http80.requests = self.http80.requests.saturating_add(1);
-        self.http_requests
-            .retain(|flow| now.saturating_duration_since(flow.seen) <= HTTP_FLOW_IDLE);
-        let previous = self
-            .http_requests
-            .iter()
-            .find(|flow| flow.key == key)
-            .map(|flow| (flow.request_no.saturating_add(1), flow.response_next));
+        self.expire_http_requests(now);
+        let existing = self.http_requests.iter().position(|flow| flow.key == key);
+        let previous = existing.map(|index| {
+            let flow = &self.http_requests[index];
+            (flow.request_no.saturating_add(1), flow.response_next)
+        });
         let request_no = previous.map_or(1, |(request_no, _)| request_no);
         let target = if (request.starts_with(b"GET ") || request.starts_with(b"HEAD "))
             && target.len() < 1024
@@ -1293,8 +1325,13 @@ impl HoldTable {
             ready_for_next: false,
             seen: now,
         };
-        if let Some(flow) = self.http_requests.iter_mut().find(|flow| flow.key == key) {
-            *flow = replacement;
+        let deadline = now + HTTP_FLOW_IDLE;
+        self.next_http_expiry = Some(
+            self.next_http_expiry
+                .map_or(deadline, |next| next.min(deadline)),
+        );
+        if let Some(index) = existing {
+            self.http_requests[index] = replacement;
             return;
         }
         // C `make` (`datapath/http80.c:217-236`): при заполнении таблицы
@@ -1428,6 +1465,18 @@ impl HoldTable {
             flow.ready_for_next = tcp.flags & 0x05 == 0;
             Some((event.0, event.1, None, None))
         } else {
+            if flow
+                .response
+                .fixed_body_remaining()
+                .is_some_and(|remaining| remaining > 0)
+            {
+                let deadline =
+                    flow.response_progress + flow.rtt.saturating_mul(3).max(Duration::from_secs(2));
+                self.next_http_cut = Some(
+                    self.next_http_cut
+                        .map_or(deadline, |next| next.min(deadline)),
+                );
+            }
             None
         }
     }
@@ -2734,6 +2783,30 @@ mod tests {
         };
         assert_eq!(event.request_no, 2);
         assert_eq!(event.path, b"/two");
+    }
+
+    #[test]
+    fn http_expiry_не_обходит_таблицу_на_https_и_сохраняет_границу_ttl() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let options = HoldOptions {
+            observe_http: true,
+            ..HoldOptions::default()
+        };
+        let request = b"GET /path HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        hold.feed_observing(1, &http_packet(1000, 0x02, &[]), now, options);
+        hold.feed_observing(2, &http_packet(1001, 0x18, request), now, options);
+        let deadline = now + super::HTTP_FLOW_IDLE;
+        let later = deadline + Duration::from_millis(1);
+        let ack = http_packet(1001 + request.len() as u32, 0x10, &[]);
+        hold.feed_observing(3, &ack, deadline, options);
+        assert_eq!(hold.next_http_expiry, Some(deadline));
+        hold.feed_observing(4, &tcp_packet(2000, 0x02, &[]), later, options);
+        assert!(hold.sweep_http_responses(later).is_empty());
+        assert_eq!(hold.http_requests.len(), 1);
+        hold.feed_observing(5, &ack, later, options);
+        assert!(hold.http_requests.is_empty());
+        assert!(hold.next_http_expiry.is_none());
     }
 
     #[test]
