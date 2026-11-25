@@ -3548,11 +3548,25 @@
     var now = this.serverNow();
     var rows = configured.filter(function (row) { return row.scope === "router"; });
     var inventory = fresh && (source === "known" || source === "activity_unknown");
-    var time = rows.map(function (row) {
-      var checked = parseTime(row.checked_at);
-      return { checked: checked, stale: !inventory || (checked !== null && (now - checked > 360000 || checked > now + 5000)) };
+    var views = rows.map(function (row) {
+      var active = inventory ? row.service_active : null;
+      var connections = list(row.connections).map(function (connection) {
+        var checked = parseTime(connection.checked_at);
+        var stale = !inventory || (checked !== null && (now - checked > 360000 || checked > now + 5000));
+        var phase = inventory && row.configured === true && active === true ? connection.availability : "unknown";
+        if (phase === "recovered" && (connection.dns_answer_confirmed !== true || connection.dns_answer_via_plan !== true ||
+            connection.plan_applied !== true || !connection.applied_plan_id || checked === null)) phase = "unknown";
+        if (phase === "available" && (connection.dns_answer_confirmed !== true || checked === null)) phase = "unknown";
+        if (phase !== "checking" && stale) phase = "unknown";
+        return { connection: connection, checked: checked, stale: stale, phase: phase };
+      });
+      var phase = ["available", "recovered", "checking"].find(function (state) {
+        return connections.some(function (entry) { return entry.phase === state; });
+      }) || (connections.length && connections.every(function (entry) { return entry.phase === "unavailable"; })
+        ? "unavailable" : "unknown");
+      return { active: active, connections: connections, phase: phase };
     });
-    var key = JSON.stringify([rows, time, inventory, source]);
+    var key = JSON.stringify([rows, views, inventory, source]);
     if (root.__r2oKey === key) return;
     root.__r2oKey = key;
     var message = !inventory ? "Текущее состояние системного DNS неизвестно."
@@ -3578,62 +3592,86 @@
       unavailable: ["Недоступен", "bad"],
       recovered: ["Восстановлен", "ok"]
     };
-    var items = rows.map(function (row, index) {
-      var observed = time[index];
-      var active = inventory ? row.service_active : null;
-      var phase = inventory && row.configured === true && active === true ? row.availability : "unknown";
-      if (phase === "recovered" && (row.dns_answer_confirmed !== true || row.dns_answer_via_plan !== true ||
-          row.plan_applied !== true || !row.applied_plan_id || observed.checked === null)) phase = "unknown";
-      if (phase === "available" && row.dns_answer_confirmed !== true) phase = "unknown";
-      if (phase !== "checking" && observed.stale) phase = "unknown";
+    function statusChip(phase) {
       var state = states[phase] || states.unknown;
-      var last = row.last_result;
-      var item = el(doc, "li", "card dns-service");
-      var address = str(row.resolved_ip || row.host);
-      var family = address.indexOf(":") >= 0 ? "IPv6" : /^\d+(?:\.\d+){3}$/.test(address) ? "IPv4" : "";
-      var protocol = protocols[row.protocol] || str(row.protocol);
       var badge = el(doc, "span", "meta-chip", state[0]);
       badge.dataset.tone = state[1];
-      add(item, el(doc, "span", "dns-service-protocol", family ? protocol + " · " + family : protocol),
-        badge, el(doc, "h3", "dns-service-host", str(row.sni || row.host)));
-      if (address.indexOf(":") >= 0 && address[0] !== "[") address = "[" + address + "]";
-      var endpoint = address + (row.port ? ":" + row.port : "");
-      if ((row.protocol === "doh" || row.protocol === "doh3") && row.path && row.path !== "/") endpoint += str(row.path);
-      item.appendChild(el(doc, "p", "dns-service-address", endpoint));
-      var details = el(doc, "dl", "dns-service-details");
-      var usage = inventory ? row.usage_observed : null;
-      var fields = [
-        ["Настройка", inventory && row.configured === true ? "Настроен" : "Неизвестно", ""],
-        ["Служба", active === true ? "Активна" : active === false ? "Выключена" : "Неизвестно", ""],
-        ["Запросы", usage === true ? "Подтверждены" : usage === false ? "Не замечены" : "Неизвестно", ""],
-        ["Ответ DNS", typeof row.answer_rtt_ms === "number" && (phase === "available" || phase === "recovered")
-          ? row.answer_rtt_ms + " мс" : "—", ""],
-        ["Последняя проверка", observed.checked === null ? "—" : localTime(observed.checked), ""]
-      ];
-      if (last && states[last.state] && phase !== last.state) {
-        var lastTime = parseTime(last.checked_at);
-        var lastText = states[last.state][0] + (typeof last.answer_rtt_ms === "number" ? " · " + last.answer_rtt_ms + " мс" : "");
-        if (lastTime !== null) lastText += " · " + localTime(lastTime);
-        fields.push(["Последний результат", lastText, ""]);
-      }
-      if (row.plan_applied === true && row.applied_plan_id) {
-        fields.push([phase === "recovered" ? "Применённый план" : "Последний план", str(row.applied_plan_id), "dns-service-plan"]);
-      }
+      return badge;
+    }
+    function details(fields) {
+      var result = el(doc, "dl", "dns-service-details");
       fields.forEach(function (field) {
         var entry = el(doc, "div", "");
-        add(entry, el(doc, "dt", "", field[0]), el(doc, "dd", field[2], field[1]));
-        details.appendChild(entry);
+        add(entry, el(doc, "dt", "", field[0]), el(doc, "dd", field[2] || "", field[1]));
+        result.appendChild(entry);
       });
-      item.appendChild(details);
-      var showError = inventory && active === true && !observed.stale &&
-        (phase === "unavailable" || phase === "unknown" && row.failure);
-      var message = showError || phase === "checking" ? row.status_reason : last && phase !== last.state ? last.reason : "";
-      if (message) {
-        var reason = el(doc, "p", "dns-service-reason");
-        if (showError && failures[row.failure]) reason.appendChild(el(doc, "strong", "", failures[row.failure]));
-        reason.appendChild(doc.createTextNode((reason.firstChild ? " " : "") + str(message)));
-        item.appendChild(reason);
+      return result;
+    }
+    function endpoint(row, address) {
+      if (address.indexOf(":") >= 0 && address[0] !== "[") address = "[" + address + "]";
+      var value = address + (row.port ? ":" + row.port : "");
+      if ((row.protocol === "doh" || row.protocol === "doh3") && row.path && row.path !== "/") value += str(row.path);
+      return value;
+    }
+    var items = rows.map(function (row, index) {
+      var view = views[index];
+      var item = el(doc, "li", "card dns-service");
+      var protocol = protocols[row.protocol] || str(row.protocol);
+      if (view.connections.length === 1) protocol += " · IPv" + view.connections[0].connection.family;
+      add(item, el(doc, "span", "dns-service-protocol", protocol), statusChip(view.phase),
+        el(doc, "h3", "dns-service-host", str(row.sni || row.host)));
+      var active = view.active;
+      add(item, el(doc, "p", "dns-service-active",
+        active === true ? "Служба активна" : active === false ? "Служба выключена" : "Состояние службы неизвестно"));
+
+      var paths = el(doc, "div", "dns-service-connections");
+      if (!view.connections.length) {
+        paths.appendChild(el(doc, "p", "dns-service-address", endpoint(row, str(row.host))));
+        if (inventory && row.status_reason) paths.appendChild(el(doc, "p", "dns-service-reason", str(row.status_reason)));
       }
+      view.connections.forEach(function (entry) {
+        var connection = entry.connection, phase = entry.phase, last = connection.last_result;
+        var path = el(doc, "div", "dns-service-connection");
+        path.dataset.family = connection.family;
+        if (view.connections.length > 1) {
+          var header = el(doc, "div", "dns-service-connection-header");
+          add(header, el(doc, "strong", "", "IPv" + connection.family), statusChip(phase));
+          path.appendChild(header);
+        }
+        path.appendChild(el(doc, "p", "dns-service-address", endpoint(row, str(connection.resolved_ip))));
+        var fields = [
+          ["Ответ DNS", typeof connection.answer_rtt_ms === "number" && (phase === "available" || phase === "recovered")
+            ? connection.answer_rtt_ms + " мс" : "—"],
+          ["Последняя проверка", entry.checked === null ? "—" : localTime(entry.checked)]
+        ];
+        if (last && states[last.state] && phase !== last.state) {
+          var lastTime = parseTime(last.checked_at);
+          var lastText = states[last.state][0] + (typeof last.answer_rtt_ms === "number" ? " · " + last.answer_rtt_ms + " мс" : "");
+          if (lastTime !== null) lastText += " · " + localTime(lastTime);
+          fields.push(["Последний результат", lastText]);
+        }
+        if (connection.plan_applied === true && connection.applied_plan_id) {
+          fields.push([phase === "recovered" ? "Применённый план" : "Последний план", str(connection.applied_plan_id), "dns-service-plan"]);
+        }
+        path.appendChild(details(fields));
+        var showError = inventory && active === true && !entry.stale &&
+          (phase === "unavailable" || phase === "unknown" && connection.failure);
+        var message = showError || phase === "checking" ? connection.status_reason : last && phase !== last.state ? last.reason : "";
+        if (message) {
+          var reason = el(doc, "p", "dns-service-reason");
+          if (showError && failures[connection.failure]) reason.appendChild(el(doc, "strong", "", failures[connection.failure]));
+          reason.appendChild(doc.createTextNode((reason.firstChild ? " " : "") + str(message)));
+          path.appendChild(reason);
+        }
+        paths.appendChild(path);
+      });
+      var diagnostics = el(doc, "details", "dns-service-diagnostics");
+      var usage = inventory ? row.usage_observed : null;
+      add(diagnostics, el(doc, "summary", "", "Диагностика DNS"), details([
+        ["Настройка", inventory && row.configured === true ? "Настроен" : "Неизвестно"],
+        ["Запросы", usage === true ? "Подтверждены" : usage === false ? "Не замечены" : "Неизвестно"]
+      ]));
+      add(item, paths, diagnostics);
       return item;
     });
     var visible = 3;
@@ -3641,8 +3679,8 @@
     more.hidden = extraCount === 0;
     if (extraCount) {
       var label = "Ещё " + count(extraCount, "точка подключения", "точки подключения", "точек подключения");
-      var failed = rows.slice(visible).filter(function (row, index) {
-        return !time[visible + index].stale && row.availability === "unavailable";
+      var failed = views.slice(visible).filter(function (view) {
+        return view.phase === "unavailable";
       }).length;
       if (failed) label += " · с ошибкой " + failed;
       if (more.firstElementChild.textContent !== label) more.firstElementChild.textContent = label;

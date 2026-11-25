@@ -958,6 +958,29 @@ fn r2o_live_dns_services(
             if let Some(failure) = state.failure.filter(|_| recovered.is_none()) {
                 row["failure"] = json!(failure.as_str());
             }
+            if state.activity_tracked {
+                let mut profile = json!({
+                    "profile_id": state.profile_id.unwrap_or_else(|| service.profile_id()),
+                    "connections": [],
+                });
+                let fields = row.as_object_mut().expect("DNS connection object");
+                for key in [
+                    "protocol", "host", "port", "sni", "path", "source", "scope",
+                    "configured", "service_active", "usage_observed", "router_seen_at",
+                ] {
+                    if let Some(value) = fields.remove(key) {
+                        profile[key] = value;
+                    }
+                }
+                fields.remove("profile_id");
+                if resolved_ip.parse::<std::net::IpAddr>().is_ok() {
+                    row["family"] = json!(family);
+                    profile["connections"] = json!([row]);
+                } else if !state.reason.is_empty() {
+                    profile["status_reason"] = json!(state.reason);
+                }
+                return profile;
+            }
             row
         })
         .collect()

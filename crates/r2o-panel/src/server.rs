@@ -986,6 +986,9 @@ fn api_status(config: &Config, query: &str) -> Response {
             .as_deref()
             .and_then(pid_path_running)
     });
+    if let Some(snapshot) = &mut live {
+        normalize_dns_profiles(snapshot);
+    }
     let controller_running = pid_path_running(&config.controller_pid_path).is_some()
         || config
             .controller_pid_fallback
@@ -996,7 +999,7 @@ fn api_status(config: &Config, query: &str) -> Response {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     for path in &config.live_extra_paths {
-        let Some(extra) = read_json_object(path, BODY_MAX) else {
+        let Some(mut extra) = read_json_object(path, BODY_MAX) else {
             continue;
         };
         let extra_mtime = fs::metadata(path)
@@ -1015,6 +1018,7 @@ fn api_status(config: &Config, query: &str) -> Response {
         });
         if extra_fresh && extra.get("linked").and_then(Value::as_bool) == Some(true) {
             if let Some(live) = &mut live {
+                normalize_dns_profiles(&mut extra);
                 merge_live_snapshot(live, &extra);
             }
         }
@@ -1204,54 +1208,130 @@ fn merge_live_snapshot(primary: &mut Value, extra: &Value) {
     }
 }
 
+// Old live files can still be read while the controller is being updated.
+fn normalize_dns_profiles(snapshot: &mut Value) {
+    let Some(rows) = snapshot
+        .get_mut("dns_services")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    if rows.iter().all(|row| row["connections"].is_array()) {
+        return;
+    }
+    let mut profiles: Vec<Value> = Vec::with_capacity(rows.len());
+    for mut row in std::mem::take(rows) {
+        if row["scope"] != "router" || row["profile_id"].as_str().is_none() {
+            continue;
+        }
+        if !row["connections"].is_array() {
+            let configured = row["host"].as_str().and_then(|host| host.parse().ok());
+            let resolved = row["resolved_ip"].as_str().and_then(|ip| ip.parse().ok());
+            let endpoint = configured.or_else(|| {
+                (row["dns_answer_confirmed"] == true && row["failure"] != "no_route")
+                    .then_some(resolved)
+                    .flatten()
+            });
+            let mut profile = json!({ "connections": [] });
+            let fields = row.as_object_mut().expect("legacy DNS object");
+            for key in [
+                "profile_id",
+                "protocol",
+                "host",
+                "port",
+                "sni",
+                "path",
+                "source",
+                "scope",
+                "configured",
+                "service_active",
+                "usage_observed",
+                "router_seen_at",
+            ] {
+                if let Some(value) = fields.remove(key) {
+                    profile[key] = value;
+                }
+            }
+            if let Some(address) = endpoint {
+                let address: std::net::IpAddr = address;
+                row["family"] = json!(if address.is_ipv4() { 4 } else { 6 });
+                row["resolved_ip"] = json!(address.to_string());
+                profile["connections"] = json!([row]);
+            }
+            row = profile;
+        }
+        if let Some(current) = profiles
+            .iter_mut()
+            .find(|current| current["profile_id"] == row["profile_id"])
+        {
+            merge_dns_connections(current, &row);
+        } else {
+            profiles.push(row);
+        }
+    }
+    *rows = profiles;
+}
+
 fn merge_live_dns(primary: &mut Value, extra: &Value) {
-    let primary_dns_known = primary["dns_source_status"].as_str();
-    let checked_sources = primary_dns_known.is_some();
     let configured = |status| matches!(status, Some("known" | "activity_unknown"));
-    if checked_sources
-        && (!configured(primary_dns_known) || !configured(extra["dns_source_status"].as_str()))
+    if !configured(primary["dns_source_status"].as_str())
+        || !configured(extra["dns_source_status"].as_str())
     {
         return;
     }
-    let Some(extra_rows) = extra.get("dns_services").and_then(Value::as_array) else {
+    let Some(extra_rows) = extra["dns_services"].as_array() else {
         return;
     };
-    let Some(primary) = primary.as_object_mut() else {
-        return;
-    };
-    let rows = primary
-        .entry("dns_services")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    let Some(rows) = rows.as_array_mut() else {
+    let Some(rows) = primary
+        .get_mut("dns_services")
+        .and_then(Value::as_array_mut)
+    else {
         return;
     };
     for row in extra_rows {
-        let Some(profile) = row.get("profile_id").and_then(Value::as_str) else {
+        let Some(profile) = row["profile_id"].as_str() else {
             continue;
         };
-        let Some(address) = row.get("resolved_ip").and_then(Value::as_str) else {
-            continue;
-        };
-        if address.parse::<std::net::Ipv6Addr>().is_err() {
-            continue;
-        }
-        if let Some(previous) = rows.iter_mut().find(|previous| {
-            previous["profile_id"].as_str() == Some(profile)
-                && previous["resolved_ip"]
-                    .as_str()
-                    .is_none_or(|ip| ip.is_empty() || ip == address)
-                && (!checked_sources || previous["activity"] != "configured")
+        if let Some(current) = rows.iter_mut().find(|current| {
+            current["profile_id"].as_str() == Some(profile) && current["configured"] == true
         }) {
-            *previous = row.clone();
-        } else if !checked_sources
-            || rows.iter().any(|current| {
-                current["profile_id"].as_str() == Some(profile)
-                    && current["activity"] != "configured"
-            })
-        {
-            rows.push(row.clone());
+            if row["configured"] == true
+                && current["service_active"] != false
+                && row["service_active"] != false
+            {
+                if row["usage_observed"] == true {
+                    current["usage_observed"] = json!(true);
+                }
+                merge_dns_connections(current, row);
+            }
         }
     }
+}
+
+fn merge_dns_connections(profile: &mut Value, extra: &Value) {
+    let (Some(current), Some(incoming)) = (
+        profile["connections"].as_array_mut(),
+        extra["connections"].as_array(),
+    ) else {
+        return;
+    };
+    for connection in incoming {
+        let family = connection["family"].as_u64();
+        if !matches!(family, Some(4 | 6)) {
+            continue;
+        }
+        if let Some(existing) = current.iter_mut().find(|c| c["family"].as_u64() == family) {
+            if connection["checked_at"].as_str() > existing["checked_at"].as_str()
+                || (existing["availability"] == "unknown"
+                    && connection["availability"] == "checking")
+            {
+                *existing = connection.clone();
+            }
+        } else {
+            current.push(connection.clone());
+        }
+    }
+    current.sort_by_key(|connection| connection["family"].as_u64());
 }
 
 fn live_search_key(search: &Value) -> String {

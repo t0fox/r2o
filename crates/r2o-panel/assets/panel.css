@@ -721,8 +721,8 @@ main { min-width: 0; }
 }
 .dns-service {
   display: grid;
-  grid-template: "protocol status" auto "name name" auto "address address" auto
-    "details details" auto "reason reason" 1fr / minmax(0, 1fr) auto;
+  grid-template: "protocol status" auto "name name" auto "active active" auto
+    "connections connections" auto "diagnostics diagnostics" 1fr / minmax(0, 1fr) auto;
   align-items: start; gap: 4px 12px; padding: 14px; min-width: 0;
 }
 .dns-service-host { grid-area: name; margin: 3px 0 0; font-size: 1rem; overflow-wrap: anywhere; }
@@ -732,7 +732,7 @@ main { min-width: 0; }
   padding: 2px 6px; font: 600 .78rem/1.4 var(--mono);
 }
 .dns-service-address {
-  grid-area: address; min-width: 0; margin: 0; color: var(--ink-2);
+  min-width: 0; margin: 0; color: var(--ink-2);
   font: .85rem/1.5 var(--mono); overflow-wrap: anywhere;
 }
 .dns-service .meta-chip {
@@ -741,15 +741,31 @@ main { min-width: 0; }
 }
 .dns-service .meta-chip[data-tone="bad"] { color: var(--ink); }
 .dns-service-details {
-  grid-area: details; display: grid; grid-template-columns: minmax(0, .65fr) minmax(0, 1fr);
+  display: grid; grid-template-columns: minmax(0, .65fr) minmax(0, 1fr);
   gap: 8px 12px; min-width: 0; margin: 4px 0 0;
 }
 .dns-service-details dt { color: var(--ink-2); font-size: .83rem; margin: 0 0 4px; }
 .dns-service-details dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .dns-service-plan { font-family: var(--mono); font-size: .83rem; }
-.dns-service-details > :nth-child(3) { grid-column: 1 / -1; }
+.dns-service-details > :nth-child(n + 3) { grid-column: 1 / -1; }
+.dns-service-active {
+  grid-area: active; margin: 0; color: var(--ink-2); font-size: .83rem;
+}
+.dns-service-connections { grid-area: connections; min-width: 0; }
+.dns-service-connection + .dns-service-connection {
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+.dns-service-connection-header {
+  display: flex; justify-content: space-between; align-items: center; gap: 6px;
+  margin-bottom: 4px; font: .82rem/1.4 var(--mono);
+}
+.dns-service-diagnostics { grid-area: diagnostics; margin-top: 4px; }
+.dns-service-diagnostics summary {
+  width: fit-content; padding-block: 6px; cursor: pointer; color: var(--ink-2); font-size: .83rem;
+}
+.dns-service-diagnostics summary:hover { color: var(--ink); }
 .dns-service-reason {
-  grid-area: reason; border-top: 1px solid var(--line); padding-top: 8px;
+  border-top: 1px solid var(--line); padding-top: 8px;
   margin: 4px 0 0; color: var(--ink-2); font-size: .83rem; overflow-wrap: anywhere;
 }
 .dns-service-reason strong { color: var(--ink); margin-inline-end: 4px; }
@@ -760,16 +776,22 @@ main { min-width: 0; }
 #dns-protection-more summary:hover { color: var(--ink); }
 @container (min-width: 50rem) {
   .dns-service:only-child {
-    grid-template: "protocol name details status" auto "address address details status" auto
-      "reason reason reason reason" auto / auto minmax(0, 1fr) minmax(17rem, .7fr) auto;
-    align-items: center; column-gap: 16px;
+    grid-template: "protocol name status" auto "active active active" auto
+      "connections connections connections" auto "diagnostics diagnostics diagnostics" auto
+      / auto minmax(0, 1fr) auto;
+    column-gap: 16px;
   }
-  .dns-service:only-child .dns-service-host,
-  .dns-service:only-child .dns-service-details { margin: 0; }
+  .dns-service:only-child .dns-service-host { margin: 0; }
+  .dns-service:only-child .dns-service-connections:has(.dns-service-connection:nth-child(2)) {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;
+  }
+  .dns-service:only-child .dns-service-connection + .dns-service-connection {
+    margin: 0; padding: 0 0 0 12px; border: 0; border-left: 1px solid var(--line);
+  }
 }
 @container (max-width: 16rem) {
   .dns-service {
-    grid-template: "protocol" auto "status" auto "name" auto "address" auto "details" auto "reason" auto
+    grid-template: "protocol" auto "status" auto "name" auto "active" auto "connections" auto "diagnostics" auto
       / minmax(0, 1fr);
   }
   .dns-service .meta-chip { justify-self: start; }

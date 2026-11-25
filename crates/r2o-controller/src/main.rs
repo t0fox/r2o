@@ -2385,6 +2385,7 @@ fn serve_catalog(
         no_diagnostics,
         measurement_gate,
         dns_endpoints,
+        ipv6,
     );
     println!("r2o-controller: останавливаюсь");
     result
@@ -3251,12 +3252,34 @@ impl R2oDnsServices {
         task.tls_handshake = level >= r2o_controller::live::D2K_VER_HANDSHAKE;
         task.http_status = result.http_status;
         task.dns_answer = result.dns_reply;
-        let bootstrap = task.dns_host.parse::<std::net::IpAddr>().is_err()
-            && (resolved.is_some() || !task.dns_bootstrap.is_empty());
+        let automatic_address = task.dns_host.parse::<std::net::IpAddr>().is_err();
+        let bootstrap = automatic_address && (resolved.is_some() || !task.dns_bootstrap.is_empty());
         let task_ip = task.ip.clone();
         let task_generation = task.dns_service_generation;
         if let Some(index) = self.live_generation(task_generation) {
             let live = &mut self.live[index];
+            if live.activity_tracked
+                && automatic_address
+                && result.failure == Some(r2o_controller::dns_health::DnsHealthFailure::NoRoute)
+            {
+                let mut profile = r2o_controller::live::DnsServiceLive {
+                    generation: live.generation,
+                    profile_id: live.profile_id.take(),
+                    activity_tracked: true,
+                    upstream_active: live.upstream_active,
+                    inventory_current: live.inventory_current,
+                    journal_current: live.journal_current,
+                    router_seen_at: live.router_seen_at,
+                    next_check_ms: mono_ms.saturating_add(60_000),
+                    reason: "Нет маршрута к адресу, полученному через bootstrap.".into(),
+                    ..Default::default()
+                };
+                // Счётчик проверок относится к выполненным сетевым пробам.
+                profile.attempts = live.attempts.saturating_sub(u32::from(resolved.is_none()));
+                *live = profile;
+                self.tasks[slot].reset();
+                return;
+            }
             let accepted = (bootstrap && !task_ip.is_empty())
                 || (!task_ip.is_empty() && (live.ip.is_empty() || live.ip == task_ip))
                 || (task_ip.is_empty() && live.ip.is_empty());
@@ -3841,11 +3864,29 @@ impl R2oDnsHealth {
                     } else {
                         bootstrap_dns
                     };
-                    let address = r2k_core::dns_config::dns_resolve_bootstrap_for_family(
+                    use r2o_controller::dns_health::{
+                        DnsHealthFailure, DnsHealthResult, dns_resolved_route,
+                    };
+                    let mut path_failure = None;
+                    let address = r2k_core::dns_config::dns_resolve_bootstrap_matching(
                         &dns_host,
                         &servers,
                         mark.unwrap_or(0),
                         family,
+                        |ip| {
+                            if !tracked {
+                                return true;
+                            }
+                            if let Err(failure) =
+                                dns_resolved_route(std::net::SocketAddr::new(ip, probe.port), mark)
+                            {
+                                if path_failure != Some(DnsHealthFailure::Local) {
+                                    path_failure = Some(failure);
+                                }
+                                return false;
+                            }
+                            true
+                        },
                     );
                     match address {
                         Some(ip) => {
@@ -3853,8 +3894,9 @@ impl R2oDnsHealth {
                             resolved = Some(ip);
                         }
                         None if tracked || probe.host.parse::<std::net::IpAddr>().is_err() => {
-                            use r2o_controller::dns_health::{DnsHealthFailure, DnsHealthResult};
-                            let reason = if servers.is_empty() {
+                            let reason = if path_failure.is_some() {
+                                "Не удалось подтвердить локальный маршрут к DNS-серверу."
+                            } else if servers.is_empty() {
                                 "Нет адреса для независимого разрешения имени DNS-сервера."
                             } else {
                                 "Bootstrap не вернул IP DNS-сервера за время проверки."
@@ -3865,7 +3907,7 @@ impl R2oDnsHealth {
                                 None,
                                 DnsHealthResult {
                                     reason: reason.into(),
-                                    failure: Some(DnsHealthFailure::Configuration),
+                                    failure: path_failure.or(Some(DnsHealthFailure::Configuration)),
                                     ..Default::default()
                                 },
                             ));
@@ -12235,6 +12277,7 @@ fn watch(socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
         false,
         r2o_new_measurement_gate(),
         Vec::new(),
+        None,
     )
 }
 
@@ -25767,6 +25810,7 @@ impl ControlClient {
         no_diagnostics: bool,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         plain_dns_endpoints: Vec<PlainDnsEndpoint>,
+        ipv6: Option<bool>,
     ) -> Result<(), Box<dyn Error>> {
         use std::io::Write;
 
@@ -25775,12 +25819,15 @@ impl ControlClient {
         let mut dns_services = R2oDnsServices::empty();
         let mut dns_source_status = "unknown";
         let mut dns_health = R2oDnsHealth::new();
-        let dns_family = measurement_gate.dual_stack_ip_family().or_else(|| {
-            std::env::var("R2O_CONTROLLER_DNS_FAMILY")
-                .ok()
-                .and_then(|value| value.parse::<u8>().ok())
-                .filter(|family| matches!(family, 4 | 6))
-        });
+        let dns_family = ipv6
+            .map(|ipv6| if ipv6 { 6 } else { 4 })
+            .or_else(|| measurement_gate.dual_stack_ip_family())
+            .or_else(|| {
+                std::env::var("R2O_CONTROLLER_DNS_FAMILY")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .filter(|family| matches!(family, 4 | 6))
+            });
         dns_health.family = dns_family;
         let mut meta_traffic = meta_protection::MetaTraffic::from_env(dns_family);
         let mut dns_recovery = discovery.as_ref().and_then(|_| {
@@ -36740,6 +36787,157 @@ mod tests {
             2186,
         );
         assert!(state.services.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_profile_excludes_unrouted_discovered_addresses_but_keeps_explicit_upstreams() {
+        use r2o_controller::dns_health::{DnsHealthFailure, DnsHealthResult};
+        use r2o_controller::live::{DiscoveryStatus, snapshot_with_areas_and_dns};
+
+        for (upstream, resolved, expected) in [
+            ("tls://resolver.example", "2001:db8::8", false),
+            ("tls://resolver.example", "192.0.2.8", false),
+            ("tls://[2001:db8::8]", "2001:db8::8", true),
+            ("tls://192.0.2.8", "192.0.2.8", true),
+        ] {
+            let service = r2k_core::dns_config::dns_uri_parse(upstream, None).unwrap();
+            let profile_id = service.profile_id();
+            let mut state = super::R2oDnsServices::empty();
+            state.refresh(
+                Some(super::dns_inventory::Snapshot {
+                    services: vec![service],
+                    active: vec![Some(true)],
+                    observed: vec![true],
+                    journal_available: true,
+                    keep_observed: true,
+                }),
+                2000,
+            );
+            state.live[0].ip = resolved.into();
+            state.live[0].attempts = 1;
+            let generation = state.live[0].generation;
+            let slot = state.start_health_task(0, 10).unwrap();
+            state.finish_health_task(
+                slot,
+                generation,
+                None,
+                DnsHealthResult {
+                    failure: Some(DnsHealthFailure::NoRoute),
+                    ..Default::default()
+                },
+                2001,
+                11,
+            );
+            let value = snapshot_with_areas_and_dns(
+                &r2o_controller::catalog::Catalog::default(),
+                std::path::Path::new("catalog.json"),
+                &Default::default(),
+                vec![],
+                serde_json::json!({}),
+                DiscoveryStatus::default(),
+                &[],
+                &state.services,
+                &state.live,
+                &state.tasks,
+            )
+            .unwrap();
+            let row = &value["dns_services"][0];
+            assert_eq!(row["profile_id"], profile_id);
+            let connections = row["connections"].as_array().unwrap();
+            assert_eq!(connections.len(), usize::from(expected), "{upstream}");
+            if expected {
+                assert_eq!(connections[0]["resolved_ip"], resolved);
+                assert_eq!(connections[0]["availability"], "unavailable");
+            } else {
+                assert!(state.live[0].ip.is_empty());
+                assert_eq!(state.live[0].attempts, 0);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires a fresh network namespace with only loopback up"]
+    fn dns_bootstrap_routes_ipv4_ipv6_and_dual_stack() {
+        use std::net::{IpAddr, UdpSocket};
+        use std::time::Duration;
+
+        for (bootstrap, a, aaaa, expected) in [
+            ("127.0.0.1:0", "127.0.0.1", "2001:db8::53", [true, false]),
+            ("[::1]:0", "192.0.2.53", "::1", [false, true]),
+            ("127.0.0.1:0", "127.0.0.1", "::1", [true, true]),
+        ] {
+            let server = UdpSocket::bind(bootstrap).unwrap();
+            server
+                .set_read_timeout(Some(Duration::from_secs(4)))
+                .unwrap();
+            let bootstrap = server.local_addr().unwrap();
+            let a = a.parse::<std::net::Ipv4Addr>().unwrap().octets();
+            let aaaa = aaaa.parse::<std::net::Ipv6Addr>().unwrap().octets();
+            let peer = std::thread::spawn(move || {
+                let no_v4_route = [192, 0, 2, 54];
+                let no_v6_route = "2001:db8::54"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets();
+                for (qtype, address, first, routable) in [
+                    (1_u16, a.as_slice(), no_v4_route.as_slice(), expected[0]),
+                    (28, aaaa.as_slice(), no_v6_route.as_slice(), expected[1]),
+                ] {
+                    let mut query = [0; 512];
+                    let (n, client) = server.recv_from(&mut query).unwrap();
+                    assert_eq!(&query[n - 4..n - 2], &qtype.to_be_bytes());
+                    query[2..4].copy_from_slice(&[0x81, 0x80]);
+                    query[6..8].copy_from_slice(&[0, 1 + u8::from(routable)]);
+                    let mut answer = query[..n].to_vec();
+                    for address in routable.then_some(first).into_iter().chain([address]) {
+                        answer.extend_from_slice(&[0xc0, 0x0c]);
+                        answer.extend_from_slice(&qtype.to_be_bytes());
+                        answer.extend_from_slice(&[0, 1, 0, 0, 0, 1, 0, address.len() as u8]);
+                        answer.extend_from_slice(address);
+                    }
+                    server.send_to(&answer, client).unwrap();
+                }
+            });
+            let mut service =
+                r2k_core::dns_config::dns_uri_parse("tls://router-test.invalid:1", None).unwrap();
+            service.bootstrap_dns = bootstrap.to_string();
+            for (family, routable) in [4, 6].into_iter().zip(expected) {
+                let mut state = super::R2oDnsServices::empty();
+                state.refresh(
+                    Some(super::dns_inventory::Snapshot {
+                        services: vec![service.clone()],
+                        active: vec![Some(true)],
+                        observed: vec![false],
+                        journal_available: false,
+                        keep_observed: true,
+                    }),
+                    2000,
+                );
+                let mut health = super::R2oDnsHealth::new();
+                health.family = Some(family);
+                health.start_due(&mut state, None);
+                let message = health
+                    .receiver
+                    .recv_timeout(Duration::from_secs(6))
+                    .unwrap();
+                assert_eq!(message.2.is_some(), routable);
+                health.sender.send(message).unwrap();
+                health.poll(&mut state, 2001);
+                assert_eq!(state.live[0].attempts, u32::from(routable));
+                let resolved = state.live[0].ip.parse::<IpAddr>().ok();
+                assert_eq!(resolved.is_some(), routable);
+                if let Some(ip) = resolved {
+                    assert_eq!(ip.is_ipv4(), family == 4);
+                }
+                assert_eq!(
+                    state.live[0].profile_id.as_deref(),
+                    Some(service.profile_id().as_str())
+                );
+            }
+            peer.join().unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -66072,6 +66270,7 @@ group_block_proven: false,
                 true,
                 super::r2o_new_measurement_gate(),
                 Vec::new(),
+                None,
             )
             .unwrap_err();
         assert!(error.to_string().contains("подтверждение"));
@@ -66133,6 +66332,7 @@ group_block_proven: false,
                 true,
                 gate.clone(),
                 Vec::new(),
+                None,
             )
             .unwrap_err();
         assert!(error.to_string().contains("подтверждение"), "{error}");

@@ -262,6 +262,46 @@ fn socket_failure(error: &std::io::Error) -> DnsHealthFailure {
     }
 }
 
+#[cfg(unix)]
+pub fn dns_resolved_route(
+    endpoint: std::net::SocketAddr,
+    mark: Option<u32>,
+) -> Result<(), DnsHealthFailure> {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+
+    if matches!(endpoint.ip(), std::net::IpAddr::V6(ip) if ip.to_ipv4_mapped().is_some()) {
+        return Err(DnsHealthFailure::NoRoute);
+    }
+    let bind = if endpoint.is_ipv4() {
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+    };
+    let route_failure = |error: std::io::Error| match error.kind() {
+        std::io::ErrorKind::NetworkUnreachable
+        | std::io::ErrorKind::HostUnreachable
+        | std::io::ErrorKind::AddrNotAvailable => DnsHealthFailure::NoRoute,
+        _ if error.raw_os_error() == Some(libc::EAFNOSUPPORT) => DnsHealthFailure::NoRoute,
+        _ => DnsHealthFailure::Local,
+    };
+    let socket = UdpSocket::bind(bind).map_err(route_failure)?;
+    if let Some(mark) = mark.filter(|&mark| mark != 0) {
+        crate::r2o_quic_http3::r2o_quic_http3_set_socket_mark(&socket, mark)
+            .map_err(|_| DnsHealthFailure::Local)?;
+    }
+    // connect выбирает маршрут и исходный адрес с той же меткой, не отправляя пакетов.
+    socket.connect(endpoint).map_err(route_failure)?;
+    let source = socket.local_addr().map_err(route_failure)?.ip();
+    if matches!(
+        (source, endpoint.ip()),
+        (std::net::IpAddr::V6(source), std::net::IpAddr::V6(target))
+            if source.is_unicast_link_local() && !target.is_unicast_link_local()
+    ) {
+        return Err(DnsHealthFailure::NoRoute);
+    }
+    Ok(())
+}
+
 /// C `dns_query`: 31-байтный DNS-запрос `example.com A` с префиксом длины.
 ///
 /// Первые два байта — длина DNS-сообщения (29), затем ID, flags 0100,

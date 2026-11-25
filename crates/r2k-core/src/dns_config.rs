@@ -456,6 +456,16 @@ pub fn dns_response_address(
     qname: &[u8],
     qtype: u16,
 ) -> Option<std::net::IpAddr> {
+    dns_response_address_matching(packet, id, qname, qtype, &mut |_| true)
+}
+
+fn dns_response_address_matching(
+    packet: &[u8],
+    id: u16,
+    qname: &[u8],
+    qtype: u16,
+    accept: &mut impl FnMut(IpAddr) -> bool,
+) -> Option<IpAddr> {
     let len = packet.len();
     if len < 12
         || packet[0] != (id >> 8) as u8
@@ -495,16 +505,19 @@ pub fn dns_response_address(
             return None;
         }
         if class == 1 && record_type == qtype {
-            match (qtype, rdlen) {
+            let address = match (qtype, rdlen) {
                 (1, 4) => {
                     let octets: [u8; 4] = packet[at..at + 4].try_into().ok()?;
-                    return Some(std::net::IpAddr::V4(octets.into()));
+                    Some(IpAddr::V4(octets.into()))
                 }
                 (28, 16) => {
                     let octets: [u8; 16] = packet[at..at + 16].try_into().ok()?;
-                    return Some(std::net::IpAddr::V6(octets.into()));
+                    Some(IpAddr::V6(octets.into()))
                 }
-                _ => {}
+                _ => None,
+            };
+            if let Some(address) = address.filter(|address| accept(*address)) {
+                return Some(address);
             }
         }
         at += rdlen;
@@ -529,6 +542,17 @@ fn bootstrap_endpoint(value: &str) -> Option<SocketAddr> {
 /// SO_MARK при mark != 0.
 #[cfg(unix)]
 pub fn dns_query_one(host: &str, server: &str, qtype: u16, mark: u32) -> Option<std::net::IpAddr> {
+    dns_query_one_matching(host, server, qtype, mark, &mut |_| true)
+}
+
+#[cfg(unix)]
+fn dns_query_one_matching(
+    host: &str,
+    server: &str,
+    qtype: u16,
+    mark: u32,
+    accept: &mut impl FnMut(IpAddr) -> bool,
+) -> Option<IpAddr> {
     use std::os::fd::AsRawFd;
     use std::time::Duration;
 
@@ -584,7 +608,7 @@ pub fn dns_query_one(host: &str, server: &str, qtype: u16, mark: u32) -> Option<
     socket.send(&packet[..at]).ok()?;
     let mut response = [0_u8; 1024];
     let got = socket.recv(&mut response).ok()?;
-    dns_response_address(&response[..got], id, &qname, qtype)
+    dns_response_address_matching(&response[..got], id, &qname, qtype, accept)
 }
 
 /// C `d2k_dns_resolve_bootstrap`: IP literal возвращается как есть; иначе до
@@ -601,13 +625,25 @@ pub fn dns_resolve_bootstrap_for_family(
     mark: u32,
     family: Option<u8>,
 ) -> Option<std::net::IpAddr> {
+    dns_resolve_bootstrap_matching(host, servers, mark, family, |_| true)
+}
+
+#[cfg(unix)]
+pub fn dns_resolve_bootstrap_matching(
+    host: &str,
+    servers: &str,
+    mark: u32,
+    family: Option<u8>,
+    mut accept: impl FnMut(IpAddr) -> bool,
+) -> Option<IpAddr> {
     if host.is_empty() || servers.is_empty() {
         return None;
     }
     if let Ok(address) = host.parse::<std::net::IpAddr>() {
         return family
             .is_none_or(|allowed| allowed == if address.is_ipv4() { 4 } else { 6 })
-            .then_some(address);
+            .then_some(address)
+            .filter(|address| accept(*address));
     }
     if servers.len() >= DNS_BOOTSTRAP_MAX {
         return None;
@@ -618,12 +654,12 @@ pub fn dns_resolve_bootstrap_for_family(
             continue;
         }
         if family != Some(6)
-            && let Some(address) = dns_query_one(host, server, 1, mark)
+            && let Some(address) = dns_query_one_matching(host, server, 1, mark, &mut accept)
         {
             return Some(address);
         }
         if family != Some(4)
-            && let Some(address) = dns_query_one(host, server, 28, mark)
+            && let Some(address) = dns_query_one_matching(host, server, 28, mark, &mut accept)
         {
             return Some(address);
         }

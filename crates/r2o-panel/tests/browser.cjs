@@ -166,10 +166,12 @@ async function main() {
     dns_services: [
       { protocol: "dot", host: "dns.example", port: 853, resolved_ip: "192.0.2.8", state: "direct_ok", checked_at: new Date().toISOString(), answer_rtt_ms: 17, availability: "available", usage_observed: false, dns_answer_confirmed: true, status_reason: "DoT: получен корректный DNS-ответ" },
       { protocol: "doq", host: "quic-with-a-long-resolver-name.example", port: 853, resolved_ip: "2001:db8::9", router_seen_at: new Date(Date.now() - 1000).toISOString(), state: "plan_applied", availability: "checking", plan_applied: true, applied_plan_id: "8d3c8fc1b32c52c2013cb04f82891245", dns_answer_via_plan: false, status_reason: "DNS-ответ через план ещё проверяется" },
-      { protocol: "doh3", host: "old.example", port: 443, path: "/dns-query", state: "direct_ok", availability: "available", dns_answer_confirmed: true, checked_at: new Date(Date.now() - 720000).toISOString(), last_result: { state: "available", checked_at: new Date(Date.now() - 720000).toISOString(), answer_rtt_ms: 22 } },
-      { protocol: "doh", host: "refused.example", port: 443, path: "/dns-query", state: "failed", availability: "unavailable", failure: "server", checked_at: new Date().toISOString(), status_reason: "HTTP 403: сервер отклонил запрос" },
-    ].map(row => ({
-      scope: "router", configured: true, service_active: true, usage_observed: true, ...row,
+      { protocol: "doh3", host: "old.example", port: 443, path: "/dns-query", resolved_ip: "192.0.2.9", state: "direct_ok", availability: "available", dns_answer_confirmed: true, checked_at: new Date(Date.now() - 720000).toISOString(), last_result: { state: "available", checked_at: new Date(Date.now() - 720000).toISOString(), answer_rtt_ms: 22 } },
+      { protocol: "doh", host: "refused.example", port: 443, path: "/dns-query", resolved_ip: "192.0.2.10", state: "failed", availability: "unavailable", failure: "server", checked_at: new Date().toISOString(), status_reason: "HTTP 403: сервер отклонил запрос" },
+    ].map(({ protocol, host, port, path, usage_observed = true, router_seen_at, ...connection }) => ({
+      profile_id: host, protocol, host, port, path, scope: "router", configured: true,
+      service_active: true, usage_observed, router_seen_at,
+      connections: [{ family: connection.resolved_ip.includes(":") ? 6 : 4, ...connection }],
     })),
     searches: [{
       target: "blocked.example",
@@ -559,43 +561,52 @@ esac
   assert.equal(await evaluate("document.querySelector('#dns-protection-more summary').textContent"), "Ещё 1 точка подключения · с ошибкой 1");
   await evaluate("document.querySelector('#dns-protection-more summary').click()");
   assert.equal(await evaluate("document.querySelector('#dns-protection-more').open && document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Недоступен'"), true);
+  const dot = liveState.dns_services[0];
+  const dotV4 = dot.connections[0];
   const refusedResolver = liveState.dns_services[3];
-  const ipv6Resolver = {
-    ...liveState.dns_services[0], resolved_ip: "2001:db8::53",
-    dns_answer_confirmed: true, router_seen_at: new Date(Date.now() - 1000).toISOString(),
-  };
-  liveState.dns_services[3] = {
-    ...liveState.dns_services[0], resolved_ip: "2001:db8::53", state: "no_route", availability: "unavailable",
-    router_seen_at: ipv6Resolver.router_seen_at, failure: "no_route", answer_rtt_ms: null,
-    status_reason: "У роутера нет маршрута к этому адресу.",
-  };
-  fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip')?.textContent === 'Недоступен'"), "Наблюдаемый IPv6 без маршрута показан с точным состоянием");
-  liveState.dns_services[3] = { ...ipv6Resolver, usage_observed: false };
+  assert.deepEqual(await evaluate(`[...document.querySelectorAll('#dns-protection-list > li')].slice(0, 2).map(card =>
+    [...card.querySelectorAll('.dns-service-connection')].map(path => path.dataset.family))`),
+    [["4"], ["6"]], "карточки IPv4-only и IPv6-only показывают только своё семейство");
+  const dotV6 = { ...dotV4, family: 6, resolved_ip: "2001:db8::53", answer_rtt_ms: 24 };
+  const explicitV6 = { ...dot, profile_id: "explicit-ip", host: "2001:db8::54", connections: [{
+    family: 6, resolved_ip: "2001:db8::54", state: "no_route", availability: "unavailable",
+    checked_at: new Date().toISOString(), failure: "no_route", status_reason: "У роутера нет маршрута к этому адресу.",
+  }] };
+  liveState.dns_services[3] = explicitV6;
+  dot.connections.push(dotV6);
+  dotV4.answer_rtt_ms = 18;
+  dot.usage_observed = null;
   liveState.dns_source_status = "activity_unknown";
-  liveState.dns_services[0].usage_observed = null;
-  liveState.dns_services[0].answer_rtt_ms = 18;
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate(`(() => {
-    const row = document.querySelector('#dns-protection-list li');
-    return row.textContent.includes('18 мс') && row.textContent.includes('ЗапросыНеизвестно')
-      && row.querySelector('.meta-chip').textContent === 'Доступен';
-  })()`), "без журнала доступность DNS и активность пользователей отображаются отдельно");
-  assert.deepEqual(await evaluate(`["#dns-protection-list", "#dns-protection-extra"].map(selector =>
-    [...document.querySelector(selector).querySelector("li").querySelectorAll(".dns-service-protocol, .meta-chip")].map(e => e.textContent))`),
-  [["DoT · IPv4", "Доступен"], ["DoT · IPv6", "Доступен"]]);
+    const card = document.querySelector('#dns-protection-list > li');
+    const variants = [...card.querySelectorAll('.dns-service-connection')];
+    const diagnostics = card.querySelector('.dns-service-diagnostics');
+    return variants.length === 2 && variants[0].dataset.family === '4' && variants[0].textContent.includes('18 мс')
+      && variants[1].dataset.family === '6' && variants[1].textContent.includes('24 мс')
+      && !diagnostics.open && diagnostics.textContent.includes('ЗапросыНеизвестно')
+      && !card.querySelector('.dns-service-connections').textContent.includes('Настройка')
+      && card.querySelector('.meta-chip').textContent === 'Доступен';
+  })()`), "оба семейства одного профиля и отдельные подробности диагностики");
+  assert.equal(await evaluate("document.querySelectorAll('#dns-protection-list > li').length"), 3, "дополнительное семейство не создаёт карточку");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-extra .meta-chip').textContent"), "Недоступен");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-extra').textContent.includes('[2001:db8::54]:853')"), true);
+  await evaluate("document.querySelector('#dns-protection-list .dns-service-diagnostics summary').click()");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-list .dns-service-diagnostics').open"), true);
   liveState.dns_source_status = "unknown";
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("document.querySelector('#dns-protection-summary').textContent.includes('неизвестно')"), "потеря системного источника");
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('22 мс')"), true, "прошлый достоверный результат остаётся видимым");
   liveState.dns_source_status = "known";
-  liveState.dns_services[3] = { ...ipv6Resolver, service_active: false };
+  liveState.dns_services[3] = { ...explicitV6, service_active: false };
+  dot.connections.pop();
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra').textContent.includes('Выключена')"),
+  await waitFor(() => evaluate("document.querySelector('#dns-protection-extra').textContent.includes('Служба выключена')"),
     "выключенная служба не отображается доступной");
   assert.equal(await evaluate("document.querySelector('#dns-protection-extra .meta-chip').textContent"), "Состояние неизвестно");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-list li').querySelector('[data-family=\"6\"]') === null"), true, "неприменимый IPv6 исчезает из профиля");
   liveState.dns_services[3] = refusedResolver;
-  liveState.dns_services[0].answer_rtt_ms = 17;
+  dotV4.answer_rtt_ms = 17;
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("document.querySelector('#dns-protection-extra .meta-chip')?.textContent === 'Недоступен'"), "отказ DNS-сервера остаётся ошибкой");
   await evaluate("document.querySelector('#dns-protection-more summary').click()");
@@ -704,9 +715,10 @@ esac
     const screenshot = await call("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(captureDir, "dns-overview-mobile.png"), Buffer.from(screenshot.data, "base64"));
   }
-  const previousDnsService = liveState.dns_services[1];
-  liveState.dns_services[1] = {
-    ...previousDnsService,
+  const doq = liveState.dns_services[1];
+  const previousDnsConnection = doq.connections[0];
+  doq.connections[0] = {
+    ...previousDnsConnection,
     state: "recovered",
     availability: "recovered",
     checked_at: new Date().toISOString(),
@@ -716,10 +728,10 @@ esac
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   const doqBadge = "document.querySelectorAll('#dns-protection-list .meta-chip')[1].textContent";
   await waitFor(async () => await evaluate(doqBadge) === "Состояние неизвестно", "статус восстановления требует подтверждённого DNS-ответа");
-  liveState.dns_services[1].dns_answer_confirmed = true;
+  doq.connections[0].dns_answer_confirmed = true;
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(async () => await evaluate(doqBadge) === "Восстановлен", "подтверждённый DNS-ответ отображает восстановление");
-  liveState.dns_services[1] = previousDnsService;
+  doq.connections[0] = previousDnsConnection;
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await call("Emulation.clearDeviceMetricsOverride");
   await evaluate("location.hash = '#diagnostics'");
