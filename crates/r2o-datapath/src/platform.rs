@@ -33,6 +33,7 @@ const RULES: &str = "platform.rules";
 const LEASES: &str = "platform.dns";
 const EVENT: &str = "platform.sock";
 const LOCK: &str = "platform.lock";
+const FASTNAT_ERROR: &str = "platform.fastnat-error";
 
 fn error(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
@@ -215,6 +216,7 @@ struct Platform {
     plain: Vec<Endpoint>,
     gate: Option<(Ipv4Addr, u16)>,
     software_path: Vec<Endpoint>,
+    ppe_ports: Option<iptables::PpePorts>,
     interval: Duration,
 }
 
@@ -303,6 +305,11 @@ impl Platform {
             .ok()
             .filter(|n| (1..=3600).contains(n))
             .unwrap_or(60);
+        let capture_ports = ports(&value("PORTS", "0:65535"))?;
+        let http = ports(&value("HTTP_KEEPALIVE_PORTS", "80"))?;
+        let ppe_ports = (kind == Kind::Keenetic && backend == Backend::Iptables)
+            .then(|| iptables::PpePorts::detect(&capture_ports, &http))
+            .transpose()?;
         Ok(Self {
             kind,
             backend,
@@ -313,18 +320,19 @@ impl Platform {
             raw,
             probe,
             measure,
-            ports: ports(&value("PORTS", "0:65535"))?,
+            ports: capture_ports,
             voice: ports(&value(
                 "VOICE_PORTS",
                 "50000:50099,1400,3478:3481,5349,19294:19344",
             ))?,
-            http: ports(&value("HTTP_KEEPALIVE_PORTS", "80"))?,
+            http,
             dns: ports(&value("DNS_PORTS", "53,853"))?,
             early,
             voice_window,
             plain,
             gate,
             software_path: Endpoint::targets(&value("R2O_SOFTWARE_PATH_ENDPOINTS", ""))?,
+            ppe_ports,
             interval: Duration::from_secs(interval),
         })
     }
@@ -566,7 +574,11 @@ impl Platform {
         let ipv6 = self.use_ipv6();
         self.peers(ipv6)?;
         self.accounting(true)?;
-        self.restore_legacy_offload()?;
+        let manage_fastnat = self.kind == Kind::Keenetic;
+        if !manage_fastnat {
+            keenetic::restore_fastnat(self)?;
+        }
+        self.restore_legacy_fw4()?;
 
         let exclusions = optional(&exclusions_path)?.unwrap_or_default();
         let desired = if let Some((activation, previous, sample)) = dns_sample
@@ -618,7 +630,9 @@ impl Platform {
             Backend::Nft => nft::leases_live(&leases, ipv6)?,
             Backend::Iptables => iptables::leases_live(&leases, ipv6)?,
         };
-        if start || desired != exclusions || !live || self.status(ipv6).is_err() {
+        let retry_ppe =
+            self.ppe_ports.is_some() && self.run.join("platform.offload-error").is_file();
+        if start || desired != exclusions || !live || retry_ppe || self.status(ipv6).is_err() {
             self.install(ipv6, &leases, &desired)?;
             if desired != exclusions {
                 atomic(&exclusions_path, &desired)?;
@@ -627,6 +641,16 @@ impl Platform {
         self.status(ipv6)?;
         if start {
             atomic(&active_path, "1\n")?;
+        }
+        if manage_fastnat {
+            let state = self.run.join(FASTNAT_ERROR);
+            match keenetic::suspend_fastnat(self) {
+                Ok(()) => remove(&state)?,
+                Err(err) => {
+                    atomic(&state, &err.to_string())?;
+                    eprintln!("r2o-platform: FastNAT, ограниченное покрытие: {err}");
+                }
+            }
         }
         if self.kind == Kind::OpenWrt && self.backend == Backend::Nft {
             let state = self.run.join("platform.offload-error");
@@ -665,16 +689,17 @@ impl Platform {
                 .ok()
                 .flatten()
                 .map(|s| limit_health_error(&s));
+            let fastnat_error = optional(&self.run.join(FASTNAT_ERROR)).ok().flatten();
             let firewall = json!({
                 "platform": match self.kind { Kind::Keenetic => "keenetic", Kind::OpenWrt => "openwrt", Kind::Linux => "linux" },
                 "backend": match self.backend { Backend::Iptables => "iptables", Backend::Nft => "nft" },
                 "active": active,
-                "verified": active && result.is_ok() && offload_error.is_none(),
+                "verified": active && result.is_ok() && offload_error.is_none() && fastnat_error.is_none(),
                 "fw4_admission": result.as_ref().ok().copied().flatten(),
                 "adapter_error": result.as_ref().err().map(|error| limit_health_error(&error.to_string())),
-                "offload_error": offload_error,
+                "offload_error": offload_error.or_else(|| fastnat_error.map(|s| limit_health_error(&s))),
                 "dns_adapter_error": optional(&self.run.join("platform.dns-excl-degraded")).ok().flatten().map(|s| limit_health_error(&s)),
-                "fastnat": optional(&self.proc.join("sys/net/netfilter/nf_conntrack_fastnat")).ok().flatten().and_then(|s| s.trim().parse::<u32>().ok()),
+                "fastnat": keenetic::fastnat(self).ok().flatten(),
                 "rules": (self.backend == Backend::Iptables).then(|| {
                     let evidence = |family| iptables::diagnostic_counters(self, family);
                     json!({"ipv4": evidence(4), "ipv6": self.ipv6.then(|| evidence(6))})
@@ -707,8 +732,10 @@ impl Platform {
         } else {
             Ok(())
         };
-        let legacy = self.restore_legacy_offload();
-        rules.and(offload).and(legacy)?;
+        let fastnat =
+            keenetic::restore_fastnat(self).and_then(|()| remove(&self.run.join(FASTNAT_ERROR)));
+        let legacy = self.restore_legacy_fw4();
+        rules.and(offload).and(fastnat).and(legacy)?;
         remove(&self.run.join(RULES))
     }
 
@@ -802,8 +829,7 @@ impl Platform {
         Ok(())
     }
 
-    fn restore_legacy_offload(&self) -> Result<()> {
-        keenetic::restore_fastnat(self)?;
+    fn restore_legacy_fw4(&self) -> Result<()> {
         if env::var("R2O_FLOWOFFLOAD_SKIP_RESTORE").as_deref() != Ok("1") {
             nft::restore_fw4(self)?;
         }
@@ -1028,7 +1054,11 @@ pub fn cli(args: &[String]) -> Result<()> {
         }
         Some("flowoffload-restore") => {
             let _lock = platform.lock()?;
-            platform.restore_legacy_offload()?;
+            if !platform.run.join(ACTIVE).is_file() {
+                keenetic::restore_fastnat(&platform)?;
+                remove(&platform.run.join(FASTNAT_ERROR))?;
+            }
+            platform.restore_legacy_fw4()?;
         }
         Some("rst-down") => {
             let _lock = platform.lock()?;
@@ -1080,7 +1110,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                 }
             }
             if platform.kind == Kind::Keenetic {
-                keenetic::offload_status(&platform);
+                print!("{}", keenetic::offload_status(&platform, ipv6));
                 if let Some(reason) = optional(&platform.run.join("platform.dns-excl-degraded"))? {
                     println!("dns_exclusions=degraded ({})", reason.trim());
                 }
@@ -1093,10 +1123,34 @@ pub fn cli(args: &[String]) -> Result<()> {
             if let Some(reason) = optional(&platform.run.join("platform.offload-error"))? {
                 println!("offload=limited ({reason})");
             }
+            if let Some(reason) = optional(&platform.run.join(FASTNAT_ERROR))? {
+                println!("offload=limited (FastNAT: {reason})");
+            }
         }
         Some("dns-route") => platform.dns_route(&args[1..])?,
         Some("ppe") => match args.get(1).map(String::as_str) {
-            Some("status") => keenetic::offload_status(&platform),
+            Some("status") => {
+                let address = match &args[2..] {
+                    [] => None,
+                    [address] if address.is_empty() => None,
+                    [address] => Some(
+                        address
+                            .parse()
+                            .map_err(|_| error("ожидается IPv4-адрес PPE"))?,
+                    ),
+                    _ => return Err(error("ожидается ppe status [IPv4-адрес]")),
+                };
+                let _lock = platform.lock()?;
+                let mut status = keenetic::offload_status(&platform, platform.use_ipv6());
+                if platform.kind == Kind::Keenetic {
+                    status.push_str(&keenetic::binds_status(&platform, address));
+                }
+                if let Err(err) = io::stdout().lock().write_all(status.as_bytes())
+                    && err.kind() != io::ErrorKind::BrokenPipe
+                {
+                    return Err(err);
+                }
+            }
             Some("ensure") => {
                 platform.reconcile(false, false)?;
             }

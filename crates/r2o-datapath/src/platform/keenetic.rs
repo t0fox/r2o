@@ -1,58 +1,128 @@
 use super::*;
 use std::collections::BTreeSet;
 
+const FASTNAT: &str = "sys/net/netfilter/nf_conntrack_fastnat";
+const FASTNAT_SAVED: &str = "fastnat.saved";
+
+pub(super) fn fastnat(platform: &Platform) -> Result<Option<u32>> {
+    optional(&platform.proc.join(FASTNAT))?
+        .map(|value| number(value.trim()))
+        .transpose()
+}
+
+// D2K fastnat_off: транзитный SNAT должен оставаться видимым через conntrack.
+pub(super) fn suspend_fastnat(platform: &Platform) -> Result<()> {
+    let journal = platform.run.join(FASTNAT_SAVED);
+    let saved = optional(&journal)?;
+    let Some(current) = fastnat(platform)? else {
+        return if saved.is_some() {
+            Err(error("FastNAT недоступен, исходное значение сохранено"))
+        } else {
+            Ok(())
+        };
+    };
+    if let Some(saved) = saved {
+        number::<u32>(saved.trim())?;
+    } else {
+        atomic(&journal, &format!("{current}\n"))?;
+    }
+    if current == 0 {
+        return Ok(());
+    }
+    fs::write(platform.proc.join(FASTNAT), "0\n")?;
+    if fastnat(platform)? != Some(0) {
+        return Err(error("ядро не подтвердило приостановку FastNAT"));
+    }
+    Ok(())
+}
+
 pub(super) fn restore_fastnat(platform: &Platform) -> Result<()> {
-    let journal = platform.run.join("fastnat.saved");
+    let journal = platform.run.join(FASTNAT_SAVED);
     let Some(previous) = optional(&journal)? else {
         return Ok(());
     };
     let previous: u32 = number(previous.trim())?;
-    let sysctl = platform.proc.join("sys/net/netfilter/nf_conntrack_fastnat");
-    let current: u32 = number(fs::read_to_string(&sysctl)?.trim())?;
+    let current = fastnat(platform)?.ok_or_else(|| error("FastNAT недоступен"))?;
     if current != previous {
         if current != 0 {
             return Err(error("FastNAT изменён вне R2O, журнал сохранён"));
         }
-        fs::write(&sysctl, format!("{previous}\n"))?;
+        fs::write(platform.proc.join(FASTNAT), format!("{previous}\n"))?;
     }
-    if fs::read_to_string(&sysctl)?.trim() != previous.to_string() {
+    if fastnat(platform)? != Some(previous) {
         return Err(error("ядро не подтвердило восстановление FastNAT"));
     }
     remove(&journal)
 }
 
-pub(super) fn offload_status(platform: &Platform) {
+pub(super) fn offload_status(platform: &Platform, ipv6: bool) -> String {
     if platform.kind != Kind::Keenetic {
-        println!("PPE: применяется к Keenetic");
-        return;
+        return "PPE: применяется к Keenetic\n".into();
     }
-    let fastnat = fs::read_to_string(platform.proc.join("sys/net/netfilter/nf_conntrack_fastnat"))
-        .map(|value| value.trim().to_owned())
-        .unwrap_or_else(|_| "unknown".into());
-    let state = |version| {
+    let fastnat = match fastnat(platform) {
+        Ok(Some(value)) => value.to_string(),
+        Ok(None) => "unavailable".into(),
+        Err(_) => "unknown".into(),
+    };
+    let state = |version| -> String {
         if value("R2O_PPE_DEOFFLOAD", "1") == "0" {
-            return "disabled";
+            return "disabled".into();
         }
-        if iptables::ppe_target(platform, version).is_none() {
-            return "unavailable";
-        }
-        match iptables::ppe_installed(version) {
-            Ok(true) => "installed",
-            Ok(false) => "missing",
-            Err(_) => "unknown",
+        match iptables::ppe_coverage(platform, version) {
+            Ok(None) => "unavailable".into(),
+            Ok(Some((0, expected))) => format!("missing(0/{expected})"),
+            Ok(Some((found, expected))) if found == expected => {
+                format!("installed({found}/{expected})")
+            }
+            Ok(Some((found, expected))) => format!("partial({found}/{expected})"),
+            Err(_) => "unknown".into(),
         }
     };
     let present = iptables::ppe_target(platform, 4).is_some();
     let v4 = state(4);
-    let v6 = if platform.use_ipv6() {
-        state(6)
-    } else {
-        "disabled"
-    };
-    println!(
-        "PPE: target={} ipv4_rules={v4} ipv6_rules={v6} FastNAT={fastnat} lan_coverage=unverified",
+    let v6 = if ipv6 { state(6) } else { "disabled".into() };
+    format!(
+        "PPE: target={} ipv4_rules={v4} ipv6_rules={v6} FastNAT={fastnat} lan_coverage=unverified\n",
         if present { "present" } else { "unavailable" }
-    );
+    )
+}
+
+pub(super) fn binds_status(platform: &Platform, address: Option<Ipv4Addr>) -> String {
+    let file = platform.proc.join("driver/hw_nat/foe/binds");
+    match File::open(file).and_then(|file| read_binds(BufReader::new(file), address)) {
+        Ok((entries, found)) => match address {
+            Some(address) => {
+                format!("ppe_binds={entries}\nppe_bind_address={address} present={found}\n")
+            }
+            None => format!("ppe_binds={entries}\n"),
+        },
+        Err(err) if err.kind() == io::ErrorKind::NotFound => "ppe_binds=unavailable\n".into(),
+        Err(err) => format!("ppe_binds=unknown ({err})\n"),
+    }
+}
+
+fn read_binds(reader: impl BufRead, address: Option<Ipv4Addr>) -> Result<(usize, bool)> {
+    let mut entries = 0;
+    let mut found = false;
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty()
+            || line
+                .strip_prefix("PPE")
+                .and_then(|s| s.strip_suffix(':'))
+                .is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit()))
+        {
+            continue;
+        }
+        entries += 1;
+        if let Some(address) = address {
+            found |= line
+                .split(|c: char| !c.is_ascii_digit() && c != '.')
+                .any(|part| part.parse::<Ipv4Addr>().ok() == Some(address));
+        }
+    }
+    Ok((entries, found))
 }
 
 fn host_port(input: &str, default: u16) -> Option<(&str, u16)> {

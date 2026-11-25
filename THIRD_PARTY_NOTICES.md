@@ -19,6 +19,13 @@ R2O использует имеющийся JSON-парсер, сверяет з
 Семантика временной приостановки ускорения fw4 и восстановления при остановке
 сверена с `flowoffload_off` и `flowoffload_restore` в
 [`8c6bcdc28b3a`](https://github.com/necronicle/d2k/blob/8c6bcdc28b3aedeca8618ff645215bfd6408047c/files/S99d2k#L2292-L2325).
+Для Keenetic из того же коммита адаптированы
+[`fastnat_off` и `fastnat_restore`](https://github.com/necronicle/d2k/blob/8c6bcdc28b3aedeca8618ff645215bfd6408047c/files/S99d2k#L2147-L2163),
+а также [`_d2k_ppe_rules` и `d2k_ppe_status`](https://github.com/necronicle/d2k/blob/8c6bcdc28b3aedeca8618ff645215bfd6408047c/files/d2k-ppe-deoffload.sh).
+Rust сохраняет первый снимок FastNAT до подтверждённого восстановления,
+переустанавливает правила после событий NDM и проверяет наличие ожидаемых
+правил в обоих семействах. Программный дифференциальный тест сравнивает
+стандартные и пользовательские селекторы PPE для IPv4 и IPv6.
 [MIT, Copyright (c) 2026 Necronicle](docs/licenses/d2k.txt).
 
 ## Telegram MTProto/WSS-прокси
