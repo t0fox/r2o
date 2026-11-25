@@ -30,9 +30,11 @@ runs:
         if [ ! -f "$archive" ] || ! printf '%s  %s\n' "$SHA256" "$archive" | sha256sum --check --status; then
           part="$archive.part"
           filename="zig-x86_64-linux-$VERSION.tar.xz"
-          for base in https://pkg.hexops.org/zig https://zigmirror.hryx.net/zig "https://ziglang.org/download/$VERSION"; do
+          for base in https://pkg.hexops.org/zig https://ziglang.freetls.fastly.net "https://ziglang.org/download/$VERSION"; do
+            timeout=40
+            if [[ "$base" == "https://ziglang.org/download/$VERSION" ]]; then timeout=360; fi
             rm -f "$part"
-            if curl --fail --proto '=https' --tlsv1.2 --location --connect-timeout 10 --max-time 90 \
+            if curl --fail --proto '=https' --tlsv1.2 --location --connect-timeout 12 --max-time "$timeout" \
               "$base/$filename" -o "$part" &&
               printf '%s  %s\n' "$SHA256" "$part" | sha256sum --check --status; then
               mv "$part" "$archive"
