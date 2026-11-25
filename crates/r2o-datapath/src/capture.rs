@@ -9,6 +9,8 @@ pub const CAPTURE_BYTES: usize = 4096;
 pub const CAPTURE_SLOTS: usize = 64;
 pub const CAPTURE_WINDOW: usize = 64;
 pub const CAPTURE_TTL: Duration = Duration::from_secs(5);
+const CAPTURE_BUCKETS: usize = 8;
+const _: () = assert!(CAPTURE_SLOTS == u64::BITS as usize && CAPTURE_BYTES <= u16::MAX as usize);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TcpFlowKey {
@@ -342,10 +344,8 @@ pub enum CaptureResult {
     Full,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SlotState {
-    #[default]
-    Free,
     Collecting,
     Rejected,
     Delivered,
@@ -370,12 +370,13 @@ struct CaptureInput<'a> {
 }
 
 struct CaptureSlot {
-    key: Option<TcpFlowKey>,
+    key: TcpFlowKey,
     generation: u64,
-    started: Option<Instant>,
+    started: Instant,
     sequence: u32,
-    contiguous: usize,
-    high: usize,
+    contiguous: u16,
+    high: u16,
+    bitmap_dirty: bool,
     state: SlotState,
     mode: CaptureMode,
     visible: bool,
@@ -383,25 +384,30 @@ struct CaptureSlot {
     present: [u8; CAPTURE_BYTES / 8],
 }
 
-impl Default for CaptureSlot {
-    fn default() -> Self {
+impl CaptureSlot {
+    fn new(now: Instant) -> Self {
+        let unspecified = Address::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
         Self {
-            key: None,
+            key: TcpFlowKey {
+                low_address: unspecified,
+                high_address: unspecified,
+                low_port: 0,
+                high_port: 0,
+            },
             generation: 0,
-            started: None,
+            started: now,
             sequence: 0,
             contiguous: 0,
             high: 0,
-            state: SlotState::Free,
+            bitmap_dirty: false,
+            state: SlotState::Rejected,
             mode: CaptureMode::Tls,
             visible: false,
             bytes: [0; CAPTURE_BYTES],
             present: [0; CAPTURE_BYTES / 8],
         }
     }
-}
 
-impl CaptureSlot {
     fn start(
         &mut self,
         key: TcpFlowKey,
@@ -411,11 +417,15 @@ impl CaptureSlot {
         mode: CaptureMode,
         visible: bool,
     ) {
-        self.bytes.fill(0);
-        self.present.fill(0);
-        self.key = Some(key);
+        // Readers only use the written prefix. Sparse bytes are read only
+        // when their bits are set for the current generation.
+        if self.bitmap_dirty {
+            self.present[..usize::from(self.high).div_ceil(8)].fill(0);
+            self.bitmap_dirty = false;
+        }
+        self.key = key;
         self.generation = generation;
-        self.started = Some(now);
+        self.started = now;
         self.sequence = sequence;
         self.contiguous = 0;
         self.high = 0;
@@ -424,37 +434,164 @@ impl CaptureSlot {
         self.visible = visible;
     }
 
-    fn free(&mut self) {
-        self.key = None;
-        self.started = None;
-        self.state = SlotState::Free;
-        self.visible = false;
+    fn store(&mut self, offset: usize, input: &[u8]) -> bool {
+        let contiguous = usize::from(self.contiguous);
+        let high = usize::from(self.high);
+        let end = offset + input.len();
+        if offset == contiguous && contiguous == high {
+            self.bytes[offset..end].copy_from_slice(input);
+            self.contiguous = end as u16;
+            self.high = self.contiguous;
+            return true;
+        }
+        let overlap = contiguous.saturating_sub(offset).min(input.len());
+        if self.bytes[offset..offset + overlap] != input[..overlap] {
+            return false;
+        }
+        let start = offset + overlap;
+        if start == end {
+            return true;
+        }
+        self.high = self.high.max(end as u16);
+        if !self.record_sparse_bits(start, &input[overlap..]) {
+            return false;
+        }
+        self.bytes[start..end].copy_from_slice(&input[overlap..]);
+        if start == contiguous {
+            let mut prefix = end;
+            while prefix < high {
+                let bit = prefix % 8;
+                let written = (self.present[prefix / 8] >> bit).trailing_ones() as usize;
+                prefix += written;
+                if written < 8 - bit {
+                    break;
+                }
+            }
+            self.contiguous = prefix.min(usize::from(self.high)) as u16;
+        }
+        true
     }
 
-    fn has_byte(&self, index: usize) -> bool {
-        self.present[index / 8] & (1 << (index % 8)) != 0
+    #[cold]
+    fn record_sparse_bits(&mut self, start: usize, input: &[u8]) -> bool {
+        self.bitmap_dirty = true;
+        let end = start + input.len();
+        let mut cursor = start;
+        while cursor < end {
+            let bit = cursor % 8;
+            let len = (8 - bit).min(end - cursor);
+            let mask = (u8::MAX >> (8 - len)) << bit;
+            let block = &mut self.present[cursor / 8];
+            let mut overlap = (*block & mask) >> bit;
+            let relative = cursor - start;
+            if *block & mask == mask {
+                if self.bytes[cursor..cursor + len] != input[relative..relative + len] {
+                    return false;
+                }
+            } else {
+                while overlap != 0 {
+                    let index = overlap.trailing_zeros() as usize;
+                    if self.bytes[cursor + index] != input[relative + index] {
+                        return false;
+                    }
+                    overlap &= overlap - 1;
+                }
+            }
+            *block |= mask;
+            cursor += len;
+        }
+        true
     }
 }
 
 pub struct CaptureTable {
     slots: Vec<CaptureSlot>,
+    occupied: u64,
+    buckets: [u64; CAPTURE_BUCKETS],
+    oldest_start: Instant,
+    newest_start: Instant,
     stats: CaptureStats,
 }
 
 impl Default for CaptureTable {
     fn default() -> Self {
+        let now = Instant::now();
         Self {
-            slots: (0..CAPTURE_SLOTS).map(|_| CaptureSlot::default()).collect(),
+            slots: (0..CAPTURE_SLOTS).map(|_| CaptureSlot::new(now)).collect(),
+            occupied: 0,
+            buckets: [0; CAPTURE_BUCKETS],
+            oldest_start: now,
+            newest_start: now,
             stats: CaptureStats::default(),
         }
     }
 }
 
 impl CaptureTable {
+    fn bucket(key: &TcpFlowKey) -> usize {
+        let mixed = key.low_port ^ key.high_port.rotate_left(5);
+        usize::from(mixed ^ (mixed >> 3) ^ (mixed >> 9)) & (CAPTURE_BUCKETS - 1)
+    }
+
+    #[inline(never)]
+    fn find(&self, key: &TcpFlowKey) -> Option<usize> {
+        let mut candidates = self.buckets[Self::bucket(key)];
+        while candidates != 0 {
+            let index = candidates.trailing_zeros() as usize;
+            if &self.slots[index].key == key {
+                return Some(index);
+            }
+            candidates &= candidates - 1;
+        }
+        None
+    }
+
+    fn free(&mut self, index: usize) {
+        let bit = !(1_u64 << index);
+        self.buckets[Self::bucket(&self.slots[index].key)] &= bit;
+        self.occupied &= bit;
+    }
+
+    fn expire(&mut self, now: Instant) {
+        if self.occupied == 0
+            || (now >= self.newest_start && now.duration_since(self.oldest_start) < CAPTURE_TTL)
+        {
+            return;
+        }
+        self.sweep_expired(now);
+    }
+
+    #[cold]
+    fn sweep_expired(&mut self, now: Instant) {
+        self.oldest_start = now;
+        self.newest_start = now;
+        let mut live = self.occupied;
+        while live != 0 {
+            let index = live.trailing_zeros() as usize;
+            live &= live - 1;
+            let slot = &self.slots[index];
+            let started = slot.started;
+            if now
+                .checked_duration_since(started)
+                .is_some_and(|age| age < CAPTURE_TTL)
+            {
+                self.oldest_start = self.oldest_start.min(started);
+                continue;
+            }
+            if slot.state == SlotState::Collecting && slot.visible {
+                self.stats.expired = self.stats.expired.saturating_add(1);
+                if slot.mode == CaptureMode::Tls {
+                    self.stats.tls_expired = self.stats.tls_expired.saturating_add(1);
+                }
+            }
+            self.free(index);
+        }
+    }
+
     pub(crate) fn r2o_http_capture_active(&self, key: TcpFlowKey, generation: u64) -> bool {
-        self.slots.iter().any(|slot| {
-            slot.key == Some(key)
-                && slot.generation == generation
+        self.find(&key).is_some_and(|index| {
+            let slot = &self.slots[index];
+            slot.generation == generation
                 && slot.mode == CaptureMode::Http
                 && slot.state == SlotState::Collecting
         })
@@ -466,14 +603,13 @@ impl CaptureTable {
         key: TcpFlowKey,
         generation: u64,
     ) -> Option<(usize, Option<usize>)> {
-        let slot = self.slots.iter().find(|slot| {
-            slot.key == Some(key)
-                && slot.generation == generation
-                && slot.state == SlotState::Collecting
-        })?;
+        let slot = &self.slots[self.find(&key)?];
+        if slot.generation != generation || slot.state != SlotState::Collecting {
+            return None;
+        }
         let declared_record_bytes = (slot.mode == CaptureMode::Tls && slot.contiguous >= 5)
             .then(|| 5 + usize::from(u16::from_be_bytes([slot.bytes[3], slot.bytes[4]])));
-        Some((slot.contiguous, declared_record_bytes))
+        Some((usize::from(slot.contiguous), declared_record_bytes))
     }
 
     pub fn feed(
@@ -559,35 +695,16 @@ impl CaptureTable {
             return CaptureResult::Ignored;
         }
 
-        let mut found = None;
-        let mut vacant = None;
-        for (index, slot) in self.slots.iter_mut().enumerate() {
-            if slot.state != SlotState::Free {
-                let expired = slot
-                    .started
-                    .and_then(|started| now.checked_duration_since(started))
-                    .is_none_or(|age| age >= CAPTURE_TTL);
-                if expired {
-                    if slot.state == SlotState::Collecting && slot.visible {
-                        self.stats.expired = self.stats.expired.saturating_add(1);
-                        if slot.mode == CaptureMode::Tls {
-                            self.stats.tls_expired = self.stats.tls_expired.saturating_add(1);
-                        }
-                    }
-                    slot.free();
-                }
+        self.expire(now);
+        let found = self.find(&key).filter(|&index| {
+            let slot = &self.slots[index];
+            if slot.generation == generation && slot.mode == mode {
+                true
+            } else {
+                self.free(index);
+                false
             }
-            if slot.state != SlotState::Free && slot.key == Some(key) {
-                if slot.generation == generation && slot.mode == mode {
-                    found = Some(index);
-                } else {
-                    slot.free();
-                }
-            }
-            if slot.state == SlotState::Free && vacant.is_none() {
-                vacant = Some(index);
-            }
-        }
+        });
 
         let anchor = anchor.filter(|anchor| {
             let offset = sequence.wrapping_sub(*anchor);
@@ -602,7 +719,8 @@ impl CaptureTable {
             if anchor.is_none() && mode == CaptureMode::Tls && bytes[0] != 22 {
                 return CaptureResult::Ignored;
             }
-            let Some(index) = vacant else {
+            let index = (!self.occupied).trailing_zeros() as usize;
+            if index == CAPTURE_SLOTS {
                 if visible {
                     self.stats.full = self.stats.full.saturating_add(1);
                     if mode == CaptureMode::Tls {
@@ -610,9 +728,15 @@ impl CaptureTable {
                     }
                 }
                 return CaptureResult::Full;
-            };
+            }
             let start_sequence = anchor.unwrap_or(sequence);
             self.slots[index].start(key, generation, now, start_sequence, mode, visible);
+            if self.occupied == 0 {
+                self.oldest_start = now;
+            }
+            self.occupied |= 1_u64 << index;
+            self.buckets[Self::bucket(&key)] |= 1_u64 << index;
+            self.newest_start = now;
             index
         };
         self.slots[index].visible &= visible;
@@ -625,28 +749,18 @@ impl CaptureTable {
             }
 
             let offset = sequence.wrapping_sub(slot.sequence) as usize;
-            if offset >= CAPTURE_BYTES || bytes.len() > CAPTURE_BYTES - offset {
+            if offset >= CAPTURE_BYTES
+                || bytes.len() > CAPTURE_BYTES - offset
+                || !slot.store(offset, bytes)
+            {
                 slot.state = SlotState::Rejected;
                 Err(())
             } else {
-                for (relative, byte) in bytes.iter().copied().enumerate() {
-                    let position = offset + relative;
-                    let mask = 1_u8 << (position % 8);
-                    let present = &mut slot.present[position / 8];
-                    if *present & mask != 0 && slot.bytes[position] != byte {
-                        slot.state = SlotState::Rejected;
-                        return self.reject_result(mode, capture_visible);
-                    }
-                    slot.bytes[position] = byte;
-                    *present |= mask;
-                }
-                slot.high = slot.high.max(offset + bytes.len());
-                while slot.contiguous < CAPTURE_BYTES && slot.has_byte(slot.contiguous) {
-                    slot.contiguous += 1;
-                }
+                let contiguous = usize::from(slot.contiguous);
+                let high = usize::from(slot.high);
                 let readiness = match mode {
-                    CaptureMode::Tls => tls_ready(&slot.bytes, slot.contiguous, slot.high),
-                    CaptureMode::Http => http_ready(&slot.bytes, slot.contiguous, slot.high),
+                    CaptureMode::Tls => tls_ready(&slot.bytes, contiguous, high),
+                    CaptureMode::Http => http_ready(&slot.bytes, contiguous, high),
                 };
                 match readiness {
                     Err(()) => {
@@ -656,10 +770,7 @@ impl CaptureTable {
                     Ok(false) => Ok(None),
                     Ok(true) => {
                         slot.state = SlotState::Delivered;
-                        Ok(Some((
-                            slot.sequence,
-                            slot.bytes[..slot.contiguous].to_vec(),
-                        )))
+                        Ok(Some((slot.sequence, slot.bytes[..contiguous].to_vec())))
                     }
                 }
             }
@@ -681,10 +792,8 @@ impl CaptureTable {
     }
 
     pub fn forget(&mut self, key: &TcpFlowKey) {
-        for slot in &mut self.slots {
-            if slot.state != SlotState::Free && slot.key == Some(*key) {
-                slot.free();
-            }
+        if let Some(index) = self.find(key) {
+            self.free(index);
         }
     }
 
@@ -1209,6 +1318,48 @@ mod tests {
             100,
             &hello,
         );
+    }
+
+    #[test]
+    fn sparse_bitmap_masks_holes_and_is_reset_on_slot_reuse() {
+        let now = Instant::now();
+        let key = key(32000);
+        let hello = hello(48);
+        let mut table = CaptureTable::default();
+        let feed = |table: &mut CaptureTable, generation, offset: usize, bytes: &[u8]| {
+            table.feed(key, generation, now, 100 + offset as u32, Some(100), bytes)
+        };
+
+        assert_eq!(
+            feed(&mut table, 1, 9, &hello[9..11]),
+            CaptureResult::Incomplete
+        );
+        assert_eq!(
+            feed(&mut table, 1, 13, &hello[13..21]),
+            CaptureResult::Incomplete
+        );
+        assert_eq!(
+            feed(&mut table, 1, 8, &hello[8..21]),
+            CaptureResult::Incomplete
+        );
+        let mut conflicting = hello[11..14].to_vec();
+        conflicting[2] ^= 0xff;
+        assert_eq!(
+            feed(&mut table, 1, 11, &conflicting),
+            CaptureResult::Rejected
+        );
+
+        let mut next = hello.clone();
+        next[9] ^= 0xff;
+        assert_eq!(
+            feed(&mut table, 2, 13, &next[13..]),
+            CaptureResult::Incomplete
+        );
+        assert_eq!(
+            feed(&mut table, 2, 0, &next[..10]),
+            CaptureResult::Incomplete
+        );
+        complete(feed(&mut table, 2, 8, &next[8..13]), 100, &next);
     }
 
     #[test]
