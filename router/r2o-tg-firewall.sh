@@ -149,10 +149,22 @@ report_family() {
     fi
 }
 
+list_rules() {
+    if [ "${R2O_PLATFORM:-}" = keenetic ] || {
+        [ -z "${R2O_PLATFORM:-}" ] && { [ -d /opt/etc/ndm ] || [ -x /bin/ndmc ]; }
+    }; then
+        "$(dirname -- "$0")/r2o-firewall.sh" list-rules "$1" "$2"
+    elif [ "$1" = 4 ]; then
+        iptables -t "$2" -S
+    else
+        ip6tables -t "$2" -S
+    fi
+}
+
 family_read() {
     : > "$work/error"
     command -v "$table" >/dev/null 2>&1 || return 127
-    "$table" -t nat -S > "$work/current" 2> "$work/error"
+    list_rules "$family" nat > "$work/current" 2> "$work/error"
 }
 
 # Принимаем только точные сигнатуры предыдущего адаптера. Остальные правила,
@@ -197,7 +209,7 @@ family_restore() {
 # Снимаем только точные правила той версии и не трогаем остальные цепочки.
 legacy_ip6_reject_clear() {
     command -v ip6tables >/dev/null 2>&1 || return 0
-    if ! ip6tables -t filter -S > "$work/filter" 2> "$work/error"; then
+    if ! list_rules 6 filter > "$work/filter" 2> "$work/error"; then
         if grep -qx filter /proc/net/ip6_tables_names 2>/dev/null; then
             cat "$work/error" >&2
             return 1

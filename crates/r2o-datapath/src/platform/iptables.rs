@@ -35,7 +35,7 @@ fn supports_wait(version: &str) -> bool {
     matches!((major, minor, patch), (Some(major), Some(minor), Some(patch)) if (major, minor, patch) >= (1, 4, 20))
 }
 
-pub(super) fn list(version: u8, table: &str) -> Result<String> {
+fn read_listing(version: u8, table: &str) -> Result<Output> {
     static V4_WAIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     static V6_WAIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let binary = tool(version);
@@ -43,7 +43,34 @@ pub(super) fn list(version: u8, table: &str) -> Result<String> {
     let wait = *cache
         .get_or_init(|| command(binary, &["--version"], None).is_ok_and(|s| supports_wait(&s)));
     let args = ["-w", "-t", table, "-S"];
-    command(binary, &args[usize::from(!wait)..], None)
+    let args = &args[usize::from(!wait)..];
+    // Entware 1.4.21 polls the xtables lock at one-second intervals. NDM can
+    // still be holding it when the ordinary two-second command deadline fires.
+    if wait && Kind::detect() == Kind::Keenetic {
+        invoke_before(binary, args, None, Instant::now() + Duration::from_secs(5))
+    } else {
+        invoke(binary, args, None)
+    }
+}
+
+pub(super) fn list(version: u8, table: &str) -> Result<String> {
+    checked(
+        tool(version),
+        &["-t", table, "-S"],
+        read_listing(version, table)?,
+    )
+}
+
+pub(super) fn print_listing(version: u8, table: &str) -> Result<()> {
+    let output = read_listing(version, table)?;
+    if !output.status.success() {
+        io::stderr().write_all(&output.stderr)?;
+        if let Some(code) = output.status.code() {
+            std::process::exit(code);
+        }
+        return Err(error("iptables listing terminated before completion"));
+    }
+    io::stdout().write_all(&output.stdout)
 }
 
 struct Iptables<'a> {
@@ -275,6 +302,11 @@ fn mangle(
     ] {
         for flag in ["-s", "-d"] {
             rules.push(chain, format!("{flag} {loopback} -j RETURN"));
+        }
+        if chain == "R2O_OUT" && platform.kind == Kind::Keenetic {
+            // При запросе роутера к собственному LAN-адресу пакет тоже идёт через lo.
+            // Маршрут RTN_LOCAL не может подтвердить выход через WAN.
+            rules.push(chain, "-o lo -j RETURN".into());
         }
         rules.push(chain, "-m conntrack --ctstate DNAT -j RETURN".into());
         if version == 4
@@ -854,6 +886,26 @@ mod tests {
         assert!(supports_wait("iptables v1.4.21"));
         assert!(supports_wait("ip6tables v1.8.11 (legacy)"));
         assert!(!supports_wait("iptables: unknown vendor release"));
+    }
+
+    #[test]
+    fn keenetic_skips_local_delivery_before_the_outbound_capture_window() {
+        let mut platform = Platform::detect().unwrap();
+        for kind in [Kind::Keenetic, Kind::OpenWrt] {
+            platform.kind = kind;
+            for version in [4, 6] {
+                let rules = mangle(&platform, version, "", &BTreeSet::new(), &[], false);
+                let out = &rules.chains["R2O_OUT"];
+                let capture = out
+                    .iter()
+                    .position(|rule| rule.contains("-m connbytes") && rule.contains("-j NFQUEUE"))
+                    .unwrap();
+                assert_eq!(
+                    out[..capture].iter().any(|rule| rule == "-o lo -j RETURN"),
+                    kind == Kind::Keenetic
+                );
+            }
+        }
     }
 
     #[test]

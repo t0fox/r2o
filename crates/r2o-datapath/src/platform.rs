@@ -218,10 +218,9 @@ struct Platform {
     interval: Duration,
 }
 
-impl Platform {
-    fn detect() -> Result<Self> {
-        let root = path("R2O_DIR", Path::new("/opt/r2o"));
-        let kind = match value("R2O_PLATFORM", "").as_str() {
+impl Kind {
+    fn detect() -> Self {
+        match value("R2O_PLATFORM", "").as_str() {
             "keenetic" => Kind::Keenetic,
             "openwrt" => Kind::OpenWrt,
             "" if Path::new("/opt/etc/ndm").is_dir() || Path::new("/bin/ndmc").exists() => {
@@ -231,7 +230,14 @@ impl Platform {
                 Kind::OpenWrt
             }
             _ => Kind::Linux,
-        };
+        }
+    }
+}
+
+impl Platform {
+    fn detect() -> Result<Self> {
+        let root = path("R2O_DIR", Path::new("/opt/r2o"));
+        let kind = Kind::detect();
         let backend = match value("FW_BACKEND", "auto").as_str() {
             "nft" => Backend::Nft,
             "iptables" => Backend::Iptables,
@@ -966,6 +972,19 @@ fn invoke_before(
 }
 
 pub fn cli(args: &[String]) -> Result<()> {
+    if args.first().is_some_and(|arg| arg == "list-rules") {
+        return match args {
+            [_, family, table] if matches!(table.as_str(), "nat" | "filter") => {
+                let version = match family.as_str() {
+                    "4" => 4,
+                    "6" => 6,
+                    _ => return Err(error("list-rules: expected IPv4 or IPv6 family number")),
+                };
+                iptables::print_listing(version, table)
+            }
+            _ => Err(error("usage: list-rules {4|6} {nat|filter}")),
+        };
+    }
     let platform = Platform::detect()?;
     match args.first().map(String::as_str) {
         Some("backend") => println!(
