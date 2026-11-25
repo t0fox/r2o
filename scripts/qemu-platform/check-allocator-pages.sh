@@ -25,14 +25,15 @@ case "$page" in
             test -n "$image"
             cd /work
             apt-get download "$image:arm64"
-            dpkg-deb --fsys-tarfile ./*.deb | tar -xf - --wildcards "./boot/vmlinuz-*"
+            dpkg-deb --fsys-tarfile ./*.deb | tar -xOf - --wildcards "./boot/vmlinuz-*" > arm64-kernel
+            test -s arm64-kernel
         '
         mkdir -p "$work/initramfs/proc"
         "$ZIG" cc -target aarch64-linux-musl -static -O2 -DEXPECTED_PAGE_SIZE=16384 "$src" -o "$work/initramfs/init"
         (cd "$work/initramfs" && find . -print | cpio -o -H newc) > "$work/initramfs.cpio"
         status=0
         timeout 150 qemu-system-aarch64 -machine virt -cpu max -m 256M \
-            -nographic -nodefaults -serial stdio -no-reboot -kernel "$work"/boot/vmlinuz-* \
+            -nographic -nodefaults -serial stdio -no-reboot -kernel "$work/arm64-kernel" \
             -initrd "$work/initramfs.cpio" -append 'console=ttyAMA0 rdinit=/init panic=1 quiet' \
             > "$work/console.log" 2>&1 || status=$?
         cat "$work/console.log"
