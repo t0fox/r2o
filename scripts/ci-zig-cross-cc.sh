@@ -38,19 +38,4 @@ fi
 if [ -n "${ZIG_CPU:-}" ]; then
     set -- "$@" "-mcpu=$ZIG_CPU"
 fi
-if [ -n "${R2O_MIPSEL_LINK_MAPS:-}" ]; then
-    next_output=no
-    for argument do
-        if [ "$next_output" = yes ]; then
-            output_name=${argument##*/}
-            case "$output_name" in
-                r2o[_-]*)
-                    set -- "$@" "-Wl,-Map,$R2O_MIPSEL_LINK_MAPS/$output_name.map"
-                    printf 'r2o: карта линковки %s\n' "$output_name" >&2 ;;
-            esac
-            break
-        fi
-        [ "$argument" != -o ] || next_output=yes
-    done
-fi
 exec "$ZIG" cc "$@" -target "$ZIG_TARGET"

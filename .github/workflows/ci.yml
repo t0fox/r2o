@@ -471,12 +471,13 @@ jobs:
           export R2O_RELEASE_ID R2O_RELEASE_TITLE R2O_BUILT R2O_COMMIT="$GITHUB_SHA"
           if [ "$ABI" = mipsel ]; then
             build_dir=$(mktemp -d "$RUNNER_TEMP/r2o-mipsel.XXXXXX")
-            mkdir "$build_dir/maps"
-            CARGO_TARGET_DIR="$build_dir" R2O_MIPSEL_LINK_MAPS="$build_dir/maps" sh "$BUILD_SCRIPT"
-            sh scripts/check-mipsel-allocator.sh "$build_dir/$TARGET/release" "$build_dir/maps"
+            CARGO_TARGET_DIR="$build_dir" CARGO_PROFILE_RELEASE_STRIP=none \
+              R2O_MIPSEL_VERIFY_ALLOCATOR=1 sh "$BUILD_SCRIPT"
+            sh scripts/check-mipsel-allocator.sh "$build_dir/$TARGET/release"
+            sudo apt-get install -y -qq binutils-mipsel-linux-gnu
             mkdir -p "target/$TARGET/release"
             for binary in r2o-{controller,datapath,panel,telegram,manager,fetch,detect}; do
-              cp "$build_dir/$TARGET/release/$binary" "target/$TARGET/release/$binary"
+              mipsel-linux-gnu-strip --strip-all -o "target/$TARGET/release/$binary" "$build_dir/$TARGET/release/$binary"
             done
           else
             sh "$BUILD_SCRIPT"

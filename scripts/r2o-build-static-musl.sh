@@ -38,9 +38,9 @@ export R2O_BUILD_TOOLCHAIN R2O_BUILD_ALLOCATOR
 export "CC_$target_env=$cc"
 export "CARGO_TARGET_${cargo_target_env}_LINKER=$cc"
 rustflags="-Ctarget-feature=+crt-static -Clink-self-contained=no -Crelocation-model=static"
-if [ -n "${R2O_MIPSEL_LINK_MAPS:-}" ]; then
+if [ -n "${R2O_MIPSEL_VERIFY_ALLOCATOR:-}" ]; then
     test "$ABI" = mipsel
-    rustflags="$rustflags -Clink-arg=-Wl,--undefined=__libc_malloc_impl"
+    rustflags="$rustflags -Clink-arg=-Wl,-u,__libc_malloc_impl"
 fi
 export "CARGO_TARGET_${cargo_target_env}_RUSTFLAGS=$rustflags"
 export CARGO_PROFILE_RELEASE_PANIC=abort

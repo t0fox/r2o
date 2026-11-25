@@ -2,32 +2,23 @@
 set -eu
 export LC_ALL=C
 dir=${1:?не задан каталог бинарников}
-maps=${2:?не задан каталог карт линковки}
 
 for component in r2o-controller r2o-datapath r2o-panel r2o-telegram r2o-manager r2o-fetch r2o-detect; do
     binary="$dir/$component"
-    readelf -hW "$binary" >/dev/null
-    prefix=$(printf '%s' "$component" | tr - _)
-    set -- "$maps"/"$prefix"-*.map "$maps"/"$component"-*.map "$maps/$component.map"
-    map=
-    for candidate do
-        [ -s "$candidate" ] || continue
-        if [ -n "$map" ]; then
-            echo "$component: несколько карт линковки ELF" >&2
-            exit 1
-        fi
-        map=$candidate
-    done
-    if [ -z "$map" ]; then
-        echo "$component: отсутствует карта линковки ELF" >&2
-        ls -la "$maps" >&2
+    if ! readelf -SW "$binary" | grep -q '\.symtab'; then
+        echo "$component: нужна таблица ELF-символов до strip" >&2
         exit 1
     fi
-    if ! grep -Eq '[[:space:]]__malloc_context$' "$map" ||
-        ! grep -Eq '[[:space:]]__libc_malloc_impl$' "$map" ||
-        grep -qi SmpAllocator "$map"; then
-        echo "$component: в итоговых секциях ELF не подтверждён mallocng" >&2
-        grep -E 'malloc|calloc|realloc|SmpAllocator' "$map" >&2 || :
+    symbols=$(readelf -sW "$binary")
+    for symbol in __libc_malloc_impl __malloc_context; do
+        if ! printf '%s\n' "$symbols" | awk -v name="$symbol" '$7 != "UND" && $8 == name { found = 1 } END { exit !found }'; then
+            echo "$component: не подтверждён символ mallocng $symbol" >&2
+            printf '%s\n' "$symbols" | awk '$8 ~ /malloc|calloc|realloc|SmpAllocator/ { print }' >&2
+            exit 1
+        fi
+    done
+    if printf '%s\n' "$symbols" | grep -qi SmpAllocator; then
+        echo "$component: обнаружен Zig SmpAllocator" >&2
         exit 1
     fi
     printf '%s: musl mallocng\n' "$component"
