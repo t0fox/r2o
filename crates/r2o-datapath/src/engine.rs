@@ -489,6 +489,10 @@ impl Default for TcpSessions {
 }
 
 impl TcpSessions {
+    pub fn diagnostic_capacity(&self) -> (usize, usize) {
+        (self.flows.len(), self.flows.capacity())
+    }
+
     /// Создать таблицу TCP-потоков заданного размера с проверкой выделения памяти.
     pub fn try_with_capacity(flow_capacity: R2oFlowCapacity) -> Result<Self, TryReserveError> {
         let mut flows = HashMap::new();

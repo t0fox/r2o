@@ -27,6 +27,14 @@ target_env=$(printf '%s' "$TARGET" | tr '-' '_')
 cargo_target_env=$(printf '%s' "$target_env" | tr '[:lower:]' '[:upper:]')
 cc="$ROOT/scripts/ci-zig-cross-cc.sh"
 export ZIG_TARGET ZIG_CPU R2O_ZIG_LINKER=1
+zig_version=$("$ZIG" version)
+R2O_BUILD_TOOLCHAIN="Zig $zig_version"
+case "$zig_version" in
+    0.14.1|0.15.2) R2O_BUILD_ALLOCATOR=musl-mallocng ;;
+    0.16.0) R2O_BUILD_ALLOCATOR=zig-smp ;;
+    *) R2O_BUILD_ALLOCATOR= ;;
+esac
+export R2O_BUILD_TOOLCHAIN R2O_BUILD_ALLOCATOR
 export "CC_$target_env=$cc"
 export "CARGO_TARGET_${cargo_target_env}_LINKER=$cc"
 export "CARGO_TARGET_${cargo_target_env}_RUSTFLAGS=-Ctarget-feature=+crt-static -Clink-self-contained=no -Crelocation-model=static"

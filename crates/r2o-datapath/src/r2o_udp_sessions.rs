@@ -165,6 +165,10 @@ pub struct R2oUdpSessions {
 }
 
 impl R2oUdpSessions {
+    pub fn diagnostic_capacity(&self) -> (usize, usize) {
+        (self.flows.len(), self.flows.capacity())
+    }
+
     pub fn new() -> Result<Self, TryReserveError> {
         Self::with_capacity(R2oFlowCapacity::default())
     }

@@ -2020,12 +2020,28 @@ mod app {
                 next_diagnostics = now + Duration::from_secs(5);
                 if dir.join("enabled").is_file() && !dir.join("paused").is_file() {
                     let stats = socket.stats();
+                    let udp_stats = udp_sessions.stats();
+                    let start_ticks = r2o_proc_start_ticks();
+                    let _ = r2k_core::memory_diagnostics::publish(
+                        &output.with_extension("memory"),
+                        start_ticks,
+                    );
                     let health = serde_json::json!({
                         "pid": std::process::id(),
+                        "start_ticks": start_ticks,
                         "queue": queue,
-                        "flows": tcp_sessions.len() + udp_sessions.stats().flows,
+                        "flows": tcp_sessions.len() + udp_stats.flows,
                         "tcp_flows": tcp_sessions.len(),
-                        "udp_flows": udp_sessions.stats().flows,
+                        "udp_flows": udp_stats.flows,
+                        "memory_tables": {
+                            "TCP": tcp_sessions.diagnostic_capacity(),
+                            "UDP": udp_sessions.diagnostic_capacity(),
+                            "QUIC": quic_sessions.diagnostic_capacity(),
+                            "conntrack": conntrack_gate.diagnostic_capacity(),
+                            "RPDB": [effective_routes.len(), effective_routes.capacity()],
+                            "pending-applied": [pending_applied.len(), pending_applied.capacity()],
+                            "pending-udp": [pending_udp_releases.len(), pending_udp_releases.capacity()],
+                        },
                         "journal_entries": flow_journal.count(),
                         "conntrack_netlink_up": ct_up,
                         "nfqueue": {

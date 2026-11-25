@@ -17,6 +17,7 @@ pub struct HealthWriter {
     path: PathBuf,
     start_ticks: u64,
     boot_id: String,
+    last_memory: std::sync::Mutex<u64>,
 }
 
 impl HealthWriter {
@@ -25,6 +26,7 @@ impl HealthWriter {
             path,
             start_ticks: self_start_ticks()?,
             boot_id: boot_id()?,
+            last_memory: std::sync::Mutex::new(0),
         })
     }
 
@@ -57,7 +59,15 @@ impl HealthWriter {
         std::io::Write::write_all(&mut file, body.as_bytes())?;
         drop(file);
         match std::fs::rename(&temporary, &self.path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                r2k_core::memory_diagnostics::from_heartbeat(
+                    &self.path,
+                    self.start_ticks,
+                    heartbeat_ms,
+                    &mut self.last_memory.lock().expect("memory heartbeat clock lock"),
+                );
+                Ok(())
+            }
             Err(error) => {
                 let _ = std::fs::remove_file(&temporary);
                 Err(error)

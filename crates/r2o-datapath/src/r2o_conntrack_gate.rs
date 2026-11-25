@@ -103,6 +103,10 @@ enum Confirmation {
 }
 
 impl R2oConntrackGate {
+    pub fn diagnostic_capacity(&self) -> (usize, usize) {
+        (self.entries.len(), self.entries.capacity())
+    }
+
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_idle_timeout(capacity, R2O_CONNTRACK_CACHE_IDLE)
     }

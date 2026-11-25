@@ -18,4 +18,5 @@ pub mod tls;
 pub mod udp_plan;
 pub mod wire;
 
+pub mod memory_diagnostics;
 pub mod meta;
