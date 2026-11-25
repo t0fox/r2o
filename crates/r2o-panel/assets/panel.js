@@ -3613,15 +3613,39 @@
       if ((row.protocol === "doh" || row.protocol === "doh3") && row.path && row.path !== "/") value += str(row.path);
       return value;
     }
+    var openProfiles = new Set();
+    var focusedProfile;
+    [root, extra].forEach(function (group) {
+      group.querySelectorAll(".dns-service-diagnostics").forEach(function (disclosure) {
+        if (disclosure.open) openProfiles.add(disclosure.dataset.profile);
+        if (doc.activeElement === disclosure.firstElementChild) focusedProfile = disclosure.dataset.profile;
+      });
+    });
+    var summaryToFocus;
     var items = rows.map(function (row, index) {
       var view = views[index];
       var item = el(doc, "li", "card dns-service");
+      var disclosure = el(doc, "details", "dns-service-diagnostics");
+      var profile = str(row.profile_id || JSON.stringify([row.protocol, row.host, row.port, row.path]));
+      disclosure.dataset.profile = profile;
+      disclosure.open = openProfiles.has(profile);
+      var heading = el(doc, "summary", "dns-service-summary");
       var protocol = protocols[row.protocol] || str(row.protocol);
-      if (view.connections.length === 1) protocol += " · IPv" + view.connections[0].connection.family;
-      add(item, el(doc, "span", "dns-service-protocol", protocol), statusChip(view.phase),
-        el(doc, "h3", "dns-service-host", str(row.sni || row.host)));
+      var singleConnection = view.connections.length === 1 ? view.connections[0] : null;
+      if (singleConnection) protocol += " · IPv" + singleConnection.connection.family;
+      var state = el(doc, "span", "dns-service-state");
+      var latency = singleConnection && singleConnection.connection.answer_rtt_ms;
+      if (typeof latency === "number" && (view.phase === "available" || view.phase === "recovered")) {
+        state.appendChild(el(doc, "span", "dns-service-latency", latency + " мс"));
+      }
+      state.appendChild(statusChip(view.phase));
+      add(heading, el(doc, "span", "dns-service-protocol", protocol),
+        el(doc, "span", "dns-service-host", str(row.sni || row.host)), state, icon(doc, "chevron"));
+      disclosure.appendChild(heading);
+      if (profile === focusedProfile) summaryToFocus = heading;
+      var body = el(doc, "div", "dns-service-body");
       var active = view.active;
-      add(item, el(doc, "p", "dns-service-active",
+      body.appendChild(el(doc, "p", "dns-service-active",
         active === true ? "Служба активна" : active === false ? "Служба выключена" : "Состояние службы неизвестно"));
 
       var paths = el(doc, "div", "dns-service-connections");
@@ -3665,20 +3689,20 @@
         }
         paths.appendChild(path);
       });
-      var diagnostics = el(doc, "details", "dns-service-diagnostics");
       var usage = inventory ? row.usage_observed : null;
-      add(diagnostics, el(doc, "summary", "", "Диагностика DNS"), details([
+      add(body, paths, details([
         ["Настройка", inventory && row.configured === true ? "Настроен" : "Неизвестно"],
         ["Запросы", usage === true ? "Подтверждены" : usage === false ? "Не замечены" : "Неизвестно"]
       ]));
-      add(item, paths, diagnostics);
+      disclosure.appendChild(body);
+      item.appendChild(disclosure);
       return item;
     });
     var visible = 3;
     var extraCount = Math.max(0, items.length - visible);
     more.hidden = extraCount === 0;
     if (extraCount) {
-      var label = "Ещё " + count(extraCount, "точка подключения", "точки подключения", "точек подключения");
+      var label = "Ещё " + count(extraCount, "профиль", "профиля", "профилей");
       var failed = views.slice(visible).filter(function (view) {
         return view.phase === "unavailable";
       }).length;
@@ -3687,6 +3711,7 @@
     }
     root.replaceChildren.apply(root, items.slice(0, visible));
     extra.replaceChildren.apply(extra, items.slice(visible));
+    if (summaryToFocus) summaryToFocus.focus({ preventScroll: true });
   };
 
   App.prototype.renderDiagnostics = function (m) {
@@ -3969,7 +3994,7 @@
   if (global && global.document && global.document.getElementById) {
     var boot = function () {
       var doc = global.document;
-      doc.querySelectorAll(".panel-select").forEach(function (select) { styleSelect(select, doc); });
+      doc.querySelectorAll(".panel-select:not([data-native-select])").forEach(function (select) { styleSelect(select, doc); });
       doc.querySelectorAll("button.brand, button.mast-brand").forEach(function (button) {
         button.addEventListener("click", async function () {
           if (button.hasAttribute("aria-busy")) return;

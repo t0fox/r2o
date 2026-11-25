@@ -15,8 +15,8 @@
     { key: "vm_data", label: "VmData", color: "vm_data" },
     { key: "anonymous", label: "Anonymous", color: "anonymous" },
     { key: "private_dirty", label: "Private_Dirty", color: "private_dirty" },
-    { key: "heap_live", label: "Живые аллокации", color: "catalog" },
-    { key: "heap_peak", label: "Пик аллокаций", color: "snapshot" },
+    { key: "heap_live", label: "Живые аллокации", color: "heap_live" },
+    { key: "heap_peak", label: "Пик аллокаций", color: "heap_peak" },
     { key: "catalog", label: "Каталог", color: "catalog" },
     { key: "http", label: "HTTP", color: "http" },
     { key: "snapshot", label: "Снимки", color: "snapshot" },
@@ -241,7 +241,7 @@
       }));
     }
     select.value = selected;
-    select.hidden = names.length < 2;
+    select.parentElement.hidden = names.length < 2;
     return selected;
   }
   function rowsInRange(rows, hours, intervalMs) {
@@ -316,7 +316,9 @@
       item.translate = false;
       return item;
     }));
-    doc.getElementById("diagnostic-series-options").hidden = !Object.values(available).some(Boolean);
+    var hasSeries = Object.values(available).some(Boolean);
+    legend.hidden = !active.length;
+    doc.getElementById("diagnostic-series-options").hidden = !hasSeries;
     var all = [];
     active.forEach(function (metric) { rows.forEach(function (row) { if (number(row[metric.key]) !== null) all.push(row[metric.key]); }); });
     chart.replaceChildren();
@@ -325,13 +327,13 @@
     if (!rows.length || !active.length || !all.length) {
       chart.setAttribute("hidden", "");
       empty.hidden = false;
-      empty.textContent = !active.length && rows.length ? "Выберите доступный показатель памяти." : "Для выбранного периода нет доступных снимков памяти.";
+      empty.textContent = hasSeries ? "Включите линию в разделе «Показатели графика»." : "Для выбранного процесса пока нет снимков памяти.";
       return { rows: rows, delta: null, axisUnit: null };
     }
     chart.removeAttribute("hidden"); empty.hidden = true;
     var width = size.width, height = size.height;
     chart.setAttribute("viewBox", "0 0 " + width + " " + height);
-    var left = width < 400 ? 40 : 56, right = width - 10, top = 12, bottom = height - 30;
+    var left = width < 400 ? 46 : 56, right = width - 10, top = 12, bottom = height - 26;
     var min = Math.min.apply(Math, all), max = Math.max.apply(Math, all);
     var scale = max >= 1048576 ? 1048576 : max >= 1024 ? 1024 : 1;
     var axisUnit = scale === 1048576 ? "МиБ" : scale === 1024 ? "КиБ" : "Б";
@@ -811,6 +813,7 @@
     technical.hidden = !technical.querySelector(".diag-card:not([hidden])");
     var chart = drawMemory(doc, graphRows, range, intervalMs, size, PROCESS_LABELS[process]);
     setText(doc, "diagnostic-memory-interval", intervalText(intervalMs, chart.axisUnit));
+    doc.getElementById("diagnostic-history-coverage").hidden = !chart.xFor;
     setText(doc, "diagnostic-history-coverage", chart.rows.length === 1 ?
       "Пока один снимок. Линия появится после следующего." : coverageText(chart.rows, range));
     var change = doc.getElementById("diagnostic-rss-change");
@@ -912,7 +915,7 @@
       if (latest && latest.at !== drawnAt && latest.at !== null) {
         if (drawnAt !== undefined && visible() && !graph.hidden && !root.matchMedia("(prefers-reduced-motion: reduce)").matches) {
           graph.getAnimations().forEach(function (animation) { animation.cancel(); });
-          graph.animate([{ opacity: .76 }, { opacity: 1 }], { duration: 210, easing: "ease-out" });
+          graph.animate([{ opacity: .76 }, { opacity: 1 }], { duration: 180, easing: "ease-out" });
         }
         drawnAt = latest.at;
       }

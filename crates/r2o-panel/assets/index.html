@@ -406,12 +406,17 @@
                   <h4 id="diagnostic-memory-title">История памяти</h4>
                   <p id="diagnostic-memory-interval">Интервал указан в отчёте · значения в МиБ</p>
                 </div>
-                <select id="diagnostic-memory-process" class="panel-select" aria-label="Процесс для графика памяти" hidden>
-                  <option value="r2o-controller">Контроллер</option>
-                </select>
-                <div class="diag-range" role="group" aria-label="Период графика памяти">
-                  <button type="button" data-memory-range="2" aria-pressed="true">2 часа</button>
-                  <button type="button" data-memory-range="24" aria-pressed="false">24 часа</button>
+                <div class="diag-chart-controls">
+                  <div class="panel-native-select" hidden>
+                    <select id="diagnostic-memory-process" class="panel-select" aria-label="Процесс" data-native-select>
+                      <option value="r2o-controller">Контроллер</option>
+                    </select>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron"/></svg>
+                  </div>
+                  <div class="diag-range" role="group" aria-label="Период графика памяти">
+                    <button type="button" data-memory-range="2" aria-pressed="true">2 часа</button>
+                    <button type="button" data-memory-range="24" aria-pressed="false">24 часа</button>
+                  </div>
                 </div>
               </div>
               <dl class="diag-stat-strip">
@@ -424,8 +429,8 @@
                 <p id="diagnostic-history-coverage" class="diag-history-note">Длительность истории определяется по снимкам.</p>
               </div>
               <div class="diag-plot" id="diagnostic-plot">
-                <svg id="diagnostic-memory-chart" class="diag-memory-chart" viewBox="0 0 320 240" role="img" aria-label="Память контроллера" hidden></svg>
-                <p id="diagnostic-memory-empty" class="diag-empty" hidden>Для выбранного периода нет доступных снимков памяти.</p>
+                <svg id="diagnostic-memory-chart" class="diag-memory-chart" viewBox="0 0 320 240" role="img" aria-label="История памяти" hidden></svg>
+                <p id="diagnostic-memory-empty" class="diag-empty" role="status" hidden>Для выбранного периода нет доступных снимков памяти.</p>
               </div>
               <label class="diag-cursor" id="diagnostic-cursor" hidden>
                 <span>Снимок</span>
@@ -448,6 +453,17 @@
                   <label data-series-option="tracked_tcp"><input type="checkbox" data-memory-series="tracked_tcp"><span>TCP</span></label>
                   <label data-series-option="tracked_quic"><input type="checkbox" data-memory-series="tracked_quic"><span>QUIC</span></label>
                   <label data-series-option="tracked_tls"><input type="checkbox" data-memory-series="tracked_tls"><span>TLS</span></label>
+                </div>
+              </details>
+              <details id="diagnostic-process-detail" class="diag-series-options" hidden>
+                <summary>Подробности процесса</summary>
+                <dl id="diagnostic-process-facts" class="diag-facts"></dl>
+                <p id="diagnostic-process-coverage" class="diag-history-note"></p>
+                <div class="table-scroll" hidden>
+                  <table class="diag-memory">
+                    <thead><tr><th scope="col">Таблица</th><th scope="col">Занято</th><th scope="col">Ёмкость</th></tr></thead>
+                    <tbody id="diagnostic-process-tables"></tbody>
+                  </table>
                 </div>
               </details>
             </section>
@@ -473,17 +489,6 @@
                     <table class="diag-memory"><thead><tr><th scope="col">Процесс</th><th scope="col">RSS</th><th scope="col">RssAnon</th><th scope="col">Изменение RSS</th></tr></thead><tbody id="diagnostic-processes"></tbody></table>
                   </div>
                   <p id="diagnostic-process-note" class="diag-history-note">Изменение считается от первого сохранённого снимка процесса.</p>
-                  <details id="diagnostic-process-detail" class="diag-series-options" hidden>
-                    <summary>Сборка, аллокации и таблицы выбранного процесса</summary>
-                    <dl id="diagnostic-process-facts" class="diag-facts"></dl>
-                    <p id="diagnostic-process-coverage" class="diag-history-note"></p>
-                    <div class="table-scroll" hidden>
-                      <table class="diag-memory">
-                        <thead><tr><th scope="col">Таблица</th><th scope="col">Занято</th><th scope="col">Ёмкость</th></tr></thead>
-                        <tbody id="diagnostic-process-tables"></tbody>
-                      </table>
-                    </div>
-                  </details>
                 </section>
 
                 <section class="diag-card diag-workers-panel" aria-labelledby="diagnostic-workers-title">

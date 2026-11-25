@@ -570,7 +570,7 @@ esac
   assert.equal(await evaluate("document.querySelector('[data-nav=now]').getAttribute('aria-current')"), "page");
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('[2001:db8::9]:853')"), true);
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('17 мс')"), true);
-  assert.equal(await evaluate("document.querySelector('#dns-protection-more summary').textContent"), "Ещё 1 точка подключения · с ошибкой 1");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-more summary').textContent"), "Ещё 1 профиль · с ошибкой 1");
   await evaluate("document.querySelector('#dns-protection-more summary').click()");
   assert.equal(await evaluate("document.querySelector('#dns-protection-more').open && document.querySelector('#dns-protection-extra .meta-chip').textContent === 'Недоступен'"), true);
   const dot = liveState.dns_services[0];
@@ -605,10 +605,19 @@ esac
   assert.equal(await evaluate("document.querySelector('#dns-protection-extra').textContent.includes('[2001:db8::54]:853')"), true);
   await evaluate("document.querySelector('#dns-protection-list .dns-service-diagnostics summary').click()");
   assert.equal(await evaluate("document.querySelector('#dns-protection-list .dns-service-diagnostics').open"), true);
+  assert.equal(await evaluate(`(() => {
+    const first = document.querySelector('#dns-protection-list .dns-service-diagnostics');
+    const next = document.querySelectorAll('#dns-protection-list .dns-service-diagnostics')[1];
+    return first.firstElementChild.tagName === "SUMMARY"
+      && first.querySelector('.dns-service-body').getClientRects().length > 0
+      && next.querySelector('.dns-service-body').getClientRects().length === 0;
+  })()`), true, "параметры каждого DNS-профиля раскрываются независимо");
   liveState.dns_source_status = "unknown";
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("document.querySelector('#dns-protection-summary').textContent.includes('неизвестно')"), "потеря системного источника");
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('22 мс')"), true, "прошлый достоверный результат остаётся видимым");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-list .dns-service-diagnostics').open"), true,
+    "обновление данных сохраняет раскрытые подробности профиля");
   liveState.dns_source_status = "known";
   liveState.dns_services[3] = { ...explicitV6, service_active: false };
   dot.connections.pop();
@@ -711,6 +720,9 @@ esac
     assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('.index a')].every(el => { const rect = el.getBoundingClientRect(); return rect.width >= 44 && rect.right <= innerWidth && rect.bottom <= innerHeight; })"), true, `обзор и навигация помещаются на экране ${width} px`);
   }
   await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+  assert.equal(await evaluate(`document.querySelectorAll('#dns-protection-list > li')[1]
+    .querySelector('.dns-service-body').getClientRects().length`), 0, "на телефоне параметры DNS скрыты при загрузке");
+  await evaluate("document.querySelectorAll('#dns-protection-list > li')[1].querySelector('summary').click()");
   assert.equal(await evaluate(`(() => {
     const row = document.querySelectorAll('#dns-protection-list > li')[1];
     const protocol = row.querySelector('.dns-service-protocol').getBoundingClientRect();
@@ -721,6 +733,7 @@ esac
     return status.left > protocol.right && status.bottom <= host.top
       && host.bottom < address.top && address.bottom < details.top && row.scrollWidth <= row.clientWidth;
   })()`), true, "на телефоне длинное имя, адрес, план и статус помещаются в карточку");
+  await evaluate("document.querySelectorAll('#dns-protection-list > li')[1].querySelector('summary').click()");
   if (captureDir) {
     await evaluate("document.querySelector('#dns-protection').scrollIntoView()");
     await delay(350);
@@ -761,7 +774,8 @@ esac
     samples: Array.from({ length: 18 }, (_, i) => ({
       ...common, at: now - (17 - i) * 60,
       processes: [{ ...common.processes[0], rss_kib: 4879 + [0, 35, 13, 126, 109, 153][i % 6] + i * 23,
-        anon_kib: 1120 + i * 7 }]
+        anon_kib: 1120 + i * 7 },
+      { name: "r2o-datapath", pid: 20, start_ticks: 124, rss_kib: 6280 + i * 6, anon_kib: 2010 + i }]
     })),
     memory_tracking: { sites: [{ name: "Пустой участок", live_bytes: 0, peak_bytes: 0, created: 0 }] },
     madvise: { successes: 0, failures: 0, requested_bytes: 0, errno: [] },
@@ -779,6 +793,20 @@ esac
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.phase === 'ready'"), "первый отчёт появляется после короткого опроса");
   assert.equal(await evaluate("document.querySelector('#diagnostic-data').hidden"), false, "появились данные");
   assert.equal(await evaluate("document.querySelector('#diagnostic-memory-chart').getBoundingClientRect().height > 0"), true, "график виден после первого отчёта");
+  assert.equal(await evaluate(`(() => {
+    const process = document.querySelector('#diagnostic-memory-process');
+    return process.options.length === 2 && process.getClientRects().length === 1
+      && !document.querySelector('#diagnostic-memory-process-trigger');
+  })()`), true, "диагностика показывает один нативный выбор процесса");
+  await evaluate(`(() => {
+    const process = document.querySelector('#diagnostic-memory-process');
+    process.value = 'r2o-datapath'; process.dispatchEvent(new Event('change'));
+  })()`);
+  assert.match(await evaluate("document.querySelector('#diagnostic-memory-chart').getAttribute('aria-label')"), /^Датапат/);
+  await evaluate(`(() => {
+    const process = document.querySelector('#diagnostic-memory-process');
+    process.value = 'r2o-controller'; process.dispatchEvent(new Event('change'));
+  })()`);
   await evaluate("document.querySelector('#diagnostic-event-filter-trigger').scrollIntoView({block:'center', behavior:'instant'})");
   await evaluate("document.querySelector('#diagnostic-event-filter-trigger').click()");
   await waitFor(() => evaluate("document.querySelector('#diagnostic-event-filter-options').matches(':popover-open')"), "меню фильтра открывается в панели");
