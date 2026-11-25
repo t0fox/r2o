@@ -21,6 +21,7 @@ pub const R2O_JOURNAL_REFUSE_TOO_LONG: u8 = 3;
 pub const R2O_JOURNAL_REFUSE_DAMAGED: u8 = 4;
 pub const R2O_JOURNAL_REFUSE_NOT_APPLIED: u8 = 5;
 pub const R2O_JOURNAL_REFUSE_FLOW_UNFIT: u8 = 6;
+pub const R2O_JOURNAL_REFUSE_ROUTE: u8 = 7;
 const R2O_JOURNAL_WIRE_VERSION: u8 = 1;
 const R2O_JOURNAL_ENTRY_BODY_LEN: usize = 205;
 
@@ -51,6 +52,7 @@ pub fn r2o_refuse_text(code: u8) -> &'static str {
         4 => "поток испорчен недоисполнением плана",
         5 => "исполнитель отверг план на этом пакете (причина — в записи)",
         6 => "поток клиента не несёт того, что план требует (причина — в записи)",
+        R2O_JOURNAL_REFUSE_ROUTE => "маршруты локальной пробы и raw различаются",
         _ => "отказ без кода",
     }
 }

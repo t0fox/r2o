@@ -31,6 +31,11 @@ Rust сохраняет первый снимок FastNAT до подтверж�
 переустанавливает правила после событий NDM и проверяет наличие ожидаемых
 правил в обоих семействах. Программный дифференциальный тест сравнивает
 стандартные и пользовательские селекторы PPE для IPv4 и IPv6.
+Из этой же ревизии для Route Gate использована обработка ошибок и повторное
+использование сокета из [`dump_rules`, `lookup_route` и `d2k_routemark_load`](https://github.com/necronicle/d2k/blob/8c6bcdc28b3aedeca8618ff645215bfd6408047c/datapath/routemark_nl.c).
+Фильтр по политике, метке и выходному интерфейсу из
+[`d2k_routemark_gate`](https://github.com/necronicle/d2k/blob/8c6bcdc28b3aedeca8618ff645215bfd6408047c/datapath/routemark.c)
+применяется перед дополнительными запросами эффективных маршрутов R2O.
 [MIT, Copyright (c) 2026 Necronicle](docs/licenses/d2k.txt).
 
 ## Telegram MTProto/WSS-прокси

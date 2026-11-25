@@ -384,12 +384,36 @@ pub struct R2oRoutePacket {
     pub output_ifindex: Option<u32>,
 }
 
+impl R2oRoutePacket {
+    fn local_probe(self, measure_mark: u32) -> bool {
+        self.mark
+            .is_some_and(|mark| mark != 0 && [self.probe_mark, measure_mark].contains(&mark))
+    }
+
+    // Пруф локальной пробы относится к её сокету и raw, пруф LAN — ко всем трактам.
+    fn route_marks(self, measure_mark: u32) -> [u32; 4] {
+        let mark = self.mark.unwrap_or(0);
+        if self.local_probe(measure_mark) {
+            [mark, mark, self.datapath_mark, 0]
+        } else {
+            let probe = if self.probe_mark == 0 {
+                self.datapath_mark
+            } else {
+                self.probe_mark
+            };
+            [mark, probe, self.datapath_mark, measure_mark]
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct R2oRouteRuleContext {
     mark: u32,
     mask: u32,
     contextual: bool,
     opaque: bool,
+    transit_only: bool,
+    invert: bool,
 }
 
 impl R2oRouteRuleContext {
@@ -397,7 +421,9 @@ impl R2oRouteRuleContext {
         let matches = marks.map(|mark| ((mark ^ self.mark) & self.mask) == 0);
         // При одинаковом назначении селектор по метке даёт одинаковый
         // ответ для трёх трактов, в том числе у инвертированных правил.
-        matches[0] != matches[1] || matches[0] != matches[2] || self.contextual && matches[0]
+        matches[0] != matches[1]
+            || matches[0] != matches[2]
+            || self.contextual && (matches[0] || self.invert)
     }
 }
 
@@ -444,27 +470,15 @@ impl R2oRouteGate {
         if rules.is_empty() {
             return R2oPolicyCheck::MatchingSelectors;
         }
-        let mark = packet.mark.unwrap_or(0);
-        let local =
-            mark != 0 && [packet.probe_mark, packet.datapath_mark, measure_mark].contains(&mark);
-        let client = if local {
-            self.r2o_policy
-                .filter(|policy| policy.found)
-                .map_or(0, |policy| policy.mark)
-        } else {
-            mark
-        };
-        let probe = if packet.probe_mark == 0 {
-            packet.datapath_mark
-        } else {
-            packet.probe_mark
-        };
-        let marks = [client, probe, packet.datapath_mark];
+        let local = packet.local_probe(measure_mark);
+        let [client, probe, raw, measure] = packet.route_marks(measure_mark);
         let mut check = R2oPolicyCheck::MatchingSelectors;
         for rule in rules {
-            if rule.may_separate(marks)
-                || measure_mark != 0
-                    && rule.may_separate([client, measure_mark, packet.datapath_mark])
+            if local && rule.transit_only {
+                continue;
+            }
+            if rule.may_separate([client, probe, raw])
+                || measure != 0 && rule.may_separate([client, measure, raw])
             {
                 if rule.opaque {
                     return R2oPolicyCheck::Unavailable;
@@ -737,6 +751,7 @@ pub enum R2oRouteLookup {
 #[cfg(target_os = "linux")]
 pub struct R2oRouteMonitor {
     watch: Option<std::os::fd::OwnedFd>,
+    request_socket: Option<std::os::fd::OwnedFd>,
     sequence: u32,
 }
 
@@ -745,6 +760,7 @@ impl Default for R2oRouteMonitor {
     fn default() -> Self {
         Self {
             watch: None,
+            request_socket: None,
             sequence: 1,
         }
     }
@@ -936,18 +952,18 @@ impl R2oRouteMonitor {
                     // C `lookup_route`: маршрут без устройства — rc=2.
                     lookup_ok = true;
                     route_status = R2oRoutePartStatus::NoDevice;
-                    gate.r2o_set_default_ifindices(family, None);
+                    changed |= gate.r2o_set_default_ifindices(family, None);
                 }
                 Ok(R2oRouteLookup::Unicast(ifindices)) => {
                     lookup_ok = true;
                     route_status = R2oRoutePartStatus::Read;
-                    gate.r2o_set_default_ifindices(family, Some(ifindices));
+                    changed |= gate.r2o_set_default_ifindices(family, Some(ifindices));
                 }
                 Ok(R2oRouteLookup::NoRoute) => {
                     // C rc=3: известный пустой список устройств.
                     lookup_ok = true;
                     route_status = R2oRoutePartStatus::Read;
-                    gate.r2o_set_default_ifindices(family, Some(Vec::new()));
+                    changed |= gate.r2o_set_default_ifindices(family, Some(Vec::new()));
                 }
                 Ok(R2oRouteLookup::Pending) => errors.push(format!(
                     "маршрут {family:?}: ядро не ответило на одиночный поиск"
@@ -965,7 +981,9 @@ impl R2oRouteMonitor {
                 }
             }
         }
+        self.request_socket = None;
         let mut status = status;
+        status.changed = changed;
         status.v4_route = route4;
         status.v6_route = route6;
         status.first_error = errors.first().cloned();
@@ -991,7 +1009,7 @@ impl R2oRouteMonitor {
                 Err(R2oRouteParseError::Kernel(code)) if r2o_rules_error_is_empty_success(code) => {
                     selectors.clear();
                     found = 0;
-                    context = None;
+                    context = Some(Vec::new());
                     return Ok(true);
                 }
                 Err(error) => return Err(r2o_parse_io_error(error)),
@@ -1020,7 +1038,15 @@ impl R2oRouteMonitor {
         self.r2o_receive_request(request, R2O_LOOKUP_BUFFER, R2O_LOOKUP_ROUNDS, |bytes| {
             result = match r2o_route_parse_lookup(bytes) {
                 Ok(result) => result,
-                Err(R2oRouteParseError::Kernel(-97 | -100 | -101 | -113)) => {
+                Err(R2oRouteParseError::Kernel(code))
+                    if [
+                        -libc::EAFNOSUPPORT,
+                        -libc::ENETDOWN,
+                        -libc::ENETUNREACH,
+                        -libc::EHOSTUNREACH,
+                    ]
+                    .contains(&code) =>
+                {
                     R2oRouteLookup::NoRoute
                 }
                 Err(error) => return Err(r2o_parse_io_error(error)),
@@ -1030,14 +1056,8 @@ impl R2oRouteMonitor {
         Ok(result)
     }
 
-    fn r2o_receive_request(
-        &mut self,
-        request: Vec<u8>,
-        buffer_len: usize,
-        rounds: usize,
-        mut parse: impl FnMut(&[u8]) -> std::io::Result<bool>,
-    ) -> std::io::Result<()> {
-        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    fn r2o_open_request_socket() -> std::io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::{FromRawFd, OwnedFd};
 
         let raw_fd = unsafe {
             libc::socket(
@@ -1078,7 +1098,23 @@ impl R2oRouteMonitor {
         if configured != 0 {
             return Err(std::io::Error::last_os_error());
         }
+        Ok(fd)
+    }
 
+    fn r2o_receive_request(
+        &mut self,
+        request: Vec<u8>,
+        buffer_len: usize,
+        rounds: usize,
+        mut parse: impl FnMut(&[u8]) -> std::io::Result<bool>,
+    ) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        // Как d2k_routemark_load: после ошибки закрываем сокет вместе с хвостом дампа.
+        let fd = match self.request_socket.take() {
+            Some(fd) => fd,
+            None => Self::r2o_open_request_socket()?,
+        };
         let mut destination: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         destination.nl_family = libc::AF_NETLINK as libc::sa_family_t;
         let sent = unsafe {
@@ -1115,6 +1151,7 @@ impl R2oRouteMonitor {
             }
             let datagram = &bytes[..received as usize];
             if r2o_check_route_reply(datagram, sequence)? && parse(datagram)? {
+                self.request_socket = Some(fd);
                 return Ok(());
             }
         }
@@ -1422,7 +1459,7 @@ pub fn r2o_route_lookup_request(family: R2oRouteFamily, sequence: u32) -> Vec<u8
 /// C `d2k_routemark_merge`: найденное сверх `D2K_ROUTEMARK_MAX=32`
 /// усекается, а не превращается в ошибку (`routemark.c:246-261`).
 fn r2o_rules_error_is_empty_success(code: i32) -> bool {
-    matches!(code, -97 | -95)
+    [-libc::EAFNOSUPPORT, -libc::EOPNOTSUPP].contains(&code)
 }
 
 /// C `d2k_routemark_merge`: `found` считает новые правила для успешных
@@ -1505,12 +1542,22 @@ pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRoute
         // src_len и TOS могут различаться между LAN, raw и локальным зондом.
         let mut contextual = message.body[2] != 0 || message.body[3] != 0;
         let mut opaque = false;
+        let invert = flags & R2O_FIB_RULE_INVERT != 0;
+        let mut transit_only = false;
         for (kind, value) in r2o_route_attributes(message.body, R2O_FIB_RULE_HEADER_LEN)? {
             match kind {
                 // Назначение одинаково; приоритет, таблица и протокол записи
                 // описывают правило, а не контекст отправителя.
-                0 | 1 | 2 | 4 | 6 | R2O_FRA_FWMARK | 15 | R2O_FRA_FWMASK | 18 | 21 => {}
-                13 | 14 if value == u32::MAX.to_ne_bytes() => {}
+                0 | 1 | 2 | 4 | 6 | R2O_FRA_FWMARK | 11 | 15 | R2O_FRA_FWMASK | 18 | 21 => {}
+                // RTM_GETROUTE сам учитывает suppress и выбирает следующее правило.
+                13 | 14 => {}
+                // Для локальных сокетов ядро использует iif lo, для LAN — входной интерфейс.
+                3 if value == b"lo\0" => contextual = true,
+                3 => {
+                    contextual = true;
+                    opaque = true;
+                    transit_only = !invert;
+                }
                 // Ограничение oif проверяет ядро при поиске маршрута.
                 17 => contextual = true,
                 // Без полного входного контекста нельзя моделировать iif, VRF, UID и L4.
@@ -1545,6 +1592,8 @@ pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRoute
                 mask: policy_mask,
                 contextual,
                 opaque,
+                transit_only,
+                invert,
             });
         }
         let Some(mark) = mark.or_else(|| mask.map(|_| 0)) else {
@@ -1839,6 +1888,54 @@ mod tests {
             gate.r2o_policy_check(packet, 0x2f),
             R2oPolicyCheck::Unavailable
         );
+    }
+
+    #[test]
+    fn local_probe_checks_its_own_marks_and_ingress_context() {
+        let family = R2oRouteFamily::Ipv4;
+        let mut gate = R2oRouteGate::default();
+        let probe = r2o_packet(true, Some(46), Some(5));
+        let lan = r2o_packet(true, None, Some(5));
+        gate.r2o_set_policy(Some(R2oRoutePolicy::new(true, 47, u32::MAX)));
+        let mut body = vec![0; R2O_FIB_RULE_HEADER_LEN];
+        body[0] = family.r2o_id();
+        r2o_test_attr(&mut body, R2O_FRA_FWMARK, &47_u32.to_ne_bytes());
+        let batch = r2o_route_parse_rules(&r2o_test_message(R2O_RTM_NEWRULE, &body)).unwrap();
+        gate.r2o_set_context(family, Some(batch.context));
+        assert_eq!(
+            gate.r2o_policy_check(probe, 47),
+            R2oPolicyCheck::MatchingSelectors
+        );
+        assert_eq!(
+            gate.r2o_policy_check(lan, 47),
+            R2oPolicyCheck::LookupRequired
+        );
+        assert_eq!(probe.route_marks(47), [46, 46, 45, 0]);
+
+        body.truncate(R2O_FIB_RULE_HEADER_LEN);
+        r2o_test_attr(&mut body, 3, b"lo\0");
+        let batch = r2o_route_parse_rules(&r2o_test_message(R2O_RTM_NEWRULE, &body)).unwrap();
+        gate.r2o_set_context(family, Some(batch.context));
+        assert_eq!(
+            gate.r2o_policy_check(lan, 47),
+            R2oPolicyCheck::LookupRequired
+        );
+
+        body.truncate(R2O_FIB_RULE_HEADER_LEN);
+        r2o_test_attr(&mut body, 3, b"vpn\0");
+        let batch = r2o_route_parse_rules(&r2o_test_message(R2O_RTM_NEWRULE, &body)).unwrap();
+        gate.r2o_set_context(family, Some(batch.context));
+        assert_eq!(
+            gate.r2o_policy_check(probe, 47),
+            R2oPolicyCheck::MatchingSelectors
+        );
+        assert_eq!(gate.r2o_policy_check(lan, 47), R2oPolicyCheck::Unavailable);
+
+        body[8..12].copy_from_slice(&R2O_FIB_RULE_INVERT.to_ne_bytes());
+        r2o_test_attr(&mut body, R2O_FRA_FWMARK, &100_u32.to_ne_bytes());
+        let batch = r2o_route_parse_rules(&r2o_test_message(R2O_RTM_NEWRULE, &body)).unwrap();
+        gate.r2o_set_context(family, Some(batch.context));
+        assert_eq!(gate.r2o_policy_check(lan, 47), R2oPolicyCheck::Unavailable);
     }
 
     fn route_status(
@@ -2988,9 +3085,9 @@ mod tests {
 
     #[test]
     fn r2o_коды_пустого_дампа_и_лимиты_lookup_совпадают_с_c() {
-        assert!(r2o_rules_error_is_empty_success(-97));
-        assert!(r2o_rules_error_is_empty_success(-95));
-        assert!(!r2o_rules_error_is_empty_success(-1));
+        assert!(r2o_rules_error_is_empty_success(-libc::EAFNOSUPPORT));
+        assert!(r2o_rules_error_is_empty_success(-libc::EOPNOTSUPP));
+        assert!(!r2o_rules_error_is_empty_success(-libc::EPERM));
         assert_eq!(R2O_LOOKUP_ROUNDS, 4);
         assert_eq!(R2O_LOOKUP_BUFFER, 8192);
         assert_eq!(R2O_DUMP_ROUNDS, 4096);
@@ -3002,7 +3099,7 @@ mod tests {
         let file = std::fs::File::open("/dev/null").unwrap();
         let monitor = R2oRouteMonitor {
             watch: Some(std::os::fd::OwnedFd::from(file)),
-            sequence: 1,
+            ..Default::default()
         };
         assert_eq!(
             monitor.r2o_drain_watch().unwrap(),

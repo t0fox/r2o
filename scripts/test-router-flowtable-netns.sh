@@ -416,6 +416,28 @@ if [ -n "${R2O_HTTP3_LAN_BIN:-}" ]; then
     sleep 1
     http3 198.18.0.2:443 4 1
     http3 '[2001:db8:2::2]:443' 6 1
+
+    # Локальный селектор применяется при RTM_GETROUTE и не требует отказа
+    # от плана, если у LAN и локальных сокетов одинаковый следующий узел.
+    ip route add 198.18.0.2/32 dev rwan table 101
+    ip -6 route add 2001:db8:2::2/128 dev rwan table 101
+    ip rule add priority 90 iif lo lookup 101
+    ip -6 rule add priority 90 iif lo lookup 101
+    sleep 1
+    # Первый Initial запускает асинхронную проверку; следующие потоки пользуются её результатом.
+    http3 198.18.0.2:443 4 0
+    http3 '[2001:db8:2::2]:443' 6 0
+    http3 198.18.0.2:443 4 1
+    http3 '[2001:db8:2::2]:443' 6 1
+
+    # Действительное расхождение на том же интерфейсе остаётся защищённым.
+    ip rule add priority 89 iif lo fwmark "$MARK" lookup 100
+    sleep 1
+    http3 198.18.0.2:443 4 0 1
+    ip rule del priority 89
+    ip rule del priority 90
+    ip -6 rule del priority 90
+    sleep 1
     http3 198.18.0.2:443 4 1 1 1
 fi
 

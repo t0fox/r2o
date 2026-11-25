@@ -36,21 +36,17 @@ pub struct R2oRouteCheck {
 impl R2oRouteCheck {
     pub fn new(packet: &[u8], context: R2oRoutePacket, measure_mark: u32) -> Option<Self> {
         let view = PacketView::parse(packet)?;
-        let client_mark = context.mark.unwrap_or(0);
+        let [client_mark, probe_mark, raw_mark, measure] = context.route_marks(measure_mark);
         Some(Self {
             source: view.src,
             destination: view.dst,
             output: context.output_ifindex.filter(|&index| index != 0)?,
             client_mark,
-            probe_mark: if context.probe_mark != 0 {
-                context.probe_mark
-            } else {
-                context.datapath_mark
-            },
-            measure_mark,
-            raw_mark: context.datapath_mark,
+            probe_mark,
+            measure_mark: measure,
+            raw_mark,
             tos: view.traffic_class & 0xfc,
-            local: client_mark != 0 && [context.probe_mark, measure_mark].contains(&client_mark),
+            local: context.local_probe(measure_mark),
         })
     }
 }

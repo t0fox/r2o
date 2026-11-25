@@ -2679,11 +2679,32 @@ mod app {
                                 | r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING
                         )
                     );
+                    // Сначала границы D2K: чужие потоки не занимают очередь RPDB.
+                    if r2o_packet_route_skip(
+                        &mut route_gate,
+                        &mut routed_flows,
+                        &packet,
+                        queue_hook,
+                        options.protocol_family,
+                        options.probe_mark,
+                        options.mark,
+                        now,
+                    ) {
+                        route_scope_packets_skipped = route_scope_packets_skipped.saturating_add(1);
+                        send_verdicts(
+                            &mut socket,
+                            std::slice::from_ref(&packet_id),
+                            NF_ACCEPT,
+                            false,
+                        )?;
+                        continue;
+                    }
                     let mut verified_path = false;
                     let mut rpdb_blocks_apply = false;
                     if router_runtime
                         && options.mode == RuntimeMode::Apply
                         && outbound
+                        && original_from_queue.is_some()
                         && (route_gate.r2o_policy_needs_check(route_family)
                             || rpdb_observe_only_flows.is_some())
                     {
@@ -2745,6 +2766,41 @@ mod app {
                             };
                             rpdb_checked_packets[index] =
                                 rpdb_checked_packets[index].saturating_add(1);
+                            if result == Some(R2oEffectiveRoute::Different)
+                                && controller_probe
+                                && let Some(bytes) = original_from_queue
+                                && tcp_hello_from_packet(bytes).is_some()
+                                && let Some(probe_plan) = name_plans
+                                    .select_with_quic_host_at_hook_probe(
+                                        bytes, None, queue_hook, true,
+                                    )
+                                && let Some(trial) = name_plans.applied_event_for_plan(
+                                    bytes,
+                                    next_execution_id,
+                                    probe_plan,
+                                )
+                                && trial.binding.temporary
+                            {
+                                // Известное расхождение маршрута завершает именно эту пробу.
+                                // Пока lookup не готов, доказательства отказа нет.
+                                let refused = RefusedEvent {
+                                    key: trial.key,
+                                    code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_ROUTE,
+                                    plan_id: trial.plan_id,
+                                    trial_id: trial.trial_id,
+                                    client_shape: Some(trial.binding.shape),
+                                    execution_id: None,
+                                    binding: None,
+                                };
+                                r2o_refuse_coded(
+                                    &mut control,
+                                    &mut flow_journal,
+                                    journal_timestamp(&journal_origin),
+                                    &refused,
+                                    None,
+                                    true,
+                                );
+                            }
                             verified_path = index == 0;
                             rpdb_blocks_apply = !verified_path;
                         }
@@ -2804,25 +2860,6 @@ mod app {
                             true,
                         ) != R2oUdpLateTail::Unhandled
                     {
-                        continue;
-                    }
-                    if r2o_packet_route_skip(
-                        &mut route_gate,
-                        &mut routed_flows,
-                        &packet,
-                        queue_hook,
-                        options.protocol_family,
-                        options.probe_mark,
-                        options.mark,
-                        now,
-                    ) {
-                        route_scope_packets_skipped = route_scope_packets_skipped.saturating_add(1);
-                        send_verdicts(
-                            &mut socket,
-                            std::slice::from_ref(&packet_id),
-                            NF_ACCEPT,
-                            false,
-                        )?;
                         continue;
                     }
                     let udp_admitted_from_queue = original_from_queue
