@@ -31,7 +31,7 @@ case "$page" in
         "$ZIG" cc -target aarch64-linux-musl -static -O2 -DEXPECTED_PAGE_SIZE=16384 "$src" -o "$work/initramfs/init"
         (cd "$work/initramfs" && find . -print | cpio -o -H newc) > "$work/initramfs.cpio"
         status=0
-        timeout 150 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 256M \
+        timeout 150 qemu-system-aarch64 -machine virt -cpu max -m 256M \
             -nographic -nodefaults -serial stdio -no-reboot -kernel "$work"/boot/vmlinuz-* \
             -initrd "$work/initramfs.cpio" -append 'console=ttyAMA0 rdinit=/init panic=1 quiet' \
             > "$work/console.log" 2>&1 || status=$?

@@ -896,6 +896,9 @@ impl Recorder {
             let linkage = process_memory::linkage(&base.join("exe"));
             if linkage != Some("static")
                 && let Some(build) = &mut build
+                && !build["allocator"]
+                    .as_str()
+                    .is_some_and(|name| name.starts_with("DSO "))
             {
                 build["allocator"] = Value::Null;
             }

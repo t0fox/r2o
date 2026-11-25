@@ -20,7 +20,8 @@ if ! rustup target list --installed | grep -qx "$TARGET"; then
     rustup target add "$TARGET"
 fi
 
-R2O_BUILD_TOOLCHAIN="Rust sysroot / GCC $("$LINKER" -dumpfullversion)"
+linker_version=$("$LINKER" --version | sed -n '1p')
+R2O_BUILD_TOOLCHAIN="Rust sysroot / $linker_version"
 export R2O_BUILD_TOOLCHAIN
 
 CARGO_TARGET_DIR="$TARGET_DIR" \

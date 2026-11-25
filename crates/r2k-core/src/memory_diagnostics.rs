@@ -15,6 +15,28 @@ pub const BUILD: Build = Build {
     allocator: option_env!("R2O_BUILD_ALLOCATOR"),
 };
 
+/// Resolves malloc to its provider at runtime for dynamically linked binaries.
+pub fn linked_allocator() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        // dladdr borrows the loader's DSO filename for the lifetime of that module.
+        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+        let malloc = libc::malloc as *const () as *const libc::c_void;
+        if unsafe { libc::dladdr(malloc, &mut info) } != 0 && !info.dli_fname.is_null() {
+            let path = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) };
+            if let Some(name) = path
+                .to_str()
+                .ok()
+                .and_then(|path| std::path::Path::new(path).file_name()?.to_str())
+                .filter(|name| name.contains(".so") && !name.contains(['\r', '\n']))
+            {
+                return Some(format!("DSO {name}"));
+            }
+        }
+    }
+    BUILD.allocator.map(str::to_owned)
+}
+
 #[derive(Clone, Copy)]
 pub struct Heap {
     pub bytes: usize,
@@ -50,7 +72,7 @@ pub fn publish(path: &std::path::Path, start_ticks: u64) -> std::io::Result<()> 
         writeln!(file, "{}", BUILD.target)?;
         writeln!(file, "{}", BUILD.rustc.unwrap_or(""))?;
         writeln!(file, "{}", BUILD.toolchain.unwrap_or(""))?;
-        writeln!(file, "{}", BUILD.allocator.unwrap_or(""))?;
+        writeln!(file, "{}", linked_allocator().as_deref().unwrap_or(""))?;
         if let Some(snapshot) = snapshot {
             writeln!(
                 file,

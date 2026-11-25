@@ -180,13 +180,13 @@ fn heap_payload(bytes: u64, objects: u64, peak_bytes: u64) -> Value {
 }
 
 pub(super) fn local_build() -> Value {
-    use r2k_core::memory_diagnostics::{BUILD, heap};
+    use r2k_core::memory_diagnostics::{BUILD, heap, linked_allocator};
 
     json!({
         "target": BUILD.target,
         "rustc": BUILD.rustc,
         "toolchain": BUILD.toolchain,
-        "allocator": BUILD.allocator,
+        "allocator": linked_allocator(),
         "heap": heap().map(|heap| heap_payload(heap.bytes as u64, heap.objects as u64, heap.peak_bytes as u64)),
     })
 }
