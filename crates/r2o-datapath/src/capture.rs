@@ -1363,6 +1363,64 @@ mod tests {
     }
 
     #[test]
+    fn reused_capture_slot_matches_a_fresh_byte_map() {
+        use super::{CaptureMode, CaptureSlot};
+
+        let now = Instant::now();
+        let mut slot = CaptureSlot::new(now);
+        let mut seed = 41_u32;
+        let mut next = |limit| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as usize % limit
+        };
+        let mut rejected = 0;
+        for generation in 0..128 {
+            slot.start(key(32000), generation, now, 0, CaptureMode::Tls, true);
+            let mut expected = [None; CAPTURE_BYTES];
+            let payload = [generation as u8; CAPTURE_BYTES];
+            assert!(slot.store(0, &payload[..2]));
+            expected[..2].fill(Some(generation as u8));
+
+            // Leave a hole at the start and exercise the last bitmap octet.
+            assert!(slot.store(CAPTURE_BYTES - 7, &payload[CAPTURE_BYTES - 7..]));
+            expected[CAPTURE_BYTES - 7..].fill(Some(generation as u8));
+            for round in 0..64 {
+                let offset = next(CAPTURE_BYTES);
+                let end = offset + (next(137) + 1).min(CAPTURE_BYTES - offset);
+                let mut input = payload[offset..end].to_vec();
+                if round == 31 {
+                    input[0] ^= 0xff;
+                }
+                let consistent = expected[offset..end]
+                    .iter()
+                    .zip(&input)
+                    .all(|(saved, &incoming)| saved.is_none_or(|saved| saved == incoming));
+                assert_eq!(
+                    slot.store(offset, &input),
+                    consistent,
+                    "generation {generation}, round {round}"
+                );
+                if !consistent {
+                    rejected += 1;
+                    break;
+                }
+                for (saved, incoming) in expected[offset..end].iter_mut().zip(input) {
+                    *saved = Some(incoming);
+                }
+                let prefix = expected.iter().take_while(|byte| byte.is_some()).count();
+                assert_eq!(usize::from(slot.contiguous), prefix);
+                assert!(
+                    slot.bytes[..prefix]
+                        .iter()
+                        .zip(&expected)
+                        .all(|(&byte, saved)| Some(byte) == *saved)
+                );
+            }
+        }
+        assert!(rejected > 0, "the workload must also reuse rejected slots");
+    }
+
+    #[test]
     fn capture_lifecycle_traces_match_d2o() {
         let hello = hello(32);
         let hash = hello
