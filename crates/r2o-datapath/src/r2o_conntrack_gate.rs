@@ -3,7 +3,7 @@
 use crate::conntrack::{R2oConntrackNatSource, R2oConntrackTuple, tuple_from_packet};
 use crate::engine::{PacketDecision, WirePacket};
 use crate::proc_nat::R2oProcNatLookup;
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,13 @@ const D2O_CONNTRACK_PATH: &str = "/proc/net/nf_conntrack";
 struct CachedEntry {
     status: CachedStatus,
     seen: Instant,
+}
+
+impl CachedEntry {
+    fn expired(self, now: Instant, idle_timeout: Duration) -> bool {
+        self.status == CachedStatus::Tracked
+            && now.saturating_duration_since(self.seen) >= idle_timeout
+    }
 }
 
 /// C `d2k_key`: состояние NAT принадлежит ПОТОКУ, а не направлению пакета.
@@ -106,17 +113,17 @@ impl R2oConntrackGate {
         now: Instant,
         query: &mut impl FnMut(&R2oConntrackTuple) -> R2oProcNatLookup,
     ) -> Confirmation {
-        self.entries.retain(|_, cached| {
-            cached.status == CachedStatus::NoConntrackTable
-                || now.saturating_duration_since(cached.seen) < self.idle_timeout
-        });
         let key = R2oFlowKey::r2o_from_tuple(tuple);
-        if let Some(cached) = self.entries.get_mut(&key) {
-            cached.seen = now;
-            return match cached.status {
-                CachedStatus::Tracked => Confirmation::Tracked,
-                CachedStatus::NoConntrackTable => Confirmation::NoConntrackTable,
-            };
+        if let Entry::Occupied(mut entry) = self.entries.entry(key) {
+            let cached = entry.get_mut();
+            if !cached.expired(now, self.idle_timeout) {
+                cached.seen = now;
+                return match cached.status {
+                    CachedStatus::Tracked => Confirmation::Tracked,
+                    CachedStatus::NoConntrackTable => Confirmation::NoConntrackTable,
+                };
+            }
+            entry.remove();
         }
         // C `session_packet` всегда передаёт first_packet=0 для TCP; API
         // остаётся безопасным, даже если вызывающий передаст 1.
@@ -161,12 +168,21 @@ impl R2oConntrackGate {
         if self.capacity == 0 {
             return;
         }
-        if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
-            if let Some(oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, cached)| cached.seen)
-                .map(|(key, _)| *key)
+        if self.entries.len() >= self.capacity {
+            // Reclaim all stale entries in one pass before evicting a live
+            // entry. Remember the oldest live entry during that same pass.
+            let mut oldest = None;
+            self.entries.retain(|key, cached| {
+                if cached.expired(now, self.idle_timeout) {
+                    return false;
+                }
+                if oldest.is_none_or(|(_, seen)| cached.seen < seen) {
+                    oldest = Some((*key, cached.seen));
+                }
+                true
+            });
+            if self.entries.len() >= self.capacity
+                && let Some((oldest, _)) = oldest
             {
                 self.entries.remove(&oldest);
             }
@@ -468,7 +484,7 @@ mod tests {
     use crate::engine::{PacketDecision, WirePacket};
     use crate::proc_nat::R2oProcNatLookup;
     use r2k_core::plan::EmitKind;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn tuple(protocol: u8) -> R2oConntrackTuple {
         R2oConntrackTuple {
@@ -493,6 +509,99 @@ mod tests {
         std::mem::swap(&mut tuple.source, &mut tuple.destination);
         std::mem::swap(&mut tuple.source_port, &mut tuple.destination_port);
         tuple
+    }
+
+    #[test]
+    fn reverse_hit_refreshes_tracked_entry_until_exact_idle_deadline() {
+        let mut gate = R2oConntrackGate::with_idle_timeout(2, Duration::from_secs(10));
+        let flow = tuple(17);
+        let start = Instant::now();
+        assert_eq!(
+            gate.confirm(flow, false, false, start, &mut |_| R2oProcNatLookup::Found(
+                mapped_source()
+            )),
+            Confirmation::Tracked
+        );
+        assert_eq!(
+            gate.confirm(
+                reverse_tuple(flow),
+                false,
+                false,
+                start + Duration::from_secs(9),
+                &mut |_| panic!("cache hit")
+            ),
+            Confirmation::Tracked
+        );
+        assert_eq!(
+            gate.confirm(
+                flow,
+                false,
+                false,
+                start + Duration::from_secs(19),
+                &mut |_| R2oProcNatLookup::Missing
+            ),
+            Confirmation::Missing
+        );
+        assert_eq!(gate.nat_stats(), (1, 1, 0, 0));
+    }
+
+    #[test]
+    fn insertion_reclaims_expired_entry_before_evicting_persistent_entry() {
+        let mut gate = R2oConntrackGate::with_idle_timeout(3, Duration::from_secs(10));
+        let persistent = tuple(17);
+        let expired = R2oConntrackTuple {
+            source_port: 51001,
+            ..persistent
+        };
+        let also_expired = R2oConntrackTuple {
+            source_port: 51003,
+            ..persistent
+        };
+        let incoming = R2oConntrackTuple {
+            source_port: 51002,
+            ..persistent
+        };
+        let start = Instant::now();
+        assert_eq!(
+            gate.confirm(persistent, false, false, start, &mut |_| {
+                R2oProcNatLookup::TableMissing
+            }),
+            Confirmation::NoConntrackTable
+        );
+        gate.confirm(
+            expired,
+            false,
+            false,
+            start + Duration::from_secs(1),
+            &mut |_| R2oProcNatLookup::Found(mapped_source()),
+        );
+        gate.confirm(
+            also_expired,
+            false,
+            false,
+            start + Duration::from_secs(1),
+            &mut |_| R2oProcNatLookup::Found(mapped_source()),
+        );
+        let now = start + Duration::from_secs(11);
+        assert_eq!(
+            gate.confirm(incoming, false, false, now, &mut |_| {
+                R2oProcNatLookup::Found(mapped_source())
+            }),
+            Confirmation::Tracked
+        );
+        assert_eq!(
+            gate.confirm(persistent, false, false, now, &mut |_| panic!(
+                "persistent cache hit"
+            )),
+            Confirmation::NoConntrackTable
+        );
+        assert_eq!(
+            gate.confirm(expired, true, false, now, &mut |_| panic!(
+                "first UDP packet bypasses lookup"
+            )),
+            Confirmation::FirstPacket
+        );
+        assert_eq!(gate.entries.len(), 2);
     }
 
     #[test]
