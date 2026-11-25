@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="crates/r2o-panel/assets/favicon.svg" width="80" height="80" alt="R2O">
+  <img src="docs/r2o-loop.gif" width="400" height="225" alt="R2O — анимированная петля">
   <h1>R2O</h1>
   <p><strong>Адаптивный сетевой обход на Rust</strong></p>
   <p>OpenWrt · ImmortalWrt · Keenetic</p>
