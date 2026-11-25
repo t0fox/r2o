@@ -21182,6 +21182,7 @@ group_block_proven: false,
         }
         let failure_key = r2o_discovery_failure_key(&target);
         let mut bypass_direct_clear = false;
+        let mut cleared_failure = false;
         let bypass_late_rst_only = self
             .cooldown_ring
             .endpoint_state(&failure_key, now)
@@ -21205,18 +21206,25 @@ group_block_proven: false,
                 }
             } else {
                 self.r2o_clear_failed_endpoint(&failure_key);
+                cleared_failure = true;
             }
         }
         if self.seen.contains(&target) && !bypass_direct_clear && !bypass_late_rst_only {
             return false;
         }
-        if self.r2o_reusable_task_slot(&task_key).is_none() {
-            return false;
-        }
-        self.r2o_reconcile_task_slots(now);
-        let Some((task_slot, evicted_watcher)) = self.r2o_reusable_task_slot(&task_key) else {
+        let Some(mut slot) = self.r2o_reusable_task_slot(&task_key) else {
             return false;
         };
+        // Reconciliation at entry already used this timestamp. Only an
+        // expired failure removed above can have freed another task slot.
+        if cleared_failure {
+            self.r2o_reconcile_task_slots(now);
+            let Some(reconciled) = self.r2o_reusable_task_slot(&task_key) else {
+                return false;
+            };
+            slot = reconciled;
+        }
+        let (task_slot, evicted_watcher) = slot;
         let jobs = Arc::clone(&self.jobs);
         let (queue, wake) = &*jobs;
         let mut queue = queue
