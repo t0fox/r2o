@@ -656,15 +656,11 @@ pub fn tuple_from_packet(packet: &[u8]) -> Option<R2oConntrackTuple> {
         return None;
     }
     let ports = packet.get(view.l4_offset..view.l4_offset.checked_add(4)?)?;
-    let mut source = [0; 16];
-    let mut destination = [0; 16];
-    source.copy_from_slice(&view.src.bytes());
-    destination.copy_from_slice(&view.dst.bytes());
     Some(R2oConntrackTuple {
         family: view.family,
         protocol: view.protocol,
-        source,
-        destination,
+        source: view.src.bytes(),
+        destination: view.dst.bytes(),
         source_port: u16::from_be_bytes([ports[0], ports[1]]),
         destination_port: u16::from_be_bytes([ports[2], ports[3]]),
     })

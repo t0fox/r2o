@@ -29,7 +29,9 @@ mod app {
         MessageIter, NF_ACCEPT, NF_DROP, NFNL_SUBSYS_QUEUE, NFQNL_MSG_PACKET, QueuePacket,
     };
     use r2o_datapath::nfqueue::{QueueSocket, RECEIVE_CAPACITY, ReceiveError};
-    use r2o_datapath::r2o_conntrack_gate::{R2oConntrackGate, guard_decision};
+    use r2o_datapath::r2o_conntrack_gate::{
+        R2oConntrackGate, R2oConntrackPacket, guard_packet_decision,
+    };
     use r2o_datapath::r2o_icmp_guard::R2oIcmpGuard;
     use r2o_datapath::r2o_quic::R2oQuicSessions;
     use r2o_datapath::r2o_route::{
@@ -3320,8 +3322,9 @@ mod app {
                                         udp_sessions.r2o_is_first_client_packet(bytes);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
-                                    if !conntrack_gate.r2o_preflight(
-                                        bytes,
+                                    let mut conntrack_packet = R2oConntrackPacket::new(bytes);
+                                    if !conntrack_gate.r2o_preflight_packet(
+                                        &mut conntrack_packet,
                                         (selected.is_some() || global_plan_present)
                                             && quic_plan_skip_note.is_none()
                                             && !quic_deny_skip,
@@ -3378,9 +3381,9 @@ mod app {
                                                 };
                                                 let tcp_syn_ack_seen =
                                                     tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
-                                                guard_decision(
+                                                guard_packet_decision(
                                                     &mut conntrack_gate,
-                                                    bytes,
+                                                    &mut conntrack_packet,
                                                     decision,
                                                     selected_plan.id,
                                                     first_udp_packet,
@@ -3446,10 +3449,11 @@ mod app {
                                     let selected_plan = selected.unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
+                                    let mut conntrack_packet = R2oConntrackPacket::new(&packet);
                                     if selected_plan.input_tcp_flags.is_some() {
                                         PacketDecision::Accept
-                                    } else if !conntrack_gate.r2o_preflight(
-                                        &packet,
+                                    } else if !conntrack_gate.r2o_preflight_packet(
+                                        &mut conntrack_packet,
                                         selected.is_some() || global_plan_present,
                                         false,
                                         tcp_syn_ack_seen,
@@ -3478,9 +3482,9 @@ mod app {
                                                 raw.tls_route_segment_cap(&packet)
                                             }),
                                         );
-                                        guard_decision(
+                                        guard_packet_decision(
                                             &mut conntrack_gate,
-                                            &packet,
+                                            &mut conntrack_packet,
                                             decision,
                                             selected_plan.id,
                                             false,
@@ -3555,10 +3559,11 @@ mod app {
                                     let selected_plan = selected.unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
+                                    let mut conntrack_packet = R2oConntrackPacket::new(&packet);
                                     if selected_plan.input_tcp_flags.is_some() {
                                         PacketDecision::Accept
-                                    } else if !conntrack_gate.r2o_preflight(
-                                        &packet,
+                                    } else if !conntrack_gate.r2o_preflight_packet(
+                                        &mut conntrack_packet,
                                         selected.is_some() || global_plan_present,
                                         false,
                                         tcp_syn_ack_seen,
@@ -3587,9 +3592,9 @@ mod app {
                                                 raw.tls_route_segment_cap(&packet)
                                             }),
                                         );
-                                        guard_decision(
+                                        guard_packet_decision(
                                             &mut conntrack_gate,
-                                            &packet,
+                                            &mut conntrack_packet,
                                             decision,
                                             selected_plan.id,
                                             false,
@@ -3640,8 +3645,9 @@ mod app {
                                 } else {
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
-                                    if !conntrack_gate.r2o_preflight(
-                                        bytes,
+                                    let mut conntrack_packet = R2oConntrackPacket::new(bytes);
+                                    if !conntrack_gate.r2o_preflight_packet(
+                                        &mut conntrack_packet,
                                         selected.is_some() || global_plan_present,
                                         false,
                                         tcp_syn_ack_seen,
@@ -3669,9 +3675,9 @@ mod app {
                                             raw.as_ref()
                                                 .map_or(0, |raw| raw.tls_route_segment_cap(bytes)),
                                         );
-                                        guard_decision(
+                                        guard_packet_decision(
                                             &mut conntrack_gate,
-                                            bytes,
+                                            &mut conntrack_packet,
                                             decision,
                                             selected_plan.id,
                                             false,

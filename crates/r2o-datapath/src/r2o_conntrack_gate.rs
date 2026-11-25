@@ -11,6 +11,25 @@ const R2O_CONNTRACK_CACHE_IDLE: Duration = Duration::from_secs(120);
 const R2O_CONNTRACK_LOOKUP_ATTEMPTS: usize = 3;
 const D2O_CONNTRACK_PATH: &str = "/proc/net/nf_conntrack";
 
+/// Пакет на время выбора и окончательной проверки одного решения.
+pub struct R2oConntrackPacket<'a> {
+    bytes: &'a [u8],
+    tuple: Option<Option<R2oConntrackTuple>>,
+}
+
+impl<'a> R2oConntrackPacket<'a> {
+    pub const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, tuple: None }
+    }
+
+    #[inline(never)]
+    fn tuple(&mut self) -> Option<R2oConntrackTuple> {
+        *self
+            .tuple
+            .get_or_insert_with(|| tuple_from_packet(self.bytes))
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CachedEntry {
     status: CachedStatus,
@@ -199,11 +218,26 @@ impl R2oConntrackGate {
         first_packet: bool,
         tcp_syn_ack_seen: bool,
     ) -> bool {
+        self.r2o_preflight_packet(
+            &mut R2oConntrackPacket::new(packet),
+            has_plan,
+            first_packet,
+            tcp_syn_ack_seen,
+        )
+    }
+
+    pub fn r2o_preflight_packet(
+        &mut self,
+        packet: &mut R2oConntrackPacket<'_>,
+        has_plan: bool,
+        first_packet: bool,
+        tcp_syn_ack_seen: bool,
+    ) -> bool {
         // D2O проверяет conntrack только для пакета с выбранным планом.
         if !has_plan {
             return true;
         }
-        self.r2o_preflight_with_lookup(packet, first_packet, tcp_syn_ack_seen, |tuple| {
+        self.preflight_tuple(packet.tuple(), first_packet, tcp_syn_ack_seen, |tuple| {
             crate::proc_nat::lookup(Path::new(D2O_CONNTRACK_PATH), tuple)
         })
     }
@@ -214,9 +248,24 @@ impl R2oConntrackGate {
         packet: &[u8],
         first_packet: bool,
         tcp_syn_ack_seen: bool,
+        lookup: impl FnMut(&R2oConntrackTuple) -> R2oProcNatLookup,
+    ) -> bool {
+        self.preflight_tuple(
+            tuple_from_packet(packet),
+            first_packet,
+            tcp_syn_ack_seen,
+            lookup,
+        )
+    }
+
+    fn preflight_tuple(
+        &mut self,
+        tuple: Option<R2oConntrackTuple>,
+        first_packet: bool,
+        tcp_syn_ack_seen: bool,
         mut lookup: impl FnMut(&R2oConntrackTuple) -> R2oProcNatLookup,
     ) -> bool {
-        let Some(tuple) = tuple_from_packet(packet) else {
+        let Some(tuple) = tuple else {
             return true;
         };
         self.confirm(
@@ -238,7 +287,25 @@ pub fn guard_decision(
     first_packet: bool,
     tcp_syn_ack_seen: bool,
 ) -> PacketDecision {
-    guard_decision_with_lookup(
+    guard_packet_decision(
+        gate,
+        &mut R2oConntrackPacket::new(packet),
+        decision,
+        plan_id,
+        first_packet,
+        tcp_syn_ack_seen,
+    )
+}
+
+pub fn guard_packet_decision(
+    gate: &mut R2oConntrackGate,
+    packet: &mut R2oConntrackPacket<'_>,
+    decision: PacketDecision,
+    plan_id: [u8; 16],
+    first_packet: bool,
+    tcp_syn_ack_seen: bool,
+) -> PacketDecision {
+    guard_packet_decision_with_lookup(
         gate,
         packet,
         decision,
@@ -258,13 +325,33 @@ pub fn guard_decision_with_lookup(
     tcp_syn_ack_seen: bool,
     lookup: impl FnMut(&R2oConntrackTuple) -> R2oProcNatLookup,
 ) -> PacketDecision {
+    guard_packet_decision_with_lookup(
+        gate,
+        &mut R2oConntrackPacket::new(packet),
+        decision,
+        plan_id,
+        first_packet,
+        tcp_syn_ack_seen,
+        lookup,
+    )
+}
+
+fn guard_packet_decision_with_lookup(
+    gate: &mut R2oConntrackGate,
+    packet: &mut R2oConntrackPacket<'_>,
+    decision: PacketDecision,
+    plan_id: [u8; 16],
+    first_packet: bool,
+    tcp_syn_ack_seen: bool,
+    lookup: impl FnMut(&R2oConntrackTuple) -> R2oProcNatLookup,
+) -> PacketDecision {
     if !matches!(
         &decision,
         PacketDecision::Drop | PacketDecision::Replace(_) | PacketDecision::Transmit { .. }
     ) {
         return decision;
     }
-    let Some(tuple) = tuple_from_packet(packet) else {
+    let Some(tuple) = packet.tuple() else {
         return decision;
     };
     let mapping_required = tuple.protocol == 17 && decision_has_udp_fragments(&decision);
@@ -1058,6 +1145,28 @@ mod tests {
     }
 
     #[test]
+    fn packet_caches_an_unparseable_tuple_only_when_needed() {
+        let mut packet = super::R2oConntrackPacket::new(&[0]);
+        let mut gate = R2oConntrackGate::with_capacity(1);
+        assert!(gate.r2o_preflight_packet(&mut packet, false, false, false));
+        assert_eq!(packet.tuple, None);
+        assert!(gate.r2o_preflight_packet(&mut packet, true, false, false));
+        assert_eq!(packet.tuple, Some(None));
+        assert!(matches!(
+            super::guard_packet_decision(
+                &mut gate,
+                &mut packet,
+                PacketDecision::Drop,
+                [0; 16],
+                false,
+                false
+            ),
+            PacketDecision::Drop
+        ));
+        assert_eq!(packet.tuple, Some(None));
+    }
+
+    #[test]
     fn preflight_покрывает_четыре_call_site_и_не_повторяет_lookup() {
         // 1. UDP Pass первого пакета: исключение first_packet не читает
         // таблицу ни в preflight, ни в guard_decision.
@@ -1161,7 +1270,7 @@ mod tests {
         assert_eq!(
             guard_decision_with_lookup(
                 &mut gate,
-                &packet,
+                &mut packet,
                 PacketDecision::Drop,
                 [7; 16],
                 true,
