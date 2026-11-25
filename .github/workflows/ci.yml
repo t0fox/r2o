@@ -454,26 +454,6 @@ jobs:
         run: |
           sh scripts/ci-install-release-qemu.sh "$RUNNER_TEMP/qemu"
           echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
-      - name: Собрать ABI и проверить ELF-артефакты
-        run: |
-          identity=$(python3 scripts/ci-release-artifacts.py identity "$GITHUB_SHA" "$GITHUB_RUN_ID")
-          R2O_RELEASE_ID=$(sed -n 's/^release_id=//p' <<< "$identity")
-          R2O_RELEASE_TITLE=$(sed -n 's/^title=//p' <<< "$identity")
-          R2O_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          export R2O_RELEASE_ID R2O_RELEASE_TITLE R2O_BUILT R2O_COMMIT="$GITHUB_SHA"
-          if [ "$ABI" = mipsel ]; then
-            CARGO_PROFILE_RELEASE_STRIP=none sh "$BUILD_SCRIPT"
-            sh scripts/check-mipsel-allocator.sh "target/$TARGET/release"
-            sudo apt-get install -y -qq binutils-mipsel-linux-gnu
-            for binary in r2o-{controller,datapath,panel,telegram,manager,fetch,detect}; do
-              mipsel-linux-gnu-strip --strip-all "target/$TARGET/release/$binary"
-            done
-          else
-            sh "$BUILD_SCRIPT"
-          fi
-          sh scripts/check-release-abi.sh "$ABI" "target/$TARGET/release"
-          python3 scripts/ci-release-artifacts.py record "target/$TARGET/release" \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$ABI" "$GITHUB_RUN_ATTEMPT"
       - name: Проверить mallocng на страницах 4 КиБ
         if: matrix.abi == 'mipsel'
         run: sh scripts/qemu-platform/check-allocator-pages.sh 4096
@@ -482,6 +462,28 @@ jobs:
         run: |
           sudo apt-get install -y -qq qemu-system-arm cpio
           sh scripts/qemu-platform/check-allocator-pages.sh 16384
+      - name: Собрать ABI и проверить ELF-артефакты
+        run: |
+          identity=$(python3 scripts/ci-release-artifacts.py identity "$GITHUB_SHA" "$GITHUB_RUN_ID")
+          R2O_RELEASE_ID=$(sed -n 's/^release_id=//p' <<< "$identity")
+          R2O_RELEASE_TITLE=$(sed -n 's/^title=//p' <<< "$identity")
+          R2O_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          export R2O_RELEASE_ID R2O_RELEASE_TITLE R2O_BUILT R2O_COMMIT="$GITHUB_SHA"
+          if [ "$ABI" = mipsel ]; then
+            build_dir=$(mktemp -d "$RUNNER_TEMP/r2o-mipsel.XXXXXX")
+            mkdir "$build_dir/maps"
+            CARGO_TARGET_DIR="$build_dir" R2O_MIPSEL_LINK_MAPS="$build_dir/maps" sh "$BUILD_SCRIPT"
+            sh scripts/check-mipsel-allocator.sh "$build_dir/$TARGET/release" "$build_dir/maps"
+            mkdir -p "target/$TARGET/release"
+            for binary in r2o-{controller,datapath,panel,telegram,manager,fetch,detect}; do
+              cp "$build_dir/$TARGET/release/$binary" "target/$TARGET/release/$binary"
+            done
+          else
+            sh "$BUILD_SCRIPT"
+          fi
+          sh scripts/check-release-abi.sh "$ABI" "target/$TARGET/release"
+          python3 scripts/ci-release-artifacts.py record "target/$TARGET/release" \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$ABI" "$GITHUB_RUN_ATTEMPT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
         with:
           name: r2o-bin-${{ github.sha }}-${{ matrix.abi }}-a${{ github.run_attempt }}
