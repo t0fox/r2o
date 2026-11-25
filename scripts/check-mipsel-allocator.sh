@@ -23,14 +23,8 @@ for component in r2o-controller r2o-datapath r2o-panel r2o-telegram r2o-manager 
         ls -la "$maps" >&2
         exit 1
     fi
-    if ! grep -Eq '[[:space:]]__malloc_context
-    printf '%s: musl mallocng\n' "$component"
-done
- "$map" ||
-        ! grep -Eq '[[:space:]]__libc_malloc_impl
-    printf '%s: musl mallocng\n' "$component"
-done
- "$map" ||
+    if ! grep -Eq '[[:space:]]__malloc_context$' "$map" ||
+        ! grep -Eq '[[:space:]]__libc_malloc_impl$' "$map" ||
         grep -qi SmpAllocator "$map"; then
         echo "$component: в итоговых секциях ELF не подтверждён mallocng" >&2
         grep -E 'malloc|calloc|realloc|SmpAllocator' "$map" >&2 || :
