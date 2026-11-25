@@ -27,6 +27,8 @@ if [ "${R2O_ZIG_LINKER:-}" = 1 ]; then
                         fi ;;
                 esac ;;
             -Wl,-O1) continue ;;
+            -s|-Wl,-s|-Wl,--strip-all)
+                [ "${R2O_MIPSEL_VERIFY_ALLOCATOR:-0}" != 1 ] || continue ;;
             -Wl,-melf_i386)
                 # Zig выбирает ELF i386 из -target и отвергает параметр GNU ld.
                 [ "$ZIG_TARGET" != x86-linux-musl ] || continue ;;

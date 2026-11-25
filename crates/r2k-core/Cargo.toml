@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Платформонезависимые протокольные компоненты r2o-datapath"
 
+[features]
+memory-diagnostics = []
+
 [dependencies]
 aes = "0.8.4"
 aes-gcm = "0.10.3"

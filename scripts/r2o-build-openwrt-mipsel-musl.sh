@@ -63,6 +63,9 @@ else
 fi
 
 LINKER="$SDK/bin/mipsel-openwrt-linux-musl-gcc"
+R2O_BUILD_TOOLCHAIN="OpenWrt 25.12.5 GCC $("$LINKER" -dumpfullversion)"
+R2O_BUILD_ALLOCATOR=
+export R2O_BUILD_TOOLCHAIN R2O_BUILD_ALLOCATOR
 ARCHIVER="$SDK/bin/mipsel-openwrt-linux-musl-ar"
 if [ ! -x "$LINKER" ] || [ ! -x "$ARCHIVER" ]; then
     echo "сборка OpenWrt: путь R2O_OPENWRT_MIPSEL_SDK должен указывать на каталог toolchain" >&2

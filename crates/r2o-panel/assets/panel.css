@@ -2123,6 +2123,10 @@ main { min-width: 0; }
 .diag-card h4 { margin: 0 0 4px; font-size: 1rem; font-weight: 750; }
 .diag-card-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 12px; }
 .diag-card-head p { color: var(--ink-2); font-size: .82rem; }
+.diag-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); gap: 8px 14px; margin: 10px 0; }
+.diag-facts dt { color: var(--ink-2); font-size: .82rem; }
+.diag-facts dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+#diagnostic-memory-process { max-width: 100%; }
 .diag-memory-panel { grid-column: span 7; }
 .diag-process-panel, .diag-workers-panel { grid-column: span 6; }
 .diag-search-panel { grid-column: span 5; }

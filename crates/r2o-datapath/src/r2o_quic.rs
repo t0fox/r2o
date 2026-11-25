@@ -175,6 +175,10 @@ pub struct R2oQuicSessions {
 }
 
 impl R2oQuicSessions {
+    pub fn diagnostic_capacity(&self) -> (usize, usize) {
+        (self.flows.len(), self.flows.capacity())
+    }
+
     /// Создать состояние с тем же пределом потоков, что и у UDP-таблицы.
     pub fn try_with_capacity(
         flow_capacity: R2oFlowCapacity,

@@ -66,6 +66,9 @@ else
 fi
 
 LINKER="$SDK/bin/arm-openwrt-linux-gcc"
+R2O_BUILD_TOOLCHAIN="OpenWrt 25.12.5 GCC $("$LINKER" -dumpfullversion)"
+R2O_BUILD_ALLOCATOR=musl-mallocng
+export R2O_BUILD_TOOLCHAIN R2O_BUILD_ALLOCATOR
 ARCHIVER="$SDK/bin/arm-openwrt-linux-muslgnueabi-ar"
 if [ ! -x "$LINKER" ] || [ ! -x "$ARCHIVER" ]; then
     echo "сборка OpenWrt ARMv7: R2O_OPENWRT_ARMV7_SDK должен указывать на каталог toolchain" >&2

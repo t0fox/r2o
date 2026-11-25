@@ -29,11 +29,22 @@ runs:
         archive="$RUNNER_TEMP/r2o-zig-$VERSION.tar.xz"
         if [ ! -f "$archive" ] || ! printf '%s  %s\n' "$SHA256" "$archive" | sha256sum --check --status; then
           part="$archive.part"
-          rm -f "$part"
-          curl --fail --proto '=https' --tlsv1.2 --location --retry 3 --retry-all-errors --max-time 300 \
-            "https://ziglang.org/download/$VERSION/zig-x86_64-linux-$VERSION.tar.xz" -o "$part"
-          printf '%s  %s\n' "$SHA256" "$part" | sha256sum --check
-          mv "$part" "$archive"
+          filename="zig-x86_64-linux-$VERSION.tar.xz"
+          for base in "https://mirror.bazel.build/ziglang.org/download/$VERSION" https://pkg.hexops.org/zig https://ziglang.freetls.fastly.net "https://ziglang.org/download/$VERSION"; do
+            timeout=40
+            if [[ "$base" == "https://ziglang.org/download/$VERSION" ]]; then timeout=360; fi
+            rm -f "$part"
+            if curl --fail --proto '=https' --tlsv1.2 --location --connect-timeout 12 --max-time "$timeout" \
+              "$base/$filename" -o "$part" &&
+              printf '%s  %s\n' "$SHA256" "$part" | sha256sum --check --status; then
+              mv "$part" "$archive"
+              break
+            fi
+          done
+          if [ ! -f "$archive" ] || ! printf '%s  %s\n' "$SHA256" "$archive" | sha256sum --check --status; then
+            echo "No Zig archive matched the pinned SHA-256" >&2
+            exit 1
+          fi
         fi
         printf '%s  %s\n' "$SHA256" "$archive" | sha256sum --check
         tar -xJf "$archive" -C "$RUNNER_TEMP"

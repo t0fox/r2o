@@ -1,6 +1,9 @@
 //! Локальный opt-in снимок истории поиска и ресурсов для панели.
 
+mod process_memory;
+
 use crate::portable_atomic::R2oAtomicU64;
+use process_memory::{Growth, Measurement};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_int, c_long};
@@ -281,7 +284,7 @@ const TASK_STATE_NAMES: [&str; 15] = [
     "voice_watch",
 ];
 const D2O_PROCESS_CAPACITY: usize = 3;
-const PROCESS_SPECS: [ProcessSpec; 3] = [
+const PROCESS_SPECS: [ProcessSpec; 6] = [
     ProcessSpec {
         name: "r2o-controller",
         comm: "r2o-controller",
@@ -298,6 +301,24 @@ const PROCESS_SPECS: [ProcessSpec; 3] = [
         name: "r2o-panel",
         comm: "r2o-panel",
         pidfile: "r2o-panel.pid",
+        fallback_pidfile: None,
+    },
+    ProcessSpec {
+        name: "r2o-telegram",
+        comm: "r2o-telegram",
+        pidfile: "r2o-telegram.pid",
+        fallback_pidfile: None,
+    },
+    ProcessSpec {
+        name: "r2o-controller6",
+        comm: "r2o-controller",
+        pidfile: "r2o-controller6.pid",
+        fallback_pidfile: None,
+    },
+    ProcessSpec {
+        name: "r2o-datapath6",
+        comm: "r2o-datapath",
+        pidfile: "r2o-datapath6.pid",
         fallback_pidfile: None,
     },
 ];
@@ -627,6 +648,7 @@ pub struct Recorder {
     health_dir: PathBuf,
     proc_dir: PathBuf,
     enabled: bool,
+    secondary: bool,
     session: Option<(u64, u64, SystemTime)>,
     started: Instant,
     checked: Option<Instant>,
@@ -645,8 +667,7 @@ pub struct Recorder {
     anomaly_total: u64,
     anomalies: VecDeque<Value>,
     write_failures: u64,
-    growth: VecDeque<(u64, i64, i64)>,
-    last_unattributed: Option<Instant>,
+    process_growth: [Growth; PROCESS_SPECS.len()],
     memory_pid: Option<u64>,
     memory_start_ticks: Option<u64>,
     memory_epoch: u64,
@@ -663,6 +684,7 @@ impl Recorder {
             run_dir,
             proc_dir: PathBuf::from("/proc"),
             enabled: false,
+            secondary: std::env::var("R2O_DNS_DISCOVERY_FAMILY").as_deref() == Ok("6"),
             session: None,
             started: Instant::now(),
             checked: None,
@@ -680,8 +702,7 @@ impl Recorder {
             anomaly_total: 0,
             anomalies: VecDeque::with_capacity(ANOMALY_CAPACITY),
             write_failures: 0,
-            growth: VecDeque::with_capacity(GROWTH_CAPACITY),
-            last_unattributed: None,
+            process_growth: std::array::from_fn(|_| Growth::default()),
             memory_pid: None,
             memory_start_ticks: None,
             memory_epoch: 0,
@@ -747,6 +768,20 @@ impl Recorder {
         }
         self.checked = Some(now);
         let session = diagnostics_session(&self.dir);
+        if self.secondary {
+            if session.is_some()
+                && !self.dir.join("paused").is_file()
+                && self
+                    .sampled
+                    .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5))
+                && let Some(ticks) = process_memory::start_ticks(&self.proc_dir.join("self"))
+            {
+                let path = self.health_dir.join("r2o-controller6.memory");
+                let _ = r2k_core::memory_diagnostics::publish(&path, ticks);
+                self.sampled = Some(now);
+            }
+            return;
+        }
         if session != self.session {
             memory_enable(false);
             self.events.clear();
@@ -754,7 +789,7 @@ impl Recorder {
             self.limits.clear();
             self.memory_history.clear();
             self.anomalies.clear();
-            self.growth.clear();
+            self.process_growth = std::array::from_fn(|_| Growth::default());
             self.event_total = 0;
             self.sample_total = 0;
             self.limit_total = 0;
@@ -763,7 +798,6 @@ impl Recorder {
             self.write_failures = 0;
             self.last_counts = None;
             self.last_limit_change = None;
-            self.last_unattributed = None;
             self.memory_pid = None;
             self.memory_start_ticks = None;
             self.memory_epoch = 0;
@@ -816,31 +850,115 @@ impl Recorder {
         }
         self.last_counts = Some(counts);
 
-        let processes = process_memory(&self.proc_dir, &self.run_dir);
+        let mut processes = process_memory(&self.proc_dir, &self.run_dir);
+        let datapath = [4, 6].map(|family| {
+            let name = format!("datapath-health.{family}.json");
+            let (age, value) = runtime_health(&self.health_dir.join(name));
+            let fresh = age.is_some_and(|age| age <= 20);
+            (family, age, value, fresh)
+        });
         let mut details = Vec::with_capacity(processes.len());
-        for process in &processes {
-            if process["pid"].as_u64().unwrap_or(0) != 0 {
-                let name = process["name"].as_str().unwrap_or_default();
-                let detail = process_detail(process, at, mono_ms, &self.proc_dir);
-                let previous = self.first_details.get(name);
-                if previous.is_none_or(|old| {
-                    old["pid"] != detail["pid"]
-                        || detail["start_ticks"]
-                            .as_u64()
-                            .is_some_and(|ticks| old["start_ticks"].as_u64() != Some(ticks))
-                }) {
-                    self.first_details.insert(name.to_owned(), detail.clone());
-                }
-                details.push(json!({
-                    "name": name,
-                    "first": self.first_details.get(name),
-                    "latest": detail,
-                }));
-            } else {
-                let name = process["name"].as_str().unwrap_or_default();
+        for (index, process) in processes.iter_mut().enumerate() {
+            let name = PROCESS_SPECS[index].name;
+            let Some(pid) = process["pid"].as_u64().filter(|pid| *pid != 0) else {
+                self.process_growth[index].reset_window();
                 details
                     .push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
+                continue;
+            };
+            let mut detail = process_detail(process, at, mono_ms, &self.proc_dir);
+            let ticks = detail["start_ticks"].as_u64();
+            let base = self.proc_dir.join(pid.to_string());
+            let (anonymous, source) = process_memory::anonymous(process, &detail, &base);
+            let sidecar = match name {
+                "r2o-controller6" => "r2o-controller6.memory",
+                "r2o-datapath" => "datapath-health.4.memory",
+                "r2o-datapath6" => "datapath-health.6.memory",
+                "r2o-panel" => "r2o-panel.memory",
+                "r2o-telegram" => "d2ktg.memory",
+                _ => "",
+            };
+            let mut build = ticks.and_then(|ticks| {
+                if name == "r2o-controller" && pid == u64::from(std::process::id()) {
+                    return Some(process_memory::local_build());
+                }
+                if sidecar.is_empty() {
+                    return None;
+                }
+                process_memory::read_build(&self.health_dir.join(sidecar), pid, ticks).or_else(
+                    || {
+                        (name == "r2o-datapath")
+                            .then(|| self.health_dir.join("datapath-health.6.memory"))
+                            .and_then(|path| process_memory::read_build(&path, pid, ticks))
+                    },
+                )
+            });
+            let linkage = process_memory::linkage(&base.join("exe"));
+            if linkage != Some("static")
+                && let Some(build) = &mut build
+                && !build["allocator"]
+                    .as_str()
+                    .is_some_and(|name| name.starts_with("DSO "))
+            {
+                build["allocator"] = Value::Null;
             }
+            // A restart between procfs reads invalidates the entire sample.
+            if ticks.is_some() && process_memory::start_ticks(&base) != ticks {
+                *process = empty_process(name);
+                self.process_growth[index].reset_window();
+                details
+                    .push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
+                continue;
+            }
+            process["start_ticks"] = json!(ticks);
+            process["anon_kib"] = json!(anonymous);
+            if let Some(build) = &build {
+                process["heap_live_bytes"] = build["heap"]["live_bytes"].clone();
+                process["heap_peak_bytes"] = build["heap"]["peak_bytes"].clone();
+            }
+            detail["rss_anon_source"] = json!(source);
+            detail["linkage"] = json!(linkage);
+            detail["build"] = json!(build);
+            detail["tables"] = if name == "r2o-controller" && pid == u64::from(std::process::id()) {
+                json!({
+                    "measurements": [json!(counts.tasks), json!(counts.measurement_slots)],
+                    "catalog": [json!(counts.plans), Value::Null],
+                    "http-records-bytes": [counts.http_records_bytes, counts.http_records_limit_bytes],
+                    "http-queue-bytes": [counts.http_queue_bytes, counts.http_queue_limit_bytes],
+                    "http-evidence-bytes": [counts.http_failure_bytes, counts.http_failure_limit_bytes],
+                })
+            } else {
+                let mut tables = serde_json::Map::new();
+                for (family, _, health, fresh) in &datapath {
+                    if *fresh
+                        && health["pid"].as_u64() == Some(pid)
+                        && ticks.is_some()
+                        && health["start_ticks"].as_u64() == ticks
+                        && let Some(snapshot) = health["memory_tables"].as_object()
+                    {
+                        for (key, value) in snapshot {
+                            tables.insert(format!("IPv{family} {key}"), value.clone());
+                        }
+                    }
+                }
+                json!(tables)
+            };
+            let measurement = Measurement::from_report(process, &detail, mono_ms);
+            if let Some(anomaly) = self.process_growth[index].record(measurement, name, at) {
+                self.record_anomaly(anomaly);
+            }
+            let previous = self.first_details.get(name);
+            if previous.is_none_or(|old| {
+                old["pid"] != detail["pid"]
+                    || ticks.is_some_and(|ticks| old["start_ticks"].as_u64() != Some(ticks))
+            }) {
+                self.first_details.insert(name.to_owned(), detail.clone());
+            }
+            details.push(json!({
+                "name": name,
+                "first": self.first_details.get(name),
+                "latest": detail,
+            }));
         }
 
         // Строка истории памяти по объединённому контроллеру.
@@ -922,13 +1040,6 @@ impl Recorder {
         let vm_data_kib = compact_kib(field_i64(primary, "vm_data_kib").unwrap_or(-1));
         let vm_swap_kib = compact_kib(field_i64(primary, "vm_swap_kib").unwrap_or(-1));
         let rss_anon_kib = compact_kib(field_i64(primary, "anon_kib").unwrap_or(-1));
-        let accounted_bytes = counts
-            .tracked_tcp_bytes
-            .saturating_add(counts.tracked_quic_bytes)
-            .saturating_add(counts.tracked_tls_bytes)
-            .saturating_add(counts.catalog_bytes)
-            .saturating_add(counts.http_bytes)
-            .saturating_add(counts.snapshot_bytes);
         let memory_tail = vec![
             json!(rss_kib),
             json!(vm_data_kib),
@@ -955,67 +1066,12 @@ impl Recorder {
         }
         self.memory_history.push_back((at, mono_ms, memory_tail));
 
-        // Критерий D2O: устойчивый рост RSS без сопоставимого роста учтённых объектов.
-        if primary_pid != 0
-            && let Some(rss_kib) = compact_kib(field_i64(primary, "rss_kib").unwrap_or(-1))
-            && rss_kib > 0
-            && let Some(accounted_kib) = compact_bytes_kib(accounted_bytes)
-        {
-            self.growth
-                .push_back((mono_ms, i64::from(rss_kib), i64::from(accounted_kib)));
-            while self.growth.len() > GROWTH_CAPACITY {
-                self.growth.pop_front();
-            }
-            if self.growth.len() == GROWTH_CAPACITY {
-                let points: Vec<(u64, i64, i64)> = self.growth.iter().copied().collect();
-                let span_ms = points
-                    .last()
-                    .map(|last| last.0)
-                    .unwrap_or(0)
-                    .saturating_sub(points.first().map(|first| first.0).unwrap_or(0));
-                let rising = points
-                    .windows(2)
-                    .filter(|pair| pair[1].1 > pair[0].1)
-                    .count();
-                let rss_delta = points.last().map(|last| last.1).unwrap_or(0)
-                    - points.first().map(|first| first.1).unwrap_or(0);
-                let accounted_delta = points.last().map(|last| last.2).unwrap_or(0)
-                    - points.first().map(|first| first.2).unwrap_or(0);
-                let cooldown_ok = self.last_unattributed.is_none_or(|last| {
-                    now.saturating_duration_since(last) >= Duration::from_secs(30 * 60)
-                });
-                if span_ms >= 9 * 60_000
-                    && rising >= 7
-                    && rss_delta >= 1024
-                    && accounted_delta < rss_delta / 4
-                    && cooldown_ok
-                {
-                    self.record_anomaly(json!({
-                        "kind": "unattributed-rss-growth",
-                        "at": at,
-                        "error_code": null,
-                        "stage": "",
-                        "rss_delta_kib": rss_delta,
-                        "accounted_delta_kib": accounted_delta,
-                        "window_samples": GROWTH_CAPACITY,
-                    }));
-                    self.last_unattributed = Some(now);
-                }
-            }
-        }
-
         let conntrack_count =
             read_number(&self.proc_dir.join("sys/net/netfilter/nf_conntrack_count"));
         let limit_age_ms = self.last_limit_change.map(|started| {
             now.saturating_duration_since(started)
                 .as_millis()
                 .min(u64::MAX as u128) as u64
-        });
-        let datapath = [4, 6].map(|family| {
-            let name = format!("datapath-health.{family}.json");
-            let (age, value) = runtime_health(&self.health_dir.join(name));
-            let fresh = age.is_some_and(|age| age <= 20);
-            (family, age, value, fresh)
         });
         let datapath_flows = datapath
             .iter()
@@ -1148,6 +1204,7 @@ impl Recorder {
                 "failure_record_bytes": counts.http_failure_record_limit_bytes,
             },
             "memory_tracking": memory_tracking_json(),
+            "memory_platform": process_memory::platform(&self.proc_dir),
             "madvise": madvise_json(&self.madvise),
             "anomalies_overwritten": self.anomaly_total.saturating_sub(self.anomalies.len() as u64),
             "diagnostic_write_failures": self.write_failures,
@@ -1226,7 +1283,7 @@ impl Recorder {
             self.record_write_error("path", error);
             return;
         }
-        let bytes = match serde_json::to_vec(report) {
+        let bytes = match process_memory::serialize_report(report, REPORT_MAX) {
             Ok(bytes) => bytes,
             Err(_) => {
                 self.record_write_error("serialize", 0);
@@ -1308,6 +1365,7 @@ fn compact_kib(value: i64) -> Option<i32> {
 }
 
 /// C `compact_bytes_kib`: байты в KiB с округлением вверх.
+#[cfg(test)]
 fn compact_bytes_kib(bytes: u64) -> Option<i32> {
     let kib = bytes / 1024 + u64::from(bytes % 1024 != 0);
     (kib <= i32::MAX as u64).then_some(kib as i32)
@@ -1605,14 +1663,7 @@ fn process_detail(process: &Value, at: u64, mono_ms: u64, proc_dir: &Path) -> Va
             .find_map(|line| proc_field(line, key))
             .map(|value| value as u64)
     };
-    let start_ticks = fs::read_to_string(base.join("stat")).ok().and_then(|stat| {
-        let close = stat.rfind(')')?;
-        stat[close + 1..]
-            .split_whitespace()
-            .nth(19)?
-            .parse::<u64>()
-            .ok()
-    });
+    let start_ticks = process_memory::start_ticks(&base);
     let fd_count = read_fd_count(&base.join("fd"));
     // D2O читает только smaps_rollup; полный smaps не обходит даже как
     // fallback, потому что это дорого и не требуется для отчёта.
@@ -2578,7 +2629,7 @@ mod tests {
         assert_eq!(report["samples"][0]["workers_joined"], 9);
         assert_eq!(
             report["samples"][0]["processes"].as_array().unwrap().len(),
-            3
+            super::PROCESS_SPECS.len()
         );
         recorder.checked = Some(Instant::now() - Duration::from_secs(1));
         recorder.sampled = Some(Instant::now() - Duration::from_secs(60));

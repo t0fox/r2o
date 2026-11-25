@@ -20,6 +20,10 @@ if ! rustup target list --installed | grep -qx "$TARGET"; then
     rustup target add "$TARGET"
 fi
 
+linker_version=$("$LINKER" --version | sed -n '1p')
+R2O_BUILD_TOOLCHAIN="Rust sysroot / $linker_version"
+export R2O_BUILD_TOOLCHAIN
+
 CARGO_TARGET_DIR="$TARGET_DIR" \
 CARGO_TARGET_ARMV5TE_UNKNOWN_LINUX_MUSLEABI_LINKER="$LINKER" \
 CC_armv5te_unknown_linux_musleabi="$LINKER" \

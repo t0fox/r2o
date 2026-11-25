@@ -626,6 +626,13 @@ fn runtime_heartbeat(path: &Path) -> std::io::Result<()> {
         return Err(error);
     }
     *last = now;
+    static LAST_MEMORY: Mutex<u64> = Mutex::new(0);
+    r2k_core::memory_diagnostics::from_heartbeat(
+        path,
+        start_ticks,
+        now,
+        &mut LAST_MEMORY.lock().expect("memory heartbeat clock lock"),
+    );
     Ok(())
 }
 

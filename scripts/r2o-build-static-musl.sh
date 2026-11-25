@@ -18,14 +18,31 @@ case "$ABI" in
 esac
 
 : "${ZIG:?не задан путь к Zig}"
+if [ "$ABI" = mipsel ] && [ "$("$ZIG" version)" != 0.15.2 ]; then
+    echo "Для статической сборки MIPSEL нужен Zig 0.15.2" >&2
+    exit 2
+fi
 cd "$ROOT"
 target_env=$(printf '%s' "$TARGET" | tr '-' '_')
 cargo_target_env=$(printf '%s' "$target_env" | tr '[:lower:]' '[:upper:]')
 cc="$ROOT/scripts/ci-zig-cross-cc.sh"
 export ZIG_TARGET ZIG_CPU R2O_ZIG_LINKER=1
+zig_version=$("$ZIG" version)
+R2O_BUILD_TOOLCHAIN="Zig $zig_version"
+case "$zig_version" in
+    0.14.1|0.15.2) R2O_BUILD_ALLOCATOR=musl-mallocng ;;
+    0.16.0) R2O_BUILD_ALLOCATOR=zig-smp ;;
+    *) R2O_BUILD_ALLOCATOR= ;;
+esac
+export R2O_BUILD_TOOLCHAIN R2O_BUILD_ALLOCATOR
 export "CC_$target_env=$cc"
 export "CARGO_TARGET_${cargo_target_env}_LINKER=$cc"
-export "CARGO_TARGET_${cargo_target_env}_RUSTFLAGS=-Ctarget-feature=+crt-static -Clink-self-contained=no -Crelocation-model=static"
+rustflags="-Ctarget-feature=+crt-static -Clink-self-contained=no -Crelocation-model=static"
+if [ -n "${R2O_MIPSEL_VERIFY_ALLOCATOR:-}" ]; then
+    test "$ABI" = mipsel
+    rustflags="$rustflags -Cstrip=none -Clink-arg=-Wl,-u,__libc_malloc_impl"
+fi
+export "CARGO_TARGET_${cargo_target_env}_RUSTFLAGS=$rustflags"
 export CARGO_PROFILE_RELEASE_PANIC=abort
 case "$ABI" in
     mipsel|mips-openwrt-musl|mips64el-musl)
