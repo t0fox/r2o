@@ -117,6 +117,18 @@ async function main() {
   assert.deepEqual(ownPlanTrack?.steps.map((step) => step.label), ["Очередь", "Форма", "Распознаём", "Свойства", "Планы", "Проверка", "Подтверждено"]);
   assert.equal(panelUi.trackFor("неизвестная фаза новой сборки"), null, "неизвестная фаза не выдумывает этап");
   assert.equal(diagnosticsUi.summary({ samples: [{ at: 1, processes: [], bindings: 0, plans: 0 }], events: [{ outcome: "failed" }, { outcome: "queue-expired" }, { outcome: "plan-found" }] }).includes("без подтверждённого результата: 2"), true, "диагностика считает отказ и истёкшую очередь неподтверждёнными исходами");
+  const datapathSnapshot = (at, ticks, rss, anonymous) => ({ at, mono_ms: at * 1000,
+    processes: [{ name: "r2o-datapath", pid: 17, start_ticks: ticks, rss_kib: rss, anon_kib: anonymous,
+      heap_live_bytes: 95, heap_peak_bytes: 300 }] });
+  const datapathHistory = diagnosticsUi.processMemoryRows([
+    datapathSnapshot(60, 17, 1024, 0), datapathSnapshot(120, 17, 1536, 256),
+    datapathSnapshot(180, 18, 4096, null), datapathSnapshot(240, 18, 5120, 2048)
+  ], "r2o-datapath");
+  assert.equal(datapathHistory[0].rss_anon, 0);
+  assert.equal(datapathHistory[2].rss_anon, null);
+  assert.equal(datapathHistory[2].heap_peak, 300);
+  assert.equal(diagnosticsUi.seriesEndpoints(datapathHistory, "rss").delta, 1048576,
+    "повторный PID не выдаёт рост предыдущего процесса");
   for (const [base, step] of [[1, 60], [1000, 60000]]) {
     const history = diagnosticsUi.memoryRows({
       memory_history: { time_base: [1000, base], fields: ["at_delta_s", "mono_delta_s", "rss_kib"],

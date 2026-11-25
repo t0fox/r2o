@@ -64,7 +64,10 @@ impl HealthWriter {
                     &self.path,
                     self.start_ticks,
                     heartbeat_ms,
-                    &mut self.last_memory.lock().expect("memory heartbeat clock lock"),
+                    &mut self
+                        .last_memory
+                        .lock()
+                        .expect("memory heartbeat clock lock"),
                 );
                 Ok(())
             }

@@ -403,9 +403,12 @@
             <section class="diag-card diag-memory-panel" aria-labelledby="diagnostic-memory-title">
               <div class="diag-card-head">
                 <div>
-                  <h4 id="diagnostic-memory-title">Память контроллера</h4>
+                  <h4 id="diagnostic-memory-title">История памяти</h4>
                   <p id="diagnostic-memory-interval">Интервал указан в отчёте · значения в МиБ</p>
                 </div>
+                <select id="diagnostic-memory-process" class="panel-select" aria-label="Процесс для графика памяти" hidden>
+                  <option value="r2o-controller">Контроллер</option>
+                </select>
                 <div class="diag-range" role="group" aria-label="Период графика памяти">
                   <button type="button" data-memory-range="2" aria-pressed="true">2 часа</button>
                   <button type="button" data-memory-range="24" aria-pressed="false">24 часа</button>
@@ -434,6 +437,8 @@
                 <div class="diag-series">
                   <label data-series-option="rss"><input type="checkbox" data-memory-series="rss" checked><span>RSS</span></label>
                   <label data-series-option="rss_anon"><input type="checkbox" data-memory-series="rss_anon" checked><span>RssAnon</span></label>
+                  <label data-series-option="heap_live"><input type="checkbox" data-memory-series="heap_live"><span>Живые аллокации</span></label>
+                  <label data-series-option="heap_peak"><input type="checkbox" data-memory-series="heap_peak"><span>Пик аллокаций</span></label>
                   <label data-series-option="vm_data"><input type="checkbox" data-memory-series="vm_data"><span>VmData</span></label>
                   <label data-series-option="anonymous"><input type="checkbox" data-memory-series="anonymous"><span>Anonymous</span></label>
                   <label data-series-option="private_dirty"><input type="checkbox" data-memory-series="private_dirty"><span>Private_Dirty</span></label>
@@ -465,9 +470,20 @@
                 <section class="diag-card diag-process-panel" aria-labelledby="diagnostic-process-title">
                   <h4 id="diagnostic-process-title">Память процессов</h4>
                   <div class="table-scroll">
-                    <table class="diag-memory"><thead><tr><th scope="col">Процесс</th><th scope="col">RSS</th><th scope="col">Изменение</th></tr></thead><tbody id="diagnostic-processes"></tbody></table>
+                    <table class="diag-memory"><thead><tr><th scope="col">Процесс</th><th scope="col">RSS</th><th scope="col">RssAnon</th><th scope="col">Изменение RSS</th></tr></thead><tbody id="diagnostic-processes"></tbody></table>
                   </div>
-                  <p id="diagnostic-process-note" class="diag-history-note">Изменение считается от первого сохранённого снимка того же PID.</p>
+                  <p id="diagnostic-process-note" class="diag-history-note">Изменение считается от первого сохранённого снимка процесса.</p>
+                  <details id="diagnostic-process-detail" class="diag-series-options" hidden>
+                    <summary>Сборка, аллокации и таблицы выбранного процесса</summary>
+                    <dl id="diagnostic-process-facts" class="diag-facts"></dl>
+                    <p id="diagnostic-process-coverage" class="diag-history-note"></p>
+                    <div class="table-scroll" hidden>
+                      <table class="diag-memory">
+                        <thead><tr><th scope="col">Таблица</th><th scope="col">Занято</th><th scope="col">Ёмкость</th></tr></thead>
+                        <tbody id="diagnostic-process-tables"></tbody>
+                      </table>
+                    </div>
+                  </details>
                 </section>
 
                 <section class="diag-card diag-workers-panel" aria-labelledby="diagnostic-workers-title">

@@ -92,10 +92,15 @@ impl Growth {
             "live-allocations"
         } else if live_delta.is_some_and(|delta| delta.abs_diff(0) < relevant as u64)
             && anon_delta.is_some_and(|delta| delta >= (rss_delta / 2) as i64)
-            && point.peak_bytes.zip(first.peak_bytes).is_some_and(|(now, before)| {
-                now.saturating_sub(before) >= relevant as u64
-                    && point.live_bytes.is_some_and(|live| now.saturating_sub(live) >= relevant as u64)
-            })
+            && point
+                .peak_bytes
+                .zip(first.peak_bytes)
+                .is_some_and(|(now, before)| {
+                    now.saturating_sub(before) >= relevant as u64
+                        && point
+                            .live_bytes
+                            .is_some_and(|live| now.saturating_sub(live) >= relevant as u64)
+                })
         {
             "possible-allocator-retention"
         } else {
@@ -119,10 +124,19 @@ impl Growth {
 
 pub(super) fn start_ticks(base: &Path) -> Option<u64> {
     let stat = fs::read_to_string(base.join("stat")).ok()?;
-    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
 }
 
-pub(super) fn anonymous(process: &Value, detail: &Value, base: &Path) -> (Option<u64>, &'static str) {
+pub(super) fn anonymous(
+    process: &Value,
+    detail: &Value,
+    base: &Path,
+) -> (Option<u64>, &'static str) {
     if let Some(value) = process["anon_kib"].as_u64() {
         return (Some(value), "status");
     }
@@ -137,14 +151,19 @@ pub(super) fn anonymous(process: &Value, detail: &Value, base: &Path) -> (Option
             .take(MAX as u64 + 1)
             .read_to_string(&mut data)
             .ok()?;
-        (data.len() <= MAX).then(|| smaps_anonymous(&data)).flatten()
+        (data.len() <= MAX)
+            .then(|| smaps_anonymous(&data))
+            .flatten()
     };
     read().map_or((None, "unavailable"), |value| (Some(value), "smaps"))
 }
 
 fn smaps_anonymous(data: &str) -> Option<u64> {
     let mut sum = None::<u64>;
-    for line in data.lines().filter_map(|line| line.strip_prefix("Anonymous:")) {
+    for line in data
+        .lines()
+        .filter_map(|line| line.strip_prefix("Anonymous:"))
+    {
         let value: u64 = line.split_whitespace().next()?.parse().ok()?;
         sum = Some(sum.unwrap_or(0).checked_add(value)?);
     }
@@ -185,7 +204,8 @@ pub(super) fn read_build(path: &Path, pid: u64, ticks: u64) -> Option<Value> {
     }
     let mut lines = contents.lines();
     let mut identity = lines.next()?.split_whitespace();
-    if identity.next()?.parse::<u64>().ok()? != pid || identity.next()?.parse::<u64>().ok()? != ticks
+    if identity.next()?.parse::<u64>().ok()? != pid
+        || identity.next()?.parse::<u64>().ok()? != ticks
     {
         return None;
     }
@@ -255,7 +275,8 @@ pub(super) fn linkage(path: &Path) -> Option<&'static str> {
     }
     for index in 0..count {
         let mut tag = [0_u8; 4];
-        file.seek(SeekFrom::Start(offset.checked_add(index * size)?)).ok()?;
+        file.seek(SeekFrom::Start(offset.checked_add(index * size)?))
+            .ok()?;
         file.read_exact(&mut tag).ok()?;
         if read_int(&tag, little) == 3 {
             return Some("dynamic");
@@ -305,15 +326,27 @@ mod tests {
     fn reports_datapath_growth_once_without_guessing_allocator_retention() {
         let mut growth = Growth::default();
         for i in 0..9 {
-            assert!(growth.record(Some(point(i)), "r2o-datapath", i * 60).is_none());
+            assert!(
+                growth
+                    .record(Some(point(i)), "r2o-datapath", i * 60)
+                    .is_none()
+            );
         }
         let alert = growth.record(Some(point(9)), "r2o-datapath", 540).unwrap();
         assert_eq!(alert["process"], "r2o-datapath");
         assert_eq!(alert["cause"], "unattributed");
-        assert!(growth.record(Some(point(10)), "r2o-datapath", 600).is_none());
+        assert!(
+            growth
+                .record(Some(point(10)), "r2o-datapath", 600)
+                .is_none()
+        );
         let mut replacement = point(11);
         replacement.start_ticks += 1;
-        assert!(growth.record(Some(replacement), "r2o-datapath", 660).is_none());
+        assert!(
+            growth
+                .record(Some(replacement), "r2o-datapath", 660)
+                .is_none()
+        );
         assert_eq!(growth.window.len(), 1);
     }
 
@@ -330,7 +363,10 @@ mod tests {
             let retained_result = retained.record(Some(current), "retained", i);
             if i == 9 {
                 assert_eq!(live_result.unwrap()["cause"], "live-allocations");
-                assert_eq!(retained_result.unwrap()["cause"], "possible-allocator-retention");
+                assert_eq!(
+                    retained_result.unwrap()["cause"],
+                    "possible-allocator-retention"
+                );
             }
         }
     }
@@ -342,7 +378,8 @@ mod tests {
             "memory_history": {"time_base": [9000, 0], "samples": [[0, 0], [60, 60], [120, 120]]},
         });
         let limit = serde_json::to_vec(&data).unwrap().len() - 6;
-        let bounded: Value = serde_json::from_slice(&serialize_report(&data, limit).unwrap()).unwrap();
+        let bounded: Value =
+            serde_json::from_slice(&serialize_report(&data, limit).unwrap()).unwrap();
         assert_eq!(bounded["memory_history"]["time_base"], json!([9000, 0]));
         assert_eq!(bounded["memory_history"]["samples"][0], json!([60, 60]));
         assert_eq!(bounded["memory_history_overwritten"], 43);
@@ -351,7 +388,10 @@ mod tests {
     #[test]
     fn older_smaps_counts_anonymous_pages_and_preserves_missing_fields() {
         assert_eq!(smaps_anonymous("Rss: 24 kB\nAnonymous: 0 kB\n"), Some(0));
-        assert_eq!(smaps_anonymous("Anonymous: 8 kB\nAnonymous: 16 kB\n"), Some(24));
+        assert_eq!(
+            smaps_anonymous("Anonymous: 8 kB\nAnonymous: 16 kB\n"),
+            Some(24)
+        );
         assert_eq!(smaps_anonymous("Rss: 24 kB\n"), None);
         assert_eq!(smaps_anonymous("Anonymous: 8 kB\nAnonymous: ?\n"), None);
     }

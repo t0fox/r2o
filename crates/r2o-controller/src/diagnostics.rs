@@ -771,7 +771,9 @@ impl Recorder {
         if self.secondary {
             if session.is_some()
                 && !self.dir.join("paused").is_file()
-                && self.sampled.is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5))
+                && self
+                    .sampled
+                    .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5))
                 && let Some(ticks) = process_memory::start_ticks(&self.proc_dir.join("self"))
             {
                 let path = self.health_dir.join("r2o-controller6.memory");
@@ -860,7 +862,8 @@ impl Recorder {
             let name = PROCESS_SPECS[index].name;
             let Some(pid) = process["pid"].as_u64().filter(|pid| *pid != 0) else {
                 self.process_growth[index].reset_window();
-                details.push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
+                details
+                    .push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
                 continue;
             };
             let mut detail = process_detail(process, at, mono_ms, &self.proc_dir);
@@ -882,11 +885,13 @@ impl Recorder {
                 if sidecar.is_empty() {
                     return None;
                 }
-                process_memory::read_build(&self.health_dir.join(sidecar), pid, ticks).or_else(|| {
-                    (name == "r2o-datapath")
-                        .then(|| self.health_dir.join("datapath-health.6.memory"))
-                        .and_then(|path| process_memory::read_build(&path, pid, ticks))
-                })
+                process_memory::read_build(&self.health_dir.join(sidecar), pid, ticks).or_else(
+                    || {
+                        (name == "r2o-datapath")
+                            .then(|| self.health_dir.join("datapath-health.6.memory"))
+                            .and_then(|path| process_memory::read_build(&path, pid, ticks))
+                    },
+                )
             });
             let linkage = process_memory::linkage(&base.join("exe"));
             if linkage != Some("static")
@@ -898,7 +903,8 @@ impl Recorder {
             if ticks.is_some() && process_memory::start_ticks(&base) != ticks {
                 *process = empty_process(name);
                 self.process_growth[index].reset_window();
-                details.push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
+                details
+                    .push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
                 continue;
             }
             process["start_ticks"] = json!(ticks);

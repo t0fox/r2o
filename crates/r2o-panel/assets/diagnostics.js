@@ -4,12 +4,19 @@
   "use strict";
   var SVG = "http://www.w3.org/2000/svg";
   var PRIMARY = "r2o-controller";
+  var PROCESS_LABELS = {
+    "r2o-controller": "Контроллер", "r2o-datapath": "Датапат", "r2o-panel": "Панель",
+    "r2o-telegram": "Telegram proxy", "r2o-controller4": "Контроллер IPv4",
+    "r2o-controller6": "Контроллер IPv6", "r2o-datapath4": "Датапат IPv4", "r2o-datapath6": "Датапат IPv6"
+  };
   var metrics = [
     { key: "rss", label: "RSS", color: "rss" },
     { key: "rss_anon", label: "RssAnon", color: "rss_anon" },
     { key: "vm_data", label: "VmData", color: "vm_data" },
     { key: "anonymous", label: "Anonymous", color: "anonymous" },
     { key: "private_dirty", label: "Private_Dirty", color: "private_dirty" },
+    { key: "heap_live", label: "Живые аллокации", color: "catalog" },
+    { key: "heap_peak", label: "Пик аллокаций", color: "snapshot" },
     { key: "catalog", label: "Каталог", color: "catalog" },
     { key: "http", label: "HTTP", color: "http" },
     { key: "snapshot", label: "Снимки", color: "snapshot" },
@@ -158,6 +165,9 @@
         if (sample && (!fields.length || fields.indexOf("catalog_bytes") < 0)) result.catalog = number(sample.catalog_bytes) === null ? result.catalog : sample.catalog_bytes;
         if (sample && (!fields.length || fields.indexOf("http_bytes") < 0)) result.http = number(sample.http_bytes) === null ? result.http : sample.http_bytes;
         if (sample && (!fields.length || fields.indexOf("snapshot_bytes") < 0)) result.snapshot = number(sample.snapshot_bytes) === null ? result.snapshot : sample.snapshot_bytes;
+        var proc = sample && list(sample.processes).find(function (item) { return item.name === PRIMARY; });
+        result.heap_live = number(proc && proc.heap_live_bytes);
+        result.heap_peak = number(proc && proc.heap_peak_bytes);
         return result;
       }).filter(Boolean);
     }
@@ -167,6 +177,7 @@
         at: number(sample && sample.at), time: sampleTime(sample), time_domain: number(sample && sample.mono_ms) === null ? "wall" : "mono", generation: number(proc.pid),
         rss: kibBytes(number(proc.rss_kib)), rss_anon: kibBytes(number(proc.anon_kib)),
         vm_data: kibBytes(number(proc.vm_data_kib)), anonymous: null, private_dirty: null,
+        heap_live: number(proc.heap_live_bytes), heap_peak: number(proc.heap_peak_bytes),
         catalog: number(sample && sample.catalog_bytes), http: number(sample && sample.http_bytes),
         snapshot: number(sample && sample.snapshot_bytes), tracked_tcp: null, tracked_quic: null, tracked_tls: null,
         status: null, errno: null
@@ -190,6 +201,48 @@
       final.errno = number(latest.smaps_rollup_errno);
     }
     return rows;
+  }
+  function processMemoryRows(samples, name) {
+    var previous = null, generation = 0;
+    return samples.map(function (sample) {
+      var proc = list(sample && sample.processes).find(function (item) { return item && item.name === name; }) || {};
+      var pid = number(proc.pid), ticks = number(proc.start_ticks);
+      var identity = pid > 0 ? pid + "/" + (ticks === null ? "" : ticks) : null;
+      if (identity !== previous) generation++;
+      previous = identity;
+      return {
+        at: number(sample && sample.at), time: sampleTime(sample),
+        time_domain: number(sample && sample.mono_ms) === null ? "wall" : "mono",
+        generation: identity === null ? null : generation,
+        rss: identity === null ? null : kibBytes(proc.rss_kib),
+        rss_anon: identity === null ? null : kibBytes(proc.anon_kib),
+        vm_data: identity === null ? null : kibBytes(proc.vm_data_kib),
+        heap_live: identity === null ? null : number(proc.heap_live_bytes),
+        heap_peak: identity === null ? null : number(proc.heap_peak_bytes)
+      };
+    });
+  }
+  function selectMemoryProcess(doc, samples) {
+    var select = doc.getElementById("diagnostic-memory-process");
+    var options = {};
+    options[PRIMARY] = true;
+    samples.forEach(function (sample) {
+      list(sample && sample.processes).forEach(function (proc) {
+        if (proc && number(proc.pid) > 0 && Object.hasOwn(PROCESS_LABELS, proc.name)) options[proc.name] = true;
+      });
+    });
+    var names = Object.keys(options), selected = options[select.value] ? select.value : PRIMARY;
+    if (Array.from(select.options, function (option) { return option.value; }).join() !== names.join()) {
+      select.replaceChildren(...names.map(function (name) {
+        var option = doc.createElement("option");
+        option.value = name;
+        option.textContent = PROCESS_LABELS[name];
+        return option;
+      }));
+    }
+    select.value = selected;
+    select.hidden = names.length < 2;
+    return selected;
   }
   function rowsInRange(rows, hours, intervalMs) {
     if (!rows.length) return [];
@@ -235,7 +288,7 @@
     if (number(seconds) === null) return "—";
     return new Date(seconds * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
-  function drawMemory(doc, allRows, hours, intervalMs, size) {
+  function drawMemory(doc, allRows, hours, intervalMs, size, processLabel) {
     var chart = doc.getElementById("diagnostic-memory-chart"), empty = doc.getElementById("diagnostic-memory-empty");
     if (!chart || !empty) return { rows: [], delta: null, axisUnit: null };
     var rows = rowsInRange(allRows, hours, intervalMs);
@@ -268,7 +321,7 @@
     active.forEach(function (metric) { rows.forEach(function (row) { if (number(row[metric.key]) !== null) all.push(row[metric.key]); }); });
     chart.replaceChildren();
     chart.dataset.points = String(rows.length);
-    chart.setAttribute("aria-label", "Память контроллера, период " + hours + " часа, точек: " + rows.length);
+    chart.setAttribute("aria-label", processLabel + " · память за " + rangeText(hours) + " · точек: " + rows.length);
     if (!rows.length || !active.length || !all.length) {
       chart.setAttribute("hidden", "");
       empty.hidden = false;
@@ -314,7 +367,7 @@
     }
     active.forEach(function (metric) {
       var commands = [], points = [], priorPoint;
-      var processSeries = ["rss", "rss_anon", "vm_data", "anonymous", "private_dirty"].includes(metric.key);
+      var processSeries = ["rss", "rss_anon", "vm_data", "anonymous", "private_dirty", "heap_live", "heap_peak"].includes(metric.key);
       rows.forEach(function (row, index) {
         var value = number(row[metric.key]);
         if (value === null) { priorPoint = null; return; }
@@ -348,14 +401,9 @@
     var body = doc.getElementById("diagnostic-processes");
     if (!body) return { mismatch: null };
     body.replaceChildren();
-    var labels = {
-      "r2o-controller": "Контроллер", "r2o-datapath": "Датапат", "r2o-panel": "Панель",
-      "r2o-controller4": "Контроллер IPv4 (раздельно)", "r2o-controller6": "Контроллер IPv6 (раздельно)",
-      "r2o-datapath4": "Датапат IPv4 (раздельно)", "r2o-datapath6": "Датапат IPv6 (раздельно)"
-    };
     var last = samples[samples.length - 1];
     if (!last || !list(last.processes).length) {
-      var empty = doc.createElement("tr"), cell = doc.createElement("td"); cell.colSpan = 3; cell.textContent = "Данные процессов недоступны."; empty.appendChild(cell); body.appendChild(empty); return { mismatch: null };
+      var empty = doc.createElement("tr"), cell = doc.createElement("td"); cell.colSpan = 4; cell.textContent = "Данные процессов недоступны."; empty.appendChild(cell); body.appendChild(empty); return { mismatch: null };
     }
     var processMono = number(last.mono_ms), memoryAt = latestMemory && number(latestMemory.time);
     var compareMono = processMono !== null && latestMemory && latestMemory.time_domain === "mono";
@@ -365,22 +413,18 @@
     var aligned = timeDifference !== null && timeDifference <= 1;
     var mismatch = null;
     list(last.processes).forEach(function (proc) {
-      var first = null, firstSample = null;
-      samples.some(function (sample) {
-        first = list(sample.processes).filter(function (item) { return item.name === proc.name && item.pid === proc.pid && number(item.rss_kib) !== null; })[0] || null;
-        if (first) firstSample = sample;
-        return !!first;
-      });
-      var known = kibBytes(number(proc.rss_kib)), delta = known !== null && firstSample && firstSample !== last && number(first.rss_kib) !== null ? known - first.rss_kib * 1024 : null;
+      var known = kibBytes(proc.rss_kib), anonymous = kibBytes(proc.anon_kib);
+      var delta = known === null ? null : seriesEndpoints(processMemoryRows(samples, proc.name), "rss").delta;
       if (proc.name === PRIMARY && aligned && latestMemory && number(latestMemory.rss) !== null) {
         var historyRss = seriesEndpoints(memoryRowsInRange, "rss");
         if (known !== null && Math.abs(known - latestMemory.rss) > 1024) mismatch = { process: known, memory: latestMemory.rss };
         known = latestMemory.rss;
+        anonymous = firstDefined([latestMemory.rss_anon, anonymous]);
         delta = historyRss.delta;
       }
       var row = doc.createElement("tr"), name = doc.createElement("td"), code = doc.createElement("small");
-      name.textContent = labels[proc.name] || proc.name; code.textContent = proc.name; name.appendChild(code); row.appendChild(name);
-      [known === null ? "—" : formatBytes(known), delta === null ? "—" : formatDeltaBytes(delta)].forEach(function (value) {
+      name.textContent = PROCESS_LABELS[proc.name] || proc.name; code.textContent = proc.name; name.appendChild(code); row.appendChild(name);
+      [formatBytes(known), formatBytes(anonymous), formatDeltaBytes(delta)].forEach(function (value) {
         var item = doc.createElement("td"); item.textContent = value; row.appendChild(item);
       });
       body.appendChild(row);
@@ -394,6 +438,51 @@
       note.textContent = timeNote + " Изменение контроллера — за выбранный период графика; остальных процессов — за доступную историю того же PID.";
     }
     return { mismatch: mismatch };
+  }
+  function renderProcessDetail(doc, report, selected) {
+    var box = doc.getElementById("diagnostic-process-detail");
+    var platform = report.memory_platform || {};
+    var detail = list(report.memory_details).find(function (item) { return item && item.name === selected; });
+    var latest = detail && detail.latest;
+    box.hidden = !report.memory_platform && !(latest && latest.build);
+    if (box.hidden) return;
+    var build = latest && latest.build || {}, heap = build.heap, tables = latest && latest.tables || {};
+    var facts = doc.getElementById("diagnostic-process-facts");
+    var linkage = latest && { "static": "Статическая", "dynamic": "Динамическая" }[latest.linkage];
+    var fields = [
+      ["Архитектура", build.target || platform.architecture],
+      ["Toolchain", [build.rustc, build.toolchain].filter(Boolean).join(" · ")],
+      ["Линковка", linkage],
+      ["Аллокатор", build.allocator || "Не подтверждён"],
+      ["Ядро", platform.kernel],
+      ["Размер страницы", formatBytes(platform.page_size)],
+      ["Источник анонимной памяти", latest && latest.rss_anon_source],
+      ["Живые аллокации", heap && formatBytes(heap.live_bytes) + " · объектов " + pretty(number(heap.live_objects))],
+      ["Пик аллокаций", heap && formatBytes(heap.peak_bytes)]
+    ];
+    facts.replaceChildren(...fields.map(function (fact) {
+      var row = doc.createElement("div"), dt = doc.createElement("dt"), dd = doc.createElement("dd");
+      dt.textContent = fact[0]; dd.textContent = fact[1] || "—"; row.append(dt, dd); return row;
+    }));
+    setText(doc, "diagnostic-process-coverage", heap && heap.coverage === "rust-system-requests-since-start"
+      ? "Размеры запросов Rust к системному аллокатору с запуска процесса. Стек, mmap и прямые вызовы libc вне покрытия."
+      : "Расширенные счётчики доступны в сборке с диагностикой аллокаций.");
+    var table = doc.getElementById("diagnostic-process-tables");
+    table.closest(".table-scroll").hidden = !Object.keys(tables).length;
+    table.replaceChildren(...Object.entries(tables).map(function (entry) {
+      var row = doc.createElement("tr");
+      var value = entry[1], bytes = entry[0].endsWith("-bytes");
+      var label = {
+        measurements: "Задачи замеров", catalog: "Планы каталога",
+        "http-records-bytes": "HTTP-записи", "http-queue-bytes": "Очередь HTTP",
+        "http-evidence-bytes": "Свидетельства HTTP"
+      }[entry[0]] || entry[0];
+      [label, bytes ? formatBytes(value[0]) : pretty(number(value[0])),
+        bytes ? formatBytes(value[1]) : pretty(number(value[1]))].forEach(function (item) {
+        var cell = doc.createElement("td"); cell.textContent = item; row.appendChild(cell);
+      });
+      return row;
+    }));
   }
   function reasonText(values) {
     return list(values).map(function (value) { return reasons[value] || value; }).join(", ") || "причина не указана";
@@ -454,6 +543,22 @@
       "Процессы: " + formatBytes(processMismatch.process) + "; история памяти: " + formatBytes(processMismatch.memory));
     if (storageMismatch && storageMismatch.length) add("warning", "Несовпадение объёмов в отчёте",
       "График и карточки показывают снимок истории памяти; общий отчёт содержит другие значения.", storageMismatch.join("; "));
+    var byProcess = new Map();
+    anomalies.forEach(function (item) {
+      if (item && item.kind === "process-rss-growth" && typeof item.process === "string") byProcess.set(item.process, item);
+    });
+    byProcess.forEach(function (item, name) {
+      var explanations = {
+        "live-allocations": "Одновременно вырос объём живых аллокаций Rust.",
+        "possible-allocator-retention": "Анонимная память выросла после пика аллокаций. Возможное удержание памяти аллокатором.",
+        unattributed: "Доступные счётчики не объясняют рост."
+      };
+      add("warning", (PROCESS_LABELS[name] || name) + " · устойчивый рост RSS",
+        "За " + pretty(number(item.window_samples)) + " снимков RSS вырос на " + formatKib(item.rss_delta_kib) + ". " +
+          (explanations[item.cause] || explanations.unattributed),
+        "PID " + pretty(number(item.pid)) + " · Δ RssAnon " + formatDeltaBytes(kibBytes(item.anon_delta_kib)) +
+          " · Δ живых аллокаций " + formatDeltaBytes(item.live_delta_bytes));
+    });
     var growthAnomalies = anomalies.filter(function (item) { return item && item.kind === "unattributed-rss-growth"; });
     var growth = growthAnomalies[growthAnomalies.length - 1];
     if (growth) {
@@ -639,10 +744,15 @@
     data.hidden = !enabled || (!last && !memorySamples.length);
     if (data.hidden) return null;
     var allMemoryRows = memoryRows(report), intervalMs = number(mem && mem.sample_interval_ms) || number(report.sample_interval_ms) || 60000;
-    var latest = allMemoryRows[allMemoryRows.length - 1];
+    var process = selectMemoryProcess(doc, samples);
+    renderProcessDetail(doc, report, process);
+    var graphRows = process === PRIMARY ? allMemoryRows : processMemoryRows(samples, process);
+    var latest = graphRows[graphRows.length - 1];
     setText(doc, "diagnostic-latest-rss", formatBytes(latest && latest.rss));
     setText(doc, "diagnostic-latest-anon", formatBytes(latest && latest.rss_anon));
-    setText(doc, "diagnostic-latest-count", countWithCapacity(allMemoryRows.length, mem && mem.capacity));
+    var sampleCount = process === PRIMARY ? graphRows.length :
+      graphRows.filter(function (row) { return row.rss !== null || row.rss_anon !== null; }).length;
+    setText(doc, "diagnostic-latest-count", countWithCapacity(sampleCount, process === PRIMARY ? mem && mem.capacity : report.sample_capacity));
     renderEvents(doc, events);
     setText(doc, "diagnostic-workers-running", pretty(number(last && last.workers_running)));
     setText(doc, "diagnostic-workers-result", pretty(number(last && last.workers_result_pending)));
@@ -699,7 +809,7 @@
     renderAimd(doc, report, last);
     var technical = doc.getElementById("diagnostic-technical");
     technical.hidden = !technical.querySelector(".diag-card:not([hidden])");
-    var chart = drawMemory(doc, allMemoryRows, range, intervalMs, size);
+    var chart = drawMemory(doc, graphRows, range, intervalMs, size, PROCESS_LABELS[process]);
     setText(doc, "diagnostic-memory-interval", intervalText(intervalMs, chart.axisUnit));
     setText(doc, "diagnostic-history-coverage", chart.rows.length === 1 ?
       "Пока один снимок. Линия появится после следующего." : coverageText(chart.rows, range));
@@ -707,7 +817,8 @@
     change.hidden = chart.delta === null;
     if (!change.hidden) change.textContent = formatDeltaBytes(chart.delta) + " за период";
     var latestMemory = allMemoryRows.length ? allMemoryRows[allMemoryRows.length - 1] : null;
-    var processState = processRows(doc, samples, chart.rows, latestMemory);
+    var controllerRows = process === PRIMARY ? chart.rows : rowsInRange(allMemoryRows, range, intervalMs);
+    var processState = processRows(doc, samples, controllerRows, latestMemory);
     renderWarnings(doc, report, allMemoryRows, processState.mismatch, storageMismatch);
     return chart;
   }
@@ -740,7 +851,7 @@
       "Снимков памяти: " + countWithCapacity(list(memory.samples).length, memory.capacity) + extras;
   }
   if (typeof module === "object" && module.exports) module.exports = {
-    summary: summary, memoryRows: memoryRows, rowsInRange: rowsInRange,
+    summary: summary, memoryRows: memoryRows, processMemoryRows: processMemoryRows, rowsInRange: rowsInRange,
     seriesEndpoints: seriesEndpoints, formatBytes: formatBytes, coverageText: coverageText
   };
   if (!root.document || !root.fetch) return;
@@ -946,6 +1057,10 @@
           graph.animate([{ opacity: .68 }, { opacity: 1 }], { duration: 170, easing: "ease-out" });
         }
       });
+    });
+    doc.getElementById("diagnostic-memory-process").addEventListener("change", function () {
+      selectedAt = undefined;
+      redraw();
     });
     doc.querySelectorAll("[data-memory-series]").forEach(function (input) { input.addEventListener("change", redraw); });
     eventFilter.addEventListener("change", function () {
