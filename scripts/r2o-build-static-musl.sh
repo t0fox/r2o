@@ -37,7 +37,12 @@ esac
 export R2O_BUILD_TOOLCHAIN R2O_BUILD_ALLOCATOR
 export "CC_$target_env=$cc"
 export "CARGO_TARGET_${cargo_target_env}_LINKER=$cc"
-export "CARGO_TARGET_${cargo_target_env}_RUSTFLAGS=-Ctarget-feature=+crt-static -Clink-self-contained=no -Crelocation-model=static"
+rustflags="-Ctarget-feature=+crt-static -Clink-self-contained=no -Crelocation-model=static"
+if [ -n "${R2O_MIPSEL_LINK_MAPS:-}" ]; then
+    test "$ABI" = mipsel
+    rustflags="$rustflags -Clink-arg=-Wl,--undefined=__libc_malloc_impl"
+fi
+export "CARGO_TARGET_${cargo_target_env}_RUSTFLAGS=$rustflags"
 export CARGO_PROFILE_RELEASE_PANIC=abort
 case "$ABI" in
     mipsel|mips-openwrt-musl|mips64el-musl)

@@ -44,8 +44,9 @@ if [ -n "${R2O_MIPSEL_LINK_MAPS:-}" ]; then
         if [ "$next_output" = yes ]; then
             output_name=${argument##*/}
             case "$output_name" in
-                r2o_controller-*|r2o_datapath-*|r2o_panel-*|r2o_telegram-*|r2o_manager-*|r2o_fetch-*|r2o_detect-*)
-                    set -- "$@" "-Wl,-Map,$R2O_MIPSEL_LINK_MAPS/$output_name.map" ;;
+                r2o[_-]*)
+                    set -- "$@" "-Wl,-Map,$R2O_MIPSEL_LINK_MAPS/$output_name.map"
+                    printf 'r2o: карта линковки %s\n' "$output_name" >&2 ;;
             esac
             break
         fi
