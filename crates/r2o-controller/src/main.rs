@@ -9901,6 +9901,41 @@ fn r2o_family_recovery_sibling_trial(
 }
 
 #[cfg(unix)]
+fn r2o_collect_family_trial_events(
+    commands: &dyn HttpSearchCommandSink,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    local_port: u16,
+    plan_id: [u8; 16],
+    trial_id: [u8; 16],
+    timeout: std::time::Duration,
+) -> (
+    Result<Vec<r2k_core::control::AppliedEvent>, String>,
+    Option<u8>,
+) {
+    let take_refusal = || r2o_take_early_refusal(target, plan_id, Some(trial_id));
+    let refusal = std::cell::Cell::new(take_refusal());
+    let events = if refusal.get().is_some() {
+        Ok(Vec::new())
+    } else {
+        r2o_collect_controller_applied_events_until_satisfied(
+            commands,
+            trial_id,
+            timeout,
+            |events| {
+                refusal.set(take_refusal());
+                refusal.get().is_some()
+                    || events.iter().any(|event| {
+                        r2o_family_applied_flow_matches(
+                            event, target, local_port, plan_id, trial_id,
+                        )
+                    })
+            },
+        )
+    };
+    (events, refusal.into_inner())
+}
+
+#[cfg(unix)]
 fn r2o_family_recovery_sibling_trial_with_ech_state(
     target: &r2o_controller::discovery::DiscoveryTarget,
     destination: std::net::SocketAddr,
@@ -10106,19 +10141,13 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         } else {
             r2o_family_applied_grace(&fetch_result)
         });
-        let events = r2o_collect_controller_applied_events_until(
+        let (events, refusal) = r2o_collect_family_trial_events(
             commands,
+            target,
+            local_port,
+            candidate.plan_id,
             trial_id,
             applied_grace,
-            |event| {
-                r2o_family_applied_flow_matches(
-                    event,
-                    target,
-                    local_port,
-                    candidate.plan_id,
-                    trial_id,
-                )
-            },
         );
         let applied_us = phase_elapsed_us();
         let delete_result =
@@ -10155,14 +10184,14 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         drop(socket_hold);
         let mut events = events?;
         events.extend(delete_result?);
-        // C `ver_unsent_early`: REFUSED мог прийти до того, как сетевой зонд
-        // назвал свой ключ; он всё равно отменяет подтверждение кандидата.
-        // Для QUIC/by_addr trial обязателен.
-        let refusal_trial = (target.shape == SHAPE_QUIC).then_some(trial_id);
-        if let Some(code) = r2o_take_early_refusal(target, candidate.plan_id, refusal_trial) {
+        // C `ver_unsent_early`: отказ может прийти раньше сетевого результата.
+        // Параллельные проверки одного плана различаются по trial ID.
+        if let Some(code) =
+            refusal.or_else(|| r2o_take_early_refusal(target, candidate.plan_id, Some(trial_id)))
+        {
             return Err(format!(
                 "план отвергнут исполнителем: {} (код {code})",
-                ack_reason_text(code)
+                r2o_datapath::flow_journal::r2o_refuse_text(code)
             ));
         }
         if std::env::var_os("R2O_DEBUG_APPLIED").is_some() {
@@ -60620,6 +60649,67 @@ group_block_proven: false,
         assert_eq!(events[0].trial_id, [2; 16]);
         assert_eq!(client.pending_applied_events.len(), 1);
         assert_eq!(client.pending_applied_events[0].trial_id, [1; 16]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn family_trial_stops_waiting_for_an_exact_refusal() {
+        use r2k_core::control;
+        use r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_ROUTE;
+        let plan_id = [0x75; 16];
+        let trial_id = [0x36; 16];
+        let local_port = 42193;
+        let endpoint = "198.51.100.71:443".parse().unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
+            host: "route-refused.example".into(),
+            endpoint: std::net::SocketAddr::to_string(&endpoint),
+            family: 4,
+            shape: r2k_core::control::SHAPE_MODERN,
+        };
+        let refusal = r2k_core::control::RefusedEvent {
+            key: super::r2o_ask_flow_key("192.0.2.11".parse().unwrap(), local_port, endpoint),
+            code: R2O_JOURNAL_REFUSE_ROUTE,
+            plan_id,
+            trial_id,
+            client_shape: None,
+            execution_id: None,
+            binding: None,
+        };
+        let other_trial_id = [0x37; 16];
+        super::r2o_note_early_refusal(&r2k_core::control::RefusedEvent {
+            trial_id: other_trial_id,
+            ..refusal.clone()
+        });
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let controller = std::thread::spawn(move || {
+            let HttpSearchCommand::CollectApplied { reply, .. } = receiver.recv().unwrap() else {
+                panic!("ожидалась команда сбора APPLIED");
+            };
+            let frame = control::Frame {
+                kind: control::EVENT_REFUSED,
+                body: refusal.event_body().unwrap(),
+            };
+            super::r2o_note_early_refusal(&control::decode_refused(&frame).unwrap());
+            reply.send(Ok(Vec::new())).unwrap();
+        });
+        let started = std::time::Instant::now();
+        let (events, refused) = super::r2o_collect_family_trial_events(
+            &commands,
+            &target,
+            local_port,
+            plan_id,
+            trial_id,
+            std::time::Duration::from_secs(5),
+        );
+        controller.join().unwrap();
+        assert!(events.unwrap().is_empty());
+        assert_eq!(refused, Some(R2O_JOURNAL_REFUSE_ROUTE));
+        assert_eq!(
+            super::r2o_take_early_refusal(&target, plan_id, Some(other_trial_id)),
+            Some(R2O_JOURNAL_REFUSE_ROUTE)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[cfg(unix)]
