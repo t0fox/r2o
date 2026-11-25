@@ -42,7 +42,7 @@ pub fn r2o_suspect_text(code: u8) -> &'static str {
     }
 }
 
-/// Тексты D2O `d2k_refuse_text`, байт-в-байт.
+/// Тексты D2O `d2k_refuse_text` и собственный код отказа R2O из-за маршрута.
 pub fn r2o_refuse_text(code: u8) -> &'static str {
     match code {
         0 => "причина не названа",
@@ -1188,7 +1188,15 @@ mod journal_parity_tests {
         for (code, text) in refusals {
             assert_eq!(r2o_refuse_text(code), text, "refuse {code}");
         }
-        assert_eq!(r2o_refuse_text(7), "отказ без кода");
+        assert_eq!(r2o_refuse_text(u8::MAX), "отказ без кода");
+    }
+
+    #[test]
+    fn journal_explains_route_refusal() {
+        assert_eq!(
+            r2o_refuse_text(super::R2O_JOURNAL_REFUSE_ROUTE),
+            "маршруты локальной пробы и raw различаются"
+        );
     }
 
     #[test]
