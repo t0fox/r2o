@@ -316,8 +316,9 @@ RULES
     echo 'FULLCONE_TRANSIT_PASS'
 fi
 
-# Accounting is attached when a conntrack entry is created. Keep the same
-# client socket across recovery and compare it with a fresh tuple.
+# Accounting is attached when a conntrack entry is created. Create the old
+# tuple while the platform is down so network events cannot re-enable accounting.
+platform down
 sysctl -qw net.netfilter.nf_conntrack_acct=0
 ip netns exec "$WAN" python3 - "$TEMP" <<'PY' &
 import pathlib, socket, sys
@@ -327,7 +328,9 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
     server.settimeout(10)
     (root / "acct-server").touch()
     first = server.recvfrom(256)
+    (root / "acct-old").touch()
     second = server.recvfrom(256)
+    (root / "acct-second").touch()
     fresh = server.recvfrom(256)
     assert [first[0], second[0], fresh[0]] == [b"old", b"old", b"fresh"]
     assert first[1] == second[1] != fresh[1]
@@ -347,10 +350,8 @@ def await_signal(name):
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as old:
     old.connect(("198.18.0.2", 443))
     old.send(b"old")
-    (root / "acct-old").touch()
     await_signal("acct-recovered")
     old.send(b"old")
-    (root / "acct-sent").touch()
     await_signal("acct-fresh")
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as fresh:
         fresh.sendto(b"fresh", ("198.18.0.2", 443))
@@ -358,19 +359,17 @@ PY
 CLIENT=$!
 for _ in $(seq 1 40); do [ ! -f "$TEMP/acct-old" ] || break; sleep 0.1; done
 test -f "$TEMP/acct-old"
+[ "$(cat /proc/sys/net/netfilter/nf_conntrack_acct)" = 0 ]
+platform up
 before=$(seq4)
-platform event
-for _ in $(seq 1 40); do
-    if platform status >"$TEMP/status" 2>/dev/null; then break; fi
-    sleep 0.1
-done
+platform status >"$TEMP/status"
 grep -q 'conntrack_accounting=enabled' "$TEMP/status"
 if [ -r /proc/net/nf_conntrack ]; then
     grep -Eq '^conntrack_entries=sampled .*without_full_counters=[1-9]' "$TEMP/status"
 fi
 touch "$TEMP/acct-recovered"
-for _ in $(seq 1 40); do [ ! -f "$TEMP/acct-sent" ] || break; sleep 0.1; done
-test -f "$TEMP/acct-sent"
+for _ in $(seq 1 40); do [ ! -f "$TEMP/acct-second" ] || break; sleep 0.1; done
+test -f "$TEMP/acct-second"
 [ "$(seq4)" = "$before" ]
 touch "$TEMP/acct-fresh"
 wait "$CLIENT"
@@ -378,6 +377,15 @@ CLIENT=
 wait "$SERVER"
 SERVER=
 [ "$(seq4)" -gt "$before" ]
+
+# The running worker also restores a sysctl reset without replacing conntrack.
+sysctl -qw net.netfilter.nf_conntrack_acct=0
+platform event
+for _ in $(seq 1 40); do
+    if platform status >"$TEMP/status" 2>/dev/null; then break; fi
+    sleep 0.1
+done
+grep -q 'conntrack_accounting=enabled' "$TEMP/status"
 echo 'CONNTRACK_EXISTING_AND_FRESH_PASS'
 
 if [ -n "${R2O_HTTP3_LAN_BIN:-}" ]; then
