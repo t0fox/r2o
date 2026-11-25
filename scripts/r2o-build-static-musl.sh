@@ -18,6 +18,10 @@ case "$ABI" in
 esac
 
 : "${ZIG:?не задан путь к Zig}"
+if [ "$ABI" = mipsel ] && [ "$("$ZIG" version)" != 0.15.2 ]; then
+    echo "Для статической сборки MIPSEL нужен Zig 0.15.2" >&2
+    exit 2
+fi
 cd "$ROOT"
 target_env=$(printf '%s' "$TARGET" | tr '-' '_')
 cargo_target_env=$(printf '%s' "$target_env" | tr '[:lower:]' '[:upper:]')
