@@ -273,7 +273,20 @@ runtime_failure() {
     tool=$1
     package=$2
     shift 2
-    if ! "$tool" "$@" > /dev/null 2>"$TMP/runtime-probe.err"; then
+    lock_retries=10
+    while ! "$tool" "$@" > /dev/null 2>"$TMP/runtime-probe.err"; do
+        case "$tool" in
+            iptables|ip6tables)
+                # Старый Entware iptables не поддерживает таймаут в -w.
+                if grep -Fq 'holding the xtables lock' "$TMP/runtime-probe.err"; then
+                    [ "$lock_retries" -gt 0 ] ||
+                        die "$tool: xtables lock занят после 10 секунд ожидания. Повторите установку после завершения изменения правил firewall."
+                    lock_retries=$((lock_retries - 1))
+                    sleep 1
+                    continue
+                fi
+                ;;
+        esac
         cat "$TMP/runtime-probe.err" >&2
         if [ -n "$APK" ]; then
             die "$tool: проверка $* не прошла. Проверьте прошивку и пакеты: $APK fix $package"
@@ -282,7 +295,7 @@ runtime_failure() {
         else
             die "$tool: проверка $* не прошла. Установите штатный пакет $package"
         fi
-    fi
+    done
 }
 
 try_module() {

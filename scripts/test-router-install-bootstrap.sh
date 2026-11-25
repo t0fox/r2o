@@ -189,12 +189,31 @@ case "$1" in
     *) exit 2 ;;
 esac
 EOF
+cat > "$MOCK/xtables-mangle" <<'EOF'
+#!/bin/sh
+set -eu
+attempts="$R2O_TEST_INSTALLED/$1.attempts"
+case "${TEST_XTABLES_PROBE:-ok}" in
+    ok) exit 0 ;;
+    transient) [ ! -e "$attempts" ] || { printf 'attempt\n' >> "$attempts"; exit 0; } ;;
+esac
+printf 'attempt\n' >> "$attempts"
+if [ "$TEST_XTABLES_PROBE" = missing-mangle ]; then
+    echo 'cannot initialize mangle: Table does not exist' >&2
+    exit 3
+fi
+echo 'Another app is currently holding the xtables lock. Perhaps you want to use the -w option?' >&2
+exit 4
+EOF
 cat > "$MOCK/iptables" <<'EOF'
 #!/bin/sh
 set -eu
 case "$*" in
-    -V|'-t mangle -S PREROUTING'|'-t nat -S OUTPUT')
+    -V|'-t nat -S OUTPUT')
         [ "${TEST_NEED_IPTABLES:-0}" = 0 ] || [ -e "$R2O_TEST_INSTALLED/iptables" ] ;;
+    '-t mangle -S PREROUTING')
+        [ "${TEST_NEED_IPTABLES:-0}" = 0 ] || [ -e "$R2O_TEST_INSTALLED/iptables" ] || exit 88
+        exec "${0%/*}/xtables-mangle" iptables ;;
     '-j NFQUEUE --queue-num 65535 --queue-bypass --help')
         [ "${TEST_NEED_IPT_QUEUE:-0}" = 0 ] || [ -e "$R2O_TEST_INSTALLED/iptables-mod-nfqueue" ] ;;
     *) exit 88 ;;
@@ -204,7 +223,10 @@ cat > "$MOCK/ip6tables" <<'EOF'
 #!/bin/sh
 printf 'IPv6\n' >> "$R2O_TEST_PROBES"
 [ "$*" != '-t nat -S OUTPUT' ] || exit 88
-[ "${TEST_DISABLE_IP6TABLES:-0}" = 0 ]
+[ "${TEST_DISABLE_IP6TABLES:-0}" = 0 ] || exit 88
+if [ "$*" = '-t mangle -S PREROUTING' ]; then
+    exec "${0%/*}/xtables-mangle" ip6tables
+fi
 EOF
 cat > "$MOCK/iptables-restore" <<'EOF'
 #!/bin/sh
@@ -553,6 +575,38 @@ TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 run_entwar
 grep -Fxq 'apply 1' "$CASE/probes.log" || fail 'Keenetic failed to check IPv6 without optional NAT6'
 
 ! grep -q dnsmasq "$CASE/packages.log" || fail 'чистый Keenetic установил dnsmasq для удалённой подсистемы'
+
+new_case keenetic-transient-xtables-lock
+prepare_entware_fixture
+TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 TEST_XTABLES_PROBE=transient \
+    run_entware > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'transient xtables lock aborted Keenetic installation'; }
+for family_tool in iptables ip6tables; do
+    [ "$(wc -l < "$CASE/installed/$family_tool.attempts")" -eq 2 ] ||
+        fail "$family_tool did not retry the mangle check"
+done
+grep -Fxq 'apply 1' "$CASE/probes.log" || fail 'Keenetic skipped activation after lock release'
+
+new_case keenetic-persistent-xtables-lock
+prepare_entware_fixture
+if TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 TEST_XTABLES_PROBE=persistent \
+    run_entware > "$CASE/out" 2>&1; then
+    fail 'a persistent xtables lock allowed activation'
+fi
+grep -q 'xtables lock занят' "$CASE/out" || fail 'a persistent lock was not diagnosed'
+! grep -q 'force-reinstall' "$CASE/out" || fail 'installer suggested reinstalling a locked iptables'
+[ "$(wc -l < "$CASE/installed/iptables.attempts")" -eq 11 ] || fail 'unexpected lock retry count'
+[ ! -s "$CASE/manager.log" ] || fail 'Keenetic activated while the lock was held'
+
+new_case keenetic-missing-mangle-table
+prepare_entware_fixture
+if TEST_OPENWRT_RELEASE="$CASE/no-openwrt-release" TEST_ENTWARE_KERNEL=1 TEST_XTABLES_PROBE=missing-mangle \
+    run_entware > "$CASE/out" 2>&1; then
+    fail 'Keenetic without mangle was activated'
+fi
+grep -q 'Table does not exist' "$CASE/out" || fail 'real mangle error was hidden'
+grep -q 'force-reinstall iptables' "$CASE/out" || fail 'mangle error lost its installation diagnosis'
+[ "$(wc -l < "$CASE/installed/iptables.attempts")" -eq 1 ] || fail 'mangle error was retried'
 
 new_case keenetic-existing-dnsmasq-init
 printf '#!/bin/sh\nENABLED=yes\n# Настройки владельца\n' > "$CASE/opt/etc/init.d/S56dnsmasq"
