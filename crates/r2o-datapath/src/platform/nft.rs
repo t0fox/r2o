@@ -276,8 +276,8 @@ pub(super) fn install(platform: &Platform, ipv6: bool, leases: &Leases) -> Resul
     Nft.apply(&batch_rules)
 }
 
-fn fw4_chain(name: &str) -> Result<Option<String>> {
-    let args = ["-a", "list", "chain", "inet", "fw4", name];
+fn fw4_object(kind: &str, name: &str) -> Result<Option<String>> {
+    let args = ["-a", "list", kind, "inet", "fw4", name];
     let output = invoke("nft", &args, None)?;
     if !output.status.success()
         && String::from_utf8_lossy(&output.stderr).contains("No such file or directory")
@@ -293,198 +293,91 @@ fn handle(rule: &str) -> Option<(&str, u64)> {
     Some((body.trim_end(), id.parse().ok()?))
 }
 
-// Из nlink config::rules::longest_increasing (Marc Pardo, MIT).
-// Нужна только упорядоченная ветка plan_chain для нашей собственной цепочки.
-fn longest_increasing(seq: &[usize]) -> std::collections::BTreeSet<usize> {
-    let mut tails: Vec<usize> = Vec::new();
-    let mut prev: Vec<Option<usize>> = vec![None; seq.len()];
-    for (i, &v) in seq.iter().enumerate() {
-        let k = tails.partition_point(|&t| seq[t] < v);
-        if k > 0 {
-            prev[i] = Some(tails[k - 1]);
-        }
-        if k == tails.len() {
-            tails.push(i);
-        } else {
-            tails[k] = i;
-        }
-    }
-    let mut out = std::collections::BTreeSet::new();
-    let mut cur = tails.last().copied();
-    while let Some(i) = cur {
-        out.insert(seq[i]);
-        cur = prev[i];
-    }
-    out
+fn flowtable_definition(listing: &str) -> Option<String> {
+    let mut lines = listing.lines().map(str::trim);
+    lines.find(|line| {
+        line.split_once('#')
+            .map_or(*line, |(code, _)| code.trim_end())
+            == "flowtable ft {"
+    })?;
+    let body: Vec<_> = lines.take_while(|line| *line != "}").collect();
+    (!body.is_empty()).then(|| body.join("\n"))
 }
 
-fn offload_diff(existing: &str, desired: &[String]) -> String {
-    let mut installed = BTreeMap::new();
-    let mut order = Vec::new();
-    let mut edits = String::new();
-    for (rule, handle) in existing.lines().filter_map(handle) {
-        if rule.ends_with('{') || rule.starts_with("comment ") {
-            continue;
-        }
-        let rule = if rule == ADMISSION_ALTERNATE {
-            ADMISSION
-        } else {
-            rule
-        };
-        if let Some(index) = desired.iter().position(|candidate| candidate == rule)
-            && !installed.contains_key(&index)
-        {
-            installed.insert(index, handle);
-            order.push(index);
-        } else {
-            writeln!(
-                edits,
-                "delete rule inet fw4 {OFFLOAD_CHAIN} handle {handle}"
-            )
-            .unwrap();
-        }
-    }
-    let staying = longest_increasing(&order);
-    for (&index, &handle) in &installed {
-        if !staying.contains(&index) {
-            writeln!(
-                edits,
-                "delete rule inet fw4 {OFFLOAD_CHAIN} handle {handle}"
-            )
-            .unwrap();
-        }
-    }
-    for (index, rule) in desired.iter().enumerate() {
-        if staying.contains(&index) {
-            continue;
-        }
-        if let Some(anchor) = staying.range(index..).next() {
-            let handle = installed[anchor];
-            writeln!(
-                edits,
-                "insert rule inet fw4 {OFFLOAD_CHAIN} position {handle} {rule}"
-            )
-            .unwrap();
-        } else {
-            writeln!(edits, "add rule inet fw4 {OFFLOAD_CHAIN} {rule}").unwrap();
-        }
-    }
-    edits
+#[derive(Clone, Copy)]
+enum Fw4Admission {
+    Absent,
+    Suspended,
 }
 
-fn port_match(ports: &str) -> String {
-    if ports.contains(',') {
-        let mut members: Vec<_> = ports.split(',').collect();
-        // nft list сортирует значения набора численно, включая интервалы.
-        members.sort_unstable_by_key(|member| {
-            member
-                .split(':')
-                .next()
-                .and_then(|port| port.parse::<u16>().ok())
-        });
-        format!("{{ {} }}", nft_ports(&members.join(",")))
-    } else {
-        nft_ports(ports)
+impl Fw4Admission {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Suspended => "suspended",
+        }
     }
 }
 
-fn admission_rules(platform: &Platform, ipv6: bool) -> Vec<String> {
-    let mut desired = Vec::new();
-    for endpoint in platform
-        .software_path
-        .iter()
-        .filter(|ep| ep.version() == 4 || ipv6)
-    {
-        let family = if endpoint.version() == 4 { "ip" } else { "ip6" };
-        let Endpoint {
-            address,
-            protocol,
-            port,
-            ..
-        } = endpoint;
-        desired.push(format!("meta l4proto {protocol} ct original {family} daddr {address} ct original proto-dst {port} return"));
-    }
-
-    let family = if ipv6 { "" } else { "meta nfproto ipv4 " };
-    let dns = port_match(&platform.dns);
-    let http = port_match(&platform.http);
-    // HTTP остаётся видимым для следующего запроса на том же соединении.
-    desired.push(format!("{family}meta l4proto tcp ct status != dnat ct original proto-dst != {dns} ct original proto-dst {http} return"));
-
-    let general = ("{ tcp, udp }", platform.ports.as_str(), platform.early);
-    let voice = ("udp", platform.voice.as_str(), platform.voice_window.1);
-    for (protocols, ports, window) in [general, voice] {
-        if window == 0
-            || protocols == "udp" && platform.ports == "0:65535" && window <= platform.early
-        {
-            continue;
-        }
-        let ports = if ports == "0:65535" {
-            String::new()
-        } else {
-            format!("ct original proto-dst {} ", port_match(ports))
-        };
-        // Оба направления имеют своё окно NFQUEUE. Общий предел сохраняет
-        // ускорение длинной передачи при редких пакетах обратного направления.
-        let cap = u32::from(window) * 4;
-        for direction in ["original", "reply"] {
-            desired.push(format!("{family}meta l4proto {protocols} ct status != dnat ct original proto-dst != {dns} {ports}ct {direction} packets 0-{window} ct packets 1-{cap} return"));
-        }
-    }
-    desired.push(ADMISSION.into());
-    desired
-}
-
-fn offload_plan(platform: &Platform, ipv6: bool, remove_rules: bool) -> Result<(String, bool)> {
-    let Some(forward) = fw4_chain("forward")? else {
-        return Ok((String::new(), false));
+fn offload_plan(remove_rules: bool) -> Result<(String, Fw4Admission)> {
+    let Some(forward) = fw4_object("chain", "forward")? else {
+        return Ok((String::new(), Fw4Admission::Absent));
     };
     let mut admissions = forward.lines().filter_map(handle).filter(|(rule, _)| {
         *rule == OFFLOAD_JUMP || rule.contains("flow add ") || rule.contains("flow offload ")
     });
-    let admission = admissions.next();
-    let own = fw4_chain(OFFLOAD_CHAIN)?;
+    let own = fw4_object("chain", OFFLOAD_CHAIN)?;
     if let Some(ref chain) = own
-        && !chain
-            .lines()
-            .any(|line| line.trim_start().starts_with("comment \"r2o-managed\""))
+        && !chain.lines().any(|line| line.trim() == OWNED)
     {
         return Err(error("fw4: цепочка r2o_offload принадлежит другой службе"));
     }
     if remove_rules {
+        let mut rules = String::new();
         if let Some((_, id)) = forward
             .lines()
             .filter_map(handle)
             .find(|(rule, _)| *rule == OFFLOAD_JUMP)
         {
-            return Ok((
-                format!(
-                    "replace rule inet fw4 forward handle {id} {ADMISSION}\ndelete chain inet fw4 {OFFLOAD_CHAIN}\n"
-                ),
-                true,
-            ));
-        } else if own.is_some() {
-            return Ok((format!("delete chain inet fw4 {OFFLOAD_CHAIN}\n"), false));
+            if admissions.any(|(rule, _)| matches!(rule, ADMISSION | ADMISSION_ALTERNATE)) {
+                writeln!(rules, "delete rule inet fw4 forward handle {id}").unwrap();
+            } else {
+                writeln!(
+                    rules,
+                    "replace rule inet fw4 forward handle {id} {ADMISSION}"
+                )
+                .unwrap();
+            }
         }
+        if own.is_some() {
+            writeln!(rules, "delete chain inet fw4 {OFFLOAD_CHAIN}").unwrap();
+        }
+        return Ok((rules, Fw4Admission::Absent));
     }
-    let Some((current, id)) = admission else {
-        return Ok((String::new(), false));
+    let Some((current, id)) = admissions.next() else {
+        return Ok((String::new(), Fw4Admission::Absent));
     };
-    if remove_rules {
-        return Ok((String::new(), false));
-    }
     if !matches!(current, ADMISSION | ADMISSION_ALTERNATE | OFFLOAD_JUMP)
         || admissions.next().is_some()
     {
         return Err(error("неподдерживаемая конфигурация admission fw4"));
     }
-    let desired = admission_rules(platform, ipv6);
+    // Пустая цепочка возвращает управление fw4 и сохраняет его штатные verdict.
+    let empty = own.as_ref().is_some_and(|chain| {
+        !chain
+            .lines()
+            .filter_map(handle)
+            .any(|(rule, _)| !rule.ends_with('{'))
+    });
+    if current == OFFLOAD_JUMP && empty {
+        return Ok((String::new(), Fw4Admission::Suspended));
+    }
+
     let mut rules = if own.is_none() {
-        format!("add chain inet fw4 {OFFLOAD_CHAIN} {{ comment \"r2o-managed\"; }}\n")
+        format!("add chain inet fw4 {OFFLOAD_CHAIN} {{ {OWNED}; }}\n")
     } else {
-        String::new()
+        format!("flush chain inet fw4 {OFFLOAD_CHAIN}\n")
     };
-    rules.push_str(&offload_diff(own.as_deref().unwrap_or_default(), &desired));
     if current != OFFLOAD_JUMP {
         writeln!(
             rules,
@@ -492,23 +385,33 @@ fn offload_plan(platform: &Platform, ipv6: bool, remove_rules: bool) -> Result<(
         )
         .unwrap();
     }
-    Ok((rules, true))
+    // Как в flowoffload_off D2K, действующие ускоренные потоки тоже должны
+    // вернуться в netfilter. Удаление и создание штатного ft атомарны.
+    let table = fw4_object("flowtable", "ft")?
+        .and_then(|listing| flowtable_definition(&listing))
+        .ok_or_else(|| error("fw4: не удалось прочитать штатную flowtable ft"))?;
+    writeln!(
+        rules,
+        "delete flowtable inet fw4 ft\nadd flowtable inet fw4 ft {{\n{table}\n}}"
+    )
+    .unwrap();
+    Ok((rules, Fw4Admission::Suspended))
 }
 
-pub(super) fn offload(platform: &Platform, ipv6: bool, remove_rules: bool) -> Result<()> {
-    let (rules, _) = offload_plan(platform, ipv6, remove_rules)?;
+pub(super) fn offload(remove_rules: bool) -> Result<&'static str> {
+    let (rules, admission) = offload_plan(remove_rules)?;
     if !rules.is_empty() {
         Nft.apply(&rules)?;
     }
-    Ok(())
+    Ok(admission.as_str())
 }
 
-pub(super) fn admission_status(platform: &Platform, ipv6: bool) -> Result<&'static str> {
-    let (edits, active) = offload_plan(platform, ipv6, false)?;
+pub(super) fn admission_status() -> Result<&'static str> {
+    let (edits, admission) = offload_plan(false)?;
     if !edits.is_empty() {
-        return Err(error("правила admission fw4 отсутствуют или изменены"));
+        return Err(error("допуск в flowtable fw4 не приостановлен"));
     }
-    Ok(if active { "bounded" } else { "absent" })
+    Ok(admission.as_str())
 }
 
 pub(super) fn restore_fw4(platform: &Platform) -> Result<()> {
@@ -556,16 +459,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ordered_diff_keeps_matching_handles() {
-        let live = "chain r2o_offload { # handle 5\n return # handle 7\n drop # handle 8\n accept # handle 9\n}";
-        let desired = ["drop".into(), "return".into(), "accept".into()];
-        let diff = offload_diff(live, &desired);
-        assert_eq!(diff.lines().count(), 2);
-        assert!(!diff.contains("handle 9"));
+    fn keeps_native_flowtable_devices_priority_and_offload_flags() {
+        let listing = "table inet fw4 { # handle 1\n\tflowtable ft { # handle 2\n\t\thook ingress priority filter\n\t\tdevices = { \"eth1\", \"lan1\" }\n\t\tflags offload\n\t\tcounter\n\t}\n}";
         assert_eq!(
-            offload_diff(live, &["return".into(), "drop".into(), "accept".into()]),
-            ""
+            flowtable_definition(listing).as_deref(),
+            Some(
+                "hook ingress priority filter\ndevices = { \"eth1\", \"lan1\" }\nflags offload\ncounter"
+            )
         );
+        assert!(flowtable_definition("table inet fw4 {\n}").is_none());
     }
 
     #[test]

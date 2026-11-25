@@ -16,6 +16,9 @@ R2O использует имеющийся JSON-парсер, сверяет з
 Источники поведения — `recall_noname`, `hello_profile_without_sni`,
 `fill_hellos`, `JOB_VERIFY` и `verify_confirm` из `core/sched.c`,
 а также временная TCP-проба из `datapath/plans.c`.
+Семантика временной приостановки ускорения fw4 и восстановления при остановке
+сверена с `flowoffload_off` и `flowoffload_restore` в
+[`8c6bcdc28b3a`](https://github.com/necronicle/d2k/blob/8c6bcdc28b3aedeca8618ff645215bfd6408047c/files/S99d2k#L2292-L2325).
 [MIT, Copyright (c) 2026 Necronicle](docs/licenses/d2k.txt).
 
 ## Telegram MTProto/WSS-прокси
@@ -140,7 +143,7 @@ Rust-алгоритмы прокси и его тестовые сценарии
 | Донор и ревизия | Использованные функции | Лицензия |
 | --- | --- | --- |
 | [DFW](https://github.com/pitkley/dfw/tree/30d7edeb20c3c4ef2722b8df2d9620346becc48a) | `FirewallBackend::apply`, `Nftables::apply`, `Iptables::restore`. Раздельные типы правил, пакет `nft -f` и транзакция `iptables-restore` через stdin | [MIT](docs/licenses/dfw.txt) |
-| [nlink](https://github.com/p13marc/nlink/tree/174b5458c2191fff2e729bef99156c064a87067c) | `dump_frame::classify`, `done_result`, `Backoff::delay`, `config::rules::longest_increasing` и упорядоченная часть `plan_chain`, используемая `NftablesConfig::diff_snapshot` | [MIT](docs/licenses/nlink.txt) |
+| [nlink](https://github.com/p13marc/nlink/tree/174b5458c2191fff2e729bef99156c064a87067c) | `dump_frame::classify`, `done_result`, `Backoff::delay` | [MIT](docs/licenses/nlink.txt) |
 | [rust-iptables](https://github.com/yaa110/rust-iptables/tree/e0e1f5dcc02023dbd162940af1b2f5159677dbd7) | `IPTables::new`, выбор iptables/ip6tables и определение поддержки `-w` по версии | [MIT](docs/licenses/rust-iptables.txt) |
 | [Tailscale linuxfw](https://github.com/tailscale/tailscale/tree/da6276d77025ee2bce288c4ccf07b35e14f253a7/util/linuxfw) | `CheckIPv6`, читающая часть `CheckIPRuleSupportsV6`, проверка таблицы по образцу `checkSupportsV6Filter` | [BSD-3-Clause](docs/licenses/tailscale.txt) |
 

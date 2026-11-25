@@ -539,7 +539,7 @@ impl Platform {
         atomic(&self.run.join(RULES), &self.fingerprint(ipv6)?)
     }
 
-    fn reconcile(&self, start: bool, refresh_dns: bool) -> Result<()> {
+    fn reconcile(&self, start: bool, refresh_dns: bool) -> Result<Option<&'static str>> {
         let active_path = self.run.join(ACTIVE);
         let exclusions_path = self.run.join("dns-excl");
         let dns_sample =
@@ -548,7 +548,7 @@ impl Platform {
                 // Открытый маркер отличает этот запуск от последующего down/up.
                 let activation = File::open(&active_path).ok();
                 if !start && activation.is_none() {
-                    return Ok(());
+                    return Ok(None);
                 }
                 let previous = optional(&exclusions_path)?.unwrap_or_default();
                 let sample = keenetic::dns_exclusions(&previous);
@@ -558,7 +558,7 @@ impl Platform {
             };
         let _lock = self.lock()?;
         if !start && !active_path.is_file() {
-            return Ok(());
+            return Ok(None);
         }
         if start {
             self.load_modules();
@@ -630,8 +630,11 @@ impl Platform {
         }
         if self.kind == Kind::OpenWrt && self.backend == Backend::Nft {
             let state = self.run.join("platform.offload-error");
-            match nft::offload(self, ipv6, false) {
-                Ok(()) => remove(&state)?,
+            match nft::offload(false) {
+                Ok(admission) => {
+                    remove(&state)?;
+                    return Ok(Some(admission));
+                }
                 Err(err) => {
                     atomic(&state, &err.to_string())?;
                     if !start {
@@ -641,7 +644,7 @@ impl Platform {
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     fn reconcile_reported(&self, start: bool, refresh_dns: bool) -> Result<()> {
@@ -658,13 +661,18 @@ impl Platform {
             let sample = self.accounting_sample().ok().map(|(with, without, bounded)| {
                 json!({"with_counters": with, "without_full_counters": without, "bounded": bounded})
             });
+            let offload_error = optional(&self.run.join("platform.offload-error"))
+                .ok()
+                .flatten()
+                .map(|s| limit_health_error(&s));
             let firewall = json!({
                 "platform": match self.kind { Kind::Keenetic => "keenetic", Kind::OpenWrt => "openwrt", Kind::Linux => "linux" },
                 "backend": match self.backend { Backend::Iptables => "iptables", Backend::Nft => "nft" },
                 "active": active,
-                "verified": active && result.is_ok(),
+                "verified": active && result.is_ok() && offload_error.is_none(),
+                "fw4_admission": result.as_ref().ok().copied().flatten(),
                 "adapter_error": result.as_ref().err().map(|error| limit_health_error(&error.to_string())),
-                "offload_error": optional(&self.run.join("platform.offload-error")).ok().flatten().map(|s| limit_health_error(&s)),
+                "offload_error": offload_error,
                 "dns_adapter_error": optional(&self.run.join("platform.dns-excl-degraded")).ok().flatten().map(|s| limit_health_error(&s)),
                 "fastnat": optional(&self.proc.join("sys/net/netfilter/nf_conntrack_fastnat")).ok().flatten().and_then(|s| s.trim().parse::<u32>().ok()),
                 "rules": (self.backend == Backend::Iptables).then(|| {
@@ -684,7 +692,7 @@ impl Platform {
                 eprintln!("r2o-platform: запись снимка диагностики: {error}");
             }
         }
-        result
+        result.map(drop)
     }
 
     fn down(&self) -> Result<()> {
@@ -695,7 +703,7 @@ impl Platform {
             Backend::Iptables => iptables::down(self),
         };
         let offload = if self.kind == Kind::OpenWrt && self.backend == Backend::Nft {
-            nft::offload(self, false, true)
+            nft::offload(true).map(drop)
         } else {
             Ok(())
         };
@@ -1077,7 +1085,7 @@ pub fn cli(args: &[String]) -> Result<()> {
                     println!("dns_exclusions=degraded ({})", reason.trim());
                 }
             } else if platform.kind == Kind::OpenWrt && platform.backend == Backend::Nft {
-                match nft::admission_status(&platform, ipv6) {
+                match nft::admission_status() {
                     Ok(status) => println!("fw4_admission={status}"),
                     Err(err) => return Err(err),
                 }
@@ -1089,7 +1097,9 @@ pub fn cli(args: &[String]) -> Result<()> {
         Some("dns-route") => platform.dns_route(&args[1..])?,
         Some("ppe") => match args.get(1).map(String::as_str) {
             Some("status") => keenetic::offload_status(&platform),
-            Some("ensure") => platform.reconcile(false, false)?,
+            Some("ensure") => {
+                platform.reconcile(false, false)?;
+            }
             Some("remove") => {
                 let _lock = platform.lock()?;
                 if platform.backend == Backend::Iptables {
