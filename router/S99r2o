@@ -746,7 +746,16 @@ meta_protection_enabled() {
 }
 
 meta_dns_scheduler_start() {
-    meta_protection_enabled || return 0
+    if ! meta_protection_enabled; then
+        if [ -f "$META_DISABLED" ] && [ -x "$MANAGER" ] &&
+            [ -x /etc/init.d/dnsmasq ] && ! command -v ndmc >/dev/null 2>&1 &&
+            { [ -e /tmp/hosts/.r2o-meta.notify ] ||
+                grep -q '^[^#[:space:]]' /tmp/hosts/r2o-meta 2>/dev/null; }; then
+            "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --remove-meta-dns ||
+                say "Meta DNS ожидает повторного применения при отключении"
+        fi
+        return 0
+    fi
     if type ndmc >/dev/null 2>&1; then
         export R2O_META_DNS_DISABLED=0
         case "$R2O_META_RANGES" in
@@ -759,7 +768,7 @@ meta_dns_scheduler_start() {
                 ;;
         esac
     elif command -v uci >/dev/null 2>&1 && [ -x /etc/init.d/dnsmasq ]; then
-        # OpenWrt без ndmc: Meta DNS закрепляется через dnsmasq hostrecord.
+        # OpenWrt использует управляемый файл в каталоге hosts dnsmasq.
         export R2O_META_DNS_DISABLED=0
     else
         say "нет ndmc/dnsmasq: нет поддерживаемого backend Meta DNS"

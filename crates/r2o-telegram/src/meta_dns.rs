@@ -16,6 +16,9 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
+mod dnsmasq;
+use dnsmasq::DnsmasqHosts;
+
 const MAX_HOST_ADDRESSES: usize = 2;
 const MAX_PROBE_CANDIDATES: usize = 8;
 type DnsAnswers = BTreeMap<String, Vec<IpAddr>>;
@@ -216,87 +219,51 @@ pub async fn resolve_meta_direct() -> Result<DnsAnswers, String> {
 }
 
 pub struct SystemNdm {
-    backend: NdmBackend,
-}
-
-enum NdmBackend {
-    Ndmc(OsString),
-    Dnsmasq,
+    executable: OsString,
 }
 
 impl Default for SystemNdm {
     fn default() -> Self {
-        if command_exists("ndmc") {
-            Self {
-                backend: NdmBackend::Ndmc(OsString::from("ndmc")),
-            }
-        } else if command_ok("uci", &["-q", "show", "dhcp"])
-            && std::path::Path::new("/etc/init.d/dnsmasq").is_file()
-        {
-            Self {
-                backend: NdmBackend::Dnsmasq,
-            }
-        } else {
-            Self {
-                backend: NdmBackend::Ndmc(OsString::from("ndmc")),
-            }
+        Self {
+            executable: OsString::from("ndmc"),
         }
     }
 }
 
 impl Ndm for SystemNdm {
     fn requires_exclusive_hostname(&self) -> bool {
-        matches!(self.backend, NdmBackend::Ndmc(_))
+        true
     }
 
     fn supports_address(&self, address: IpAddr) -> bool {
         // Синтаксис статического AAAA в ndmc зависит от прошивки.
-        address.is_ipv4() || matches!(self.backend, NdmBackend::Dnsmasq)
+        address.is_ipv4()
     }
 
     fn running_config(&mut self) -> Result<String, String> {
-        match &self.backend {
-            NdmBackend::Ndmc(executable) => {
-                let output = ndmc(executable, "show running-config")?;
-                let config = String::from_utf8(output.stdout).map_err(|_| {
-                    "ndmc вернул конфигурацию в неподдерживаемой кодировке".to_string()
-                })?;
-                if !output.status.success() || config.trim().is_empty() {
-                    return Err(
-                        "ndmc вернул пустую конфигурацию или сообщил об ошибке чтения".into(),
-                    );
-                }
-                Ok(config)
-            }
-            NdmBackend::Dnsmasq => dnsmasq_config(),
+        let output = ndmc(&self.executable, "show running-config")?;
+        let config = String::from_utf8(output.stdout)
+            .map_err(|_| "ndmc вернул конфигурацию в неподдерживаемой кодировке".to_string())?;
+        if !output.status.success() || config.trim().is_empty() {
+            return Err("ndmc вернул пустую конфигурацию или сообщил об ошибке чтения".into());
         }
+        Ok(config)
     }
 
     fn add(&mut self, host: &str, address: IpAddr) -> Result<(), String> {
-        match &self.backend {
-            NdmBackend::Ndmc(executable) => ndmc(executable, &format!("ip host {host} {address}"))
-                .and_then(command_success("ndmc отклонил добавление DNS-записи")),
-            NdmBackend::Dnsmasq => dnsmasq_add(host, address),
-        }
+        ndmc(&self.executable, &format!("ip host {host} {address}"))
+            .and_then(command_success("ndmc отклонил добавление DNS-записи"))
     }
 
     fn remove(&mut self, host: &str, address: IpAddr) -> Result<(), String> {
-        match &self.backend {
-            NdmBackend::Ndmc(executable) => {
-                ndmc(executable, &format!("no ip host {host} {address}"))
-                    .and_then(command_success("ndmc отклонил удаление DNS-записи"))
-            }
-            NdmBackend::Dnsmasq => dnsmasq_remove(host, address),
-        }
+        ndmc(&self.executable, &format!("no ip host {host} {address}"))
+            .and_then(command_success("ndmc отклонил удаление DNS-записи"))
     }
 
     fn save(&mut self) -> Result<(), String> {
-        match &self.backend {
-            NdmBackend::Ndmc(executable) => ndmc(executable, "system configuration save").and_then(
-                command_success("ndmc не смог сохранить конфигурацию роутера"),
-            ),
-            NdmBackend::Dnsmasq => dnsmasq_save(),
-        }
+        ndmc(&self.executable, "system configuration save").and_then(command_success(
+            "ndmc не смог сохранить конфигурацию роутера",
+        ))
     }
 }
 
@@ -308,16 +275,6 @@ fn ndmc(executable: &OsString, command: &str) -> Result<std::process::Output, St
         .map_err(|error| format!("не удалось запустить ndmc: {error}"))
 }
 
-fn command_ok(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
 /// Проверить наличие программы в PATH без запуска.
 /// `ndmc -c show version` нельзя использовать как probe: D2O не делает
 /// такого вызова, а differential-тест сравнивает точную трассу команд.
@@ -326,45 +283,6 @@ fn command_exists(program: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
-}
-
-/// Текущие hostrecord из UCI в формате, который понимает NdmView.
-fn dnsmasq_config() -> Result<String, String> {
-    let output = Command::new("uci")
-        .args(["-q", "show", "dhcp"])
-        .output()
-        .map_err(|error| format!("не удалось запустить uci: {error}"))?;
-    if !output.status.success() {
-        return Err("uci не смог прочитать конфигурацию dhcp".to_string());
-    }
-    let text = String::from_utf8(output.stdout)
-        .map_err(|_| "uci вернул конфигурацию в неподдерживаемой кодировке".to_string())?;
-    let mut pairs = std::collections::BTreeMap::<String, (Option<String>, Option<String>)>::new();
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let Some(rest) = key.strip_prefix("dhcp.") else {
-            continue;
-        };
-        let mut fields = rest.split('.');
-        let Some(section) = fields.next() else {
-            continue;
-        };
-        let value = value.trim().trim_matches('\'').to_string();
-        match fields.next() {
-            Some("name") => pairs.entry(section.to_string()).or_default().0 = Some(value),
-            Some("ip") => pairs.entry(section.to_string()).or_default().1 = Some(value),
-            _ => {}
-        }
-    }
-    let mut config = String::from("# dnsmasq hostrecords\n");
-    for (_, (name, ip)) in pairs {
-        if let (Some(name), Some(ip)) = (name, ip) {
-            config.push_str(&format!("ip host {name} {ip}\n"));
-        }
-    }
-    Ok(config)
 }
 
 fn dnsmasq_section(host: &str, address: IpAddr) -> String {
@@ -378,102 +296,6 @@ fn dnsmasq_section(host: &str, address: IpAddr) -> String {
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect::<String>();
     format!("r2o_meta_{host}_{}", address.to_string().replace('.', "_"))
-}
-
-fn uci_set_argument(key: &str, value: Option<&str>) -> String {
-    match value {
-        Some(value) => format!("{key}={value}"),
-        None => key.to_string(),
-    }
-}
-
-fn dnsmasq_add(host: &str, address: IpAddr) -> Result<(), String> {
-    let section = dnsmasq_section(host, address);
-    let key = format!("dhcp.{section}");
-    let existing = Command::new("uci")
-        .args(["-q", "show", &key])
-        .output()
-        .map_err(|error| format!("не удалось прочитать секцию {key}: {error}"))?;
-    if existing.status.success() {
-        return if uci_owned_record(
-            &String::from_utf8_lossy(&existing.stdout),
-            &key,
-            host,
-            address,
-        ) {
-            Ok(())
-        } else {
-            Err(format!("секция {key} уже занята"))
-        };
-    }
-    for (key, value) in [
-        (format!("dhcp.{section}=hostrecord"), None),
-        (format!("dhcp.{section}.name"), Some(host.to_string())),
-        (format!("dhcp.{section}.ip"), Some(address.to_string())),
-    ] {
-        // uci принимает только форму key=value одним аргументом; форма
-        // `uci set key value` печатает usage и возвращает ошибку.
-        let argument = uci_set_argument(&key, value.as_deref());
-        let output = Command::new("uci")
-            .args(["set", &argument])
-            .output()
-            .map_err(|error| format!("не удалось запустить uci set: {error}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("uci отклонил запись {key}: {}", stderr.trim()));
-        }
-    }
-    Ok(())
-}
-
-fn dnsmasq_remove(host: &str, address: IpAddr) -> Result<(), String> {
-    let section = format!("dhcp.{}", dnsmasq_section(host, address));
-    let output = Command::new("uci")
-        .args(["-q", "show", &section])
-        .output()
-        .map_err(|error| format!("не удалось запустить uci: {error}"))?;
-    if !output.status.success() {
-        return Ok(());
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    if !uci_owned_record(&text, &section, host, address) {
-        return Ok(());
-    }
-    Command::new("uci")
-        .args(["delete", &section])
-        .output()
-        .map_err(|error| format!("не удалось запустить uci delete: {error}"))
-        .and_then(command_success("uci не удалил DNS-запись Meta"))
-}
-
-fn uci_owned_record(text: &str, section: &str, host: &str, address: IpAddr) -> bool {
-    let value = |key: &str| {
-        text.lines().find_map(|line| {
-            let (found, value) = line.split_once('=')?;
-            (found == key).then(|| value.trim_matches('\''))
-        })
-    };
-    value(section) == Some("hostrecord")
-        && value(&format!("{section}.name")) == Some(host)
-        && value(&format!("{section}.ip")).and_then(|ip| ip.parse().ok()) == Some(address)
-}
-
-fn dnsmasq_save() -> Result<(), String> {
-    let output = Command::new("uci")
-        .args(["commit", "dhcp"])
-        .output()
-        .map_err(|error| format!("не удалось запустить uci commit: {error}"))?;
-    if !output.status.success() {
-        return Err("uci не смог сохранить конфигурацию dhcp".to_string());
-    }
-    let output = Command::new("/etc/init.d/dnsmasq")
-        .arg("reload")
-        .output()
-        .map_err(|error| format!("не удалось перезагрузить dnsmasq: {error}"))?;
-    if !output.status.success() {
-        return Err("dnsmasq не перезагрузил конфигурацию".to_string());
-    }
-    Ok(())
 }
 
 fn command_success(
@@ -543,6 +365,7 @@ pub(crate) fn default_meta_ranges_path(r2o_dir: &Path) -> PathBuf {
 pub struct MetaDnsManager<N, D> {
     network: N,
     ndm: D,
+    dnsmasq: Option<DnsmasqHosts>,
     paths: MetaDnsPaths,
     meta_ranges: Vec<(IpAddr, u8)>,
     probe_attempts: usize,
@@ -551,11 +374,22 @@ pub struct MetaDnsManager<N, D> {
     resolve_retry_delay: Duration,
 }
 
+impl<N: MetaNetwork> MetaDnsManager<N, SystemNdm> {
+    fn from_system(network: N, paths: MetaDnsPaths) -> Self {
+        let mut manager = Self::new(network, SystemNdm::default(), paths);
+        if !command_exists("ndmc") && Path::new("/etc/init.d/dnsmasq").is_file() {
+            manager.dnsmasq = Some(DnsmasqHosts::default());
+        }
+        manager
+    }
+}
+
 impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
     pub fn new(network: N, ndm: D, paths: MetaDnsPaths) -> Self {
         Self {
             network,
             ndm,
+            dnsmasq: None,
             paths,
             meta_ranges: Vec::new(),
             probe_attempts: env_bounded("R2O_IP_PROBE_ATTEMPTS", 2, 1, 5) as usize,
@@ -575,6 +409,33 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
         }
     }
 
+    fn pins(&self) -> Result<Vec<(String, IpAddr)>, String> {
+        match &self.dnsmasq {
+            Some(dnsmasq) => dnsmasq.records(),
+            None => read_manifest(&self.paths.manifest),
+        }
+    }
+
+    fn remove_dead_pins(
+        &mut self,
+        initial_config: Option<String>,
+        prior: &[(String, IpAddr)],
+        dead: &[(String, IpAddr)],
+    ) -> Result<(), String> {
+        if let Some(dnsmasq) = &self.dnsmasq {
+            return dnsmasq.publish(&openwrt_pins(prior, dead, &BTreeMap::new()));
+        }
+        let mut view = NdmView::new(&mut self.ndm);
+        view.config = initial_config;
+        drop_dead_pins(
+            &mut view,
+            &self.paths.manifest,
+            &self.paths.log,
+            prior,
+            dead,
+        )
+    }
+
     pub async fn refresh(&mut self) -> Result<(), String> {
         if self.meta_ranges.is_empty() {
             let ranges = std::fs::read_to_string(&self.paths.meta_ranges).map_err(|error| {
@@ -588,8 +449,8 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
         if self.meta_ranges.is_empty() {
             return Err("в файле диапазонов Meta нет допустимых сетей".into());
         }
-        let prior = read_manifest(&self.paths.manifest)?;
-        let initial_config = if prior.is_empty() {
+        let mut prior = self.pins()?;
+        let initial_config = if prior.is_empty() || self.dnsmasq.is_some() {
             None
         } else {
             let config = self.ndm.running_config()?;
@@ -604,9 +465,10 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             if !is_managed_host(host) || !self.network.includes_host(host) {
                 continue;
             }
-            if !initial_config
-                .as_deref()
-                .is_some_and(|config| config_has_pair(config, host, *address))
+            if self.dnsmasq.is_none()
+                && !initial_config
+                    .as_deref()
+                    .is_some_and(|config| config_has_pair(config, host, *address))
             {
                 continue;
             }
@@ -642,16 +504,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             Ok(answers) => answers,
             Err(error) => {
                 if !dead.is_empty() && alive > 0 {
-                    let mut view = NdmView::new(&mut self.ndm);
-                    view.config = initial_config.clone();
-                    drop_dead_pins(
-                        &mut view,
-                        &self.paths.manifest,
-                        &self.paths.log,
-                        &prior,
-                        &dead,
-                    )?;
-                    view.save_if_changed()?;
+                    self.remove_dead_pins(initial_config, &prior, &dead)?;
                     append_log(
                         &self.paths.log,
                         "прямые DNS-службы недоступны; сняты только локально подтверждённые мёртвые записи",
@@ -725,16 +578,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
         .await;
         if filtered.is_empty() {
             if !dead.is_empty() && alive > 0 {
-                let mut view = NdmView::new(&mut self.ndm);
-                view.config = initial_config.clone();
-                drop_dead_pins(
-                    &mut view,
-                    &self.paths.manifest,
-                    &self.paths.log,
-                    &prior,
-                    &dead,
-                )?;
-                view.save_if_changed()?;
+                self.remove_dead_pins(initial_config, &prior, &dead)?;
             }
             append_log(
                 &self.paths.log,
@@ -745,6 +589,19 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
 
         if !protection_enabled(&state_dirs(&self.paths).0) {
             return Err("Meta Protection выключена".into());
+        }
+        if let Some(dnsmasq) = &self.dnsmasq {
+            let legacy = dnsmasq::retire_legacy(&self.paths.manifest)?;
+            if !legacy.is_empty() {
+                append_log(
+                    &self.paths.log,
+                    "Старые записи Meta сняты с конфигурации UCI и останутся в памяти до штатного перезапуска dnsmasq",
+                );
+                filtered.retain(|host, _| !legacy.contains(host));
+                prior.retain(|(host, _)| !legacy.contains(host));
+            }
+            dnsmasq.publish(&openwrt_pins(&prior, &dead, &filtered))?;
+            return self.mark_success();
         }
         let mut view = NdmView::new(&mut self.ndm);
         view.config = initial_config;
@@ -823,6 +680,10 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
 
         view.save_if_changed()?;
         write_manifest(&self.paths.manifest, &next)?;
+        self.mark_success()
+    }
+
+    fn mark_success(&self) -> Result<(), String> {
         if let Err(error) = write_success_mark(&self.paths.success_mark) {
             append_log(
                 &self.paths.log,
@@ -841,6 +702,24 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
     }
 
     fn remove_owned_where(&mut self, remove_host: impl Fn(&str) -> bool) -> Result<(), String> {
+        if let Some(dnsmasq) = &self.dnsmasq {
+            let remaining = dnsmasq
+                .records()?
+                .into_iter()
+                .filter(|(host, _)| !remove_host(host))
+                .map(|(host, address)| (host, address.to_string()))
+                .collect();
+            dnsmasq.publish(&remaining)?;
+            if dnsmasq::retire_legacy(&self.paths.manifest)?
+                .iter()
+                .any(|host| remove_host(host))
+            {
+                return Err(
+                    "старые записи Meta останутся в памяти до штатного перезапуска dnsmasq".into(),
+                );
+            }
+            return Ok(());
+        }
         let manifest = read_manifest(&self.paths.manifest)?;
         if manifest.is_empty() {
             let _ = std::fs::remove_file(&self.paths.manifest);
@@ -879,6 +758,31 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             write_manifest(&self.paths.manifest, &remaining)
         }
     }
+}
+
+fn openwrt_pins(
+    prior: &[(String, IpAddr)],
+    dead: &[(String, IpAddr)],
+    fresh: &DnsAnswers,
+) -> BTreeSet<PinPair> {
+    let dead: BTreeSet<_> = dead.iter().collect();
+    prior
+        .iter()
+        .filter(|pair| {
+            let (host, address) = pair;
+            !dead.contains(pair)
+                && fresh.get(host).is_none_or(|addresses| {
+                    addresses.contains(address)
+                        || !addresses.iter().any(|ip| ip.is_ipv6() == address.is_ipv6())
+                })
+        })
+        .map(|(host, address)| (host.clone(), address.to_string()))
+        .chain(fresh.iter().flat_map(|(host, addresses)| {
+            addresses
+                .iter()
+                .map(|address| (host.clone(), address.to_string()))
+        }))
+        .collect()
 }
 
 async fn resolve_with_retry<N: MetaNetwork>(
@@ -1180,11 +1084,7 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
     let mut knowledge = Knowledge::load(&state);
     let disabled = r2k_core::meta::disabled_products(&state);
     if !disabled.is_empty() {
-        let mut cleanup = MetaDnsManager::new(
-            DirectMetaNetwork::new(None),
-            SystemNdm::default(),
-            paths.clone(),
-        );
+        let mut cleanup = MetaDnsManager::from_system(DirectMetaNetwork::new(None), paths.clone());
         let inactive = |host: &str| is_disabled_host(&disabled, host);
         match cleanup.remove_owned_where(inactive) {
             Ok(()) => clear_pin_status(&mut knowledge, inactive),
@@ -1192,9 +1092,17 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
         }
     }
     knowledge.refresh_sources(&crate::list_update::ListPaths::from_env(), &runtime, now);
-    let mut network =
-        DirectMetaNetwork::new(std::env::var_os("R2O_IP_CA_BUNDLE").map(PathBuf::from));
-    network.hosts = knowledge.due(now, force, |host| !is_disabled_host(&disabled, host));
+    let network = DirectMetaNetwork::new(std::env::var_os("R2O_IP_CA_BUNDLE").map(PathBuf::from));
+    let mut manager = MetaDnsManager::from_system(network, paths);
+    let restore = manager
+        .dnsmasq
+        .as_ref()
+        .is_some_and(DnsmasqHosts::needs_refresh);
+    let network = &mut manager.network;
+    let paths = &manager.paths;
+    network.hosts = knowledge.due(now, force || restore, |host| {
+        !is_disabled_host(&disabled, host)
+    });
     if network.hosts.is_empty() {
         return knowledge.persist(&state);
     }
@@ -1211,7 +1119,6 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
         }
     }
     let ranges = network.prefixes.clone();
-    let mut manager = MetaDnsManager::new(network, SystemNdm::default(), paths);
     manager.probe_attempts = 1;
     manager.resolve_attempts = 1;
     manager.meta_ranges = ranges;
@@ -1224,9 +1131,7 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .as_secs();
     let mut recovery = Vec::new();
-    let pins: BTreeSet<_> = read_manifest(&manager.paths.manifest)?
-        .into_iter()
-        .collect();
+    let pins: BTreeSet<_> = manager.pins()?.into_iter().collect();
     let candidates = manager
         .network
         .candidates
@@ -1352,8 +1257,7 @@ pub fn remove_from_env() -> Result<(), String> {
     let paths = MetaDnsPaths::from_env();
     let (state, runtime) = state_dirs(&paths);
     let _lock = state_lock(&state)?;
-    let mut manager =
-        MetaDnsManager::new(DirectMetaNetwork::new(None), SystemNdm::default(), paths);
+    let mut manager = MetaDnsManager::from_system(DirectMetaNetwork::new(None), paths);
     manager.remove_owned()?;
     let mut knowledge = Knowledge::load(&state);
     clear_pin_status(&mut knowledge, |_| true);
@@ -1405,8 +1309,7 @@ pub fn set_product_from_env(product: &str, mode: &str) -> Result<(), String> {
         }
         "off" => {
             atomic_write(&marker, b"0\n")?;
-            let mut manager =
-                MetaDnsManager::new(DirectMetaNetwork::new(None), SystemNdm::default(), paths);
+            let mut manager = MetaDnsManager::from_system(DirectMetaNetwork::new(None), paths);
             manager.remove_owned_where(matches)?;
             clear_pin_status(&mut knowledge, matches);
             knowledge.persist(&state)
@@ -1418,6 +1321,8 @@ pub fn set_product_from_env(product: &str, mode: &str) -> Result<(), String> {
 pub async fn run_scheduler() -> Result<(), String> {
     let paths = MetaDnsPaths::from_env();
     let (state, _) = state_dirs(&paths);
+    let openwrt = !command_exists("ndmc") && Path::new("/etc/init.d/dnsmasq").is_file();
+    let dnsmasq = openwrt.then(DnsmasqHosts::default);
     let mut scheduler = MetaDnsScheduler::from_env();
     let mut lists = crate::list_update::ListUpdater::from_env();
     let meta_disabled = std::env::var("R2O_META_DNS_DISABLED").as_deref() == Ok("1");
@@ -1432,6 +1337,13 @@ pub async fn run_scheduler() -> Result<(), String> {
     loop {
         let cycle = async {
             if protection_enabled(&state) && !meta_disabled {
+                if let Some(dnsmasq) = &dnsmasq
+                    && dnsmasq.notification_pending()
+                    && let Ok(_lock) = state_lock(&state)
+                    && let Err(error) = dnsmasq.resume()
+                {
+                    append_log(&scheduler.log, &error);
+                }
                 if let Err(error) = scheduler.tick().await {
                     append_log(&scheduler.log, &error);
                 }
@@ -1877,20 +1789,29 @@ fn write_success_mark(path: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
+    atomic_write_with_mode(path, contents, 0o600)
+}
+
+fn atomic_write_with_mode(path: &Path, contents: &[u8], mode: u32) -> Result<(), String> {
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("не удалось создать каталог состояния: {error}"))?;
-    let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
+    let name = path.file_name().ok_or("у файла состояния нет имени")?;
+    let temporary = parent.join(format!(
+        ".{}.tmp.{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options
-            .mode(0o600)
+            .mode(mode)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
     }
     let mut file = options
@@ -1899,6 +1820,12 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
     file.write_all(contents)
         .and_then(|()| file.sync_all())
         .map_err(|error| format!("не удалось записать файл состояния: {error}"))?;
+    #[cfg(unix)]
+    if mode != 0o600 {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|error| format!("не удалось выставить права файла: {error}"))?;
+    }
     drop(file);
     std::fs::rename(&temporary, path).map_err(|error| {
         format!(
@@ -2074,7 +2001,7 @@ esac
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let mut ndm = SystemNdm {
-            backend: NdmBackend::Ndmc(executable.into_os_string()),
+            executable: executable.into_os_string(),
         };
         assert_eq!(ndm.running_config().unwrap(), "system name test-router\n");
         let address = "157.240.9.174".parse().unwrap();
@@ -2151,7 +2078,7 @@ esac
 
         let network = FakeNetwork::with_answers(BTreeMap::new());
         let ndm = SystemNdm {
-            backend: NdmBackend::Ndmc(executable.into_os_string()),
+            executable: executable.into_os_string(),
         };
         let mut manager = MetaDnsManager::new(network, ndm, paths.clone());
         manager.remove_owned().unwrap();
@@ -2625,27 +2552,6 @@ esac
     }
 
     #[test]
-    fn dnsmasq_removal_matches_only_an_owned_section_and_its_current_fields() {
-        let ip = "2a03:2880::1".parse().unwrap();
-        let host = "media-new.whatsapp.net";
-        let key = format!("dhcp.{}", dnsmasq_section(host, ip));
-        let record = format!("{key}=hostrecord\n{key}.name='{host}'\n{key}.ip='{ip}'\n");
-        assert!(uci_owned_record(&record, &key, host, ip));
-        assert!(!uci_owned_record(
-            &record.replace(&key, "dhcp.user"),
-            &key,
-            host,
-            ip
-        ));
-        assert!(!uci_owned_record(
-            &record,
-            &key,
-            host,
-            "2a03:2880::2".parse().unwrap()
-        ));
-    }
-
-    #[test]
     fn persistent_disable_marker_survives_reload_and_lock_is_exclusive() {
         let paths = paths("disabled");
         let state = paths.r2o_dir.join("state");
@@ -3033,19 +2939,5 @@ esac
         std::fs::write(&updated, "").unwrap();
         assert_eq!(default_meta_ranges_path(&dir), shipped);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn uci_set_argument_uses_equals_form() {
-        // `uci set key value` печатает usage: оба значения обязаны идти
-        // одним аргументом key=value.
-        assert_eq!(
-            uci_set_argument("dhcp.r2o_meta_x.name", Some("instagram.com")),
-            "dhcp.r2o_meta_x.name=instagram.com"
-        );
-        assert_eq!(
-            uci_set_argument("dhcp.r2o_meta_x=hostrecord", None),
-            "dhcp.r2o_meta_x=hostrecord"
-        );
     }
 }
