@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, Re
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
+use crate::bridge::{MEDIA_RESPONSE_TIMEOUT, ResponseProgress};
 use crate::config::Config;
 use crate::dc_map::RouteLookupError;
 use crate::routing::{self, Upstream};
@@ -41,6 +42,7 @@ struct TelemetryStream<'a, S> {
     stream: &'a mut S,
     telemetry: Option<ConnectionTelemetry>,
     direction: TrafficDirection,
+    first_response: Option<&'a ResponseProgress>,
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for TelemetryStream<'_, S> {
@@ -54,6 +56,11 @@ impl<S: AsyncRead + Unpin> AsyncRead for TelemetryStream<'_, S> {
         let result = Pin::new(&mut *this.stream).poll_read(context, buffer);
         if matches!(&result, Poll::Ready(Ok(()))) {
             let bytes = buffer.filled().len().saturating_sub(previous_len) as u64;
+            if bytes != 0
+                && let Some(progress) = this.first_response.take()
+            {
+                progress.received();
+            }
             if let Some(telemetry) = this.telemetry.as_ref() {
                 match this.direction {
                     TrafficDirection::FromClients => telemetry.record_client_bytes(bytes),
@@ -72,7 +79,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TelemetryStream<'_, S> {
         buffer: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        Pin::new(&mut *this.stream).poll_write(context, buffer)
+        let result = Pin::new(&mut *this.stream).poll_write(context, buffer);
+        if matches!(result, Poll::Ready(Ok(bytes)) if bytes != 0)
+            && let Some(progress) = this.first_response
+        {
+            progress.sent();
+        }
+        result
     }
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -88,6 +101,7 @@ async fn copy_bidirectional_with_telemetry<C, U>(
     client: &mut C,
     upstream: &mut U,
     telemetry: Option<ConnectionTelemetry>,
+    first_response: Option<&ResponseProgress>,
 ) -> io::Result<(u64, u64)>
 where
     C: AsyncRead + AsyncWrite + Unpin,
@@ -97,11 +111,13 @@ where
         stream: client,
         telemetry: telemetry.clone(),
         direction: TrafficDirection::FromClients,
+        first_response: None,
     };
     let mut upstream = TelemetryStream {
         stream: upstream,
         telemetry,
         direction: TrafficDirection::FromUpstreams,
+        first_response,
     };
     tokio::io::copy_bidirectional(&mut client, &mut upstream).await
 }
@@ -115,6 +131,7 @@ async fn read_client_exact(
         stream,
         telemetry: Some(telemetry.clone()),
         direction: TrafficDirection::FromClients,
+        first_response: None,
     };
     stream.read_exact(buffer).await?;
     Ok(())
@@ -185,6 +202,7 @@ struct DirectPayload {
     transport: &'static str,
     telemetry: Option<ConnectionTelemetry>,
     recovery: Option<DirectRecoveryKey>,
+    watch_first_response: bool,
 }
 
 async fn bridge_direct_payload(
@@ -240,12 +258,33 @@ async fn bridge_direct_payload(
                 telemetry.select_transport("direct", "tcp_passthrough");
                 telemetry.set_upstream(None, payload.destination.ip(), "tcp");
             }
-            let result = copy_bidirectional_with_telemetry(
+            let watch = payload
+                .recovery
+                .filter(|_| payload.watch_first_response)
+                .map(|key| (ResponseProgress::default(), key));
+            let relay = copy_bidirectional_with_telemetry(
                 &mut client,
                 &mut remote,
                 payload.telemetry.clone(),
-            )
-            .await;
+                watch.as_ref().map(|(progress, _)| progress),
+            );
+            let result = if let Some((progress, key)) = &watch {
+                tokio::select! {
+                    result = relay => result,
+                    _ = progress.stalled(MEDIA_RESPONSE_TIMEOUT) => {
+                        DIRECT_RECOVERY_WAIT.fail(*key, DIRECT_RETRY_DELAY);
+                        runtime.stats().record_failure("tcp_stall");
+                        warn!(
+                            "[{}] TCP к {} не передал первый ответ; ожидаю новое соединение клиента",
+                            payload.peer, payload.destination
+                        );
+                        // Пакет уже передан upstream. Новый сеанс начинает клиент.
+                        return;
+                    }
+                }
+            } else {
+                relay.await
+            };
             match result {
                 Ok((bytes_up, bytes_down)) => info!(
                     "[{}] маршрут {} к исходному назначению {}{} завершён: вверх {} байт, вниз {} байт",
@@ -442,6 +481,7 @@ pub async fn handle_transparent_client_with_runtime(
                             transport: "прямой TCP",
                             telemetry: Some(telemetry),
                             recovery: Some(recovery_key(Some(endpoint.id), is_media)),
+                            watch_first_response: false,
                         },
                         direct_timeout,
                         Arc::clone(&runtime),
@@ -474,6 +514,7 @@ pub async fn handle_transparent_client_with_runtime(
                         transport: "прямой TCP",
                         telemetry: Some(telemetry),
                         recovery: Some(recovery_key(init_info.dc, init_info.is_media)),
+                        watch_first_response: false,
                     },
                     direct_timeout,
                     runtime.clone(),
@@ -521,11 +562,30 @@ pub async fn handle_transparent_client_with_runtime(
             routing::select_upstream(&route, &target_ip).await
         }
     };
-    let Some(upstream) = complete_unless_client_resets(&stream, upstream)
-        .await
-        .flatten()
-    else {
-        return;
+    let upstream = match complete_unless_client_resets(&stream, upstream).await {
+        Some(Some(upstream)) => upstream,
+        // The CF chain failed before any client bytes were forwarded. The
+        // original destination is still safe to try without replaying data.
+        Some(None) if unlisted_cf_route && !direct_timeout.is_zero() => {
+            bridge_direct_payload(
+                stream,
+                DirectPayload {
+                    initial: init,
+                    destination,
+                    peer,
+                    is_media,
+                    transport: "резервный TCP",
+                    telemetry: Some(telemetry),
+                    recovery: Some(recovery_key(Some(dc), is_media)),
+                    watch_first_response: true,
+                },
+                direct_timeout,
+                runtime.clone(),
+            )
+            .await;
+            return;
+        }
+        Some(None) | None => return,
     };
     match upstream {
         Upstream::Ws {
@@ -639,6 +699,7 @@ pub async fn handle_transparent_client_with_runtime(
                         &mut client,
                         &mut remote,
                         Some(telemetry.clone()),
+                        None,
                     )
                     .await
                     {
@@ -710,6 +771,7 @@ mod tests {
             stream: &mut proxy,
             telemetry: Some(telemetry),
             direction: TrafficDirection::FromClients,
+            first_response: None,
         };
 
         peer.write_all(b"received").await.unwrap();
@@ -734,6 +796,7 @@ mod tests {
             &mut client_proxy,
             &mut upstream_proxy,
             Some(telemetry),
+            None,
         );
         let peers = async {
             client_peer.write_all(b"request-upstream").await.unwrap();
@@ -867,6 +930,7 @@ mod tests {
                 transport: "прямой TCP",
                 telemetry: None,
                 recovery: None,
+                watch_first_response: false,
             },
             Duration::from_secs(1),
             runtime,
@@ -913,6 +977,7 @@ mod tests {
                 transport: "прямой TCP",
                 telemetry: None,
                 recovery: Some(recovery),
+                watch_first_response: false,
             },
             Duration::from_secs(1),
             runtime,
@@ -924,6 +989,57 @@ mod tests {
         assert!(!DIRECT_RECOVERY_WAIT.active(&(destination, Some(2), false, proto, 0)));
         assert!(!DIRECT_RECOVERY_WAIT.active(&(destination, Some(2), true, proto, 1)));
         assert!(!DIRECT_RECOVERY_WAIT.active(&(destination, Some(4), true, proto, 0)));
+        DIRECT_RECOVERY_WAIT.clear(&recovery);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn direct_recovery_releases_client_after_a_request_without_reply() {
+        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let destination = target.local_addr().unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (proxy_side, peer) = listener.accept().await.unwrap();
+        let runtime = Arc::new(Runtime::new(OutboundConnector::direct()));
+        let proto = crate::crypto::ProtoTag::Intermediate;
+        let recovery = (destination, Some(5), true, proto, 0);
+        let relay = tokio::spawn(bridge_direct_payload(
+            proxy_side,
+            DirectPayload {
+                initial: [0x5a; 64],
+                destination,
+                peer,
+                is_media: true,
+                transport: "резервный TCP",
+                telemetry: None,
+                recovery: Some(recovery),
+                watch_first_response: true,
+            },
+            Duration::from_secs(1),
+            runtime,
+        ));
+        let (mut upstream, _) = target.accept().await.unwrap();
+        let mut initial = [0; 64];
+        upstream.read_exact(&mut initial).await.unwrap();
+        assert_eq!(initial, [0x5a; 64]);
+        let deadline = super::MEDIA_RESPONSE_TIMEOUT;
+        tokio::time::advance(deadline * 2).await;
+        assert!(!relay.is_finished(), "init alone must not arm the deadline");
+
+        client.write_all(b"msg").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut request = Vec::new();
+        upstream.read_to_end(&mut request).await.unwrap();
+        assert_eq!(request, b"msg");
+        tokio::time::advance(deadline).await;
+        tokio::time::timeout(Duration::from_secs(1), relay)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(client.read(&mut [0; 1]).await.unwrap(), 0);
+        assert!(DIRECT_RECOVERY_WAIT.active(&recovery));
+        assert!(!DIRECT_RECOVERY_WAIT.active(&(destination, Some(5), true, proto, 1)));
         DIRECT_RECOVERY_WAIT.clear(&recovery);
     }
 
