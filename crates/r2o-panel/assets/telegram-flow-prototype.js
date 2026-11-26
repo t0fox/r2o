@@ -603,9 +603,10 @@
         var y = top + (layoutMobile ? 9 : 13);
         dot(rows.x + 10, y, color, active ? 2.4 : 2);
         mono("DC" + (index + 1), rows.x + 19, y, 11, active ? palette.text : palette.muted);
+        var history = view.dcResponses && view.dcResponses[index];
         var detail = active
           ? (media ? "Медиа " + media : "") + (confirmed ? (media ? " · " : "") + "✓ " + confirmed : "")
-          : "Нет сессий";
+          : history ? "Ответов за запуск: " + history : "Нет сессий";
         if (layoutMobile) {
           var summary = active ? active + " " + plural(active, "сессия", "сессии", "сессий") + (detail ? " · " + detail : "") : detail;
           text(fitText(summary, rows.w - 70, ROW_DETAIL), rows.x + rows.w - 10, y, ROW_DETAIL, color, "right");
@@ -872,7 +873,7 @@
 
       var key = JSON.stringify([view.state, view.caption, view.activeConnections, view.acceptedConnections,
         view.mediaSessions, view.sessions.length, view.truncated, view.dcLabel, view.transportLabel,
-        view.lanes, view.dcActivity, maxConnections, snapshot?.last_success_dc, snapshot?.last_success_latency_ms]);
+        view.lanes, view.dcActivity, view.dcResponses, maxConnections, snapshot?.last_success_dc, snapshot?.last_success_latency_ms]);
       if (key !== cardKey) {
         cardKey = key;
         updateAccessibility();

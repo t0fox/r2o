@@ -3254,9 +3254,9 @@
     flashTelegramValue(scene.querySelector("[data-tg-latency]"), latency);
   }
 
-  function updateTelegramRoutes(ui, stats) {
+  function updateTelegramRoutes(ui, stats, stale) {
     var flow = global.R2oTelegramFlow && global.R2oTelegramFlow.summarizeTelegramFlow
-      ? global.R2oTelegramFlow.summarizeTelegramFlow(stats) : null;
+      ? global.R2oTelegramFlow.summarizeTelegramFlow(stats, stale ? "stale" : undefined) : null;
     var lanes = flow && Array.isArray(flow.lanes) ? flow.lanes : [];
     var labels = {
       idle: "резерв", selected: "активен", connecting: "подключение",
@@ -3270,6 +3270,7 @@
       var selected = Number(counts.selected) || 0;
       var connecting = (Number(counts.connecting) || 0) + (Number(counts.race) || 0);
       var confirmed = lane && Number(lane.confirmed) || 0;
+      var history = flow && flow.routeResponses && index < 3 ? flow.routeResponses[index] : null;
       entry.card.setAttribute("data-state", status);
       entry.card.setAttribute("data-tone",
         status === "selected" || status === "connected" ? "ok"
@@ -3278,9 +3279,10 @@
       if (entry.status.textContent !== (labels[status] || "резерв")) {
         entry.status.textContent = labels[status] || "резерв";
       }
-      flashTelegramValue(entry.count, selected ? "сессий: " + selected
+      flashTelegramValue(entry.count, !stats ? "сессий: —" : selected ? "сессий: " + selected
         : connecting ? "попыток: " + connecting : "сессий: 0");
-      flashTelegramValue(entry.confirmed, "ответов: " + confirmed);
+      flashTelegramValue(entry.confirmed, !stats ? "ответов: —" : history === null
+        ? "ответов: " + confirmed : "ответов за запуск: " + history);
     });
     if (ui.route) {
       var routeText = stats && flow ? flow.transportLabel : "—";
@@ -3508,8 +3510,8 @@
     ui.actions.replaceChildren.apply(ui.actions, buttons);
     body.setAttribute("data-state", st);
     ui.scene.setAttribute("data-state", st);
-    if (ui.scene.__flow) ui.scene.__flow.update(stats, stale);
-    updateTelegramRoutes(ui, stats);
+    if (ui.scene.__flow) ui.scene.__flow.update(stats, stale ? "stale" : undefined);
+    updateTelegramRoutes(ui, stats, stale);
     updateTelegramMetrics(ui, stats);
     renderTelegramDiagnostics(ui.scene.querySelector(".tg-check-details"), snap.telegram_diagnostics);
     if (focused) {

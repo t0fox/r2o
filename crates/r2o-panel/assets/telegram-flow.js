@@ -38,6 +38,13 @@ const TRANSPORT_TO_LANE = new Map([
   ["tcp_fallback", 3],
 ]);
 
+const RESPONSE_TRANSPORT_TO_LANE = new Map([
+  ["direct-wss", 0],
+  ["cf-worker", 1],
+  ["cf-proxy", 2],
+  ["cf-h2", 2],
+]);
+
 const STATE_LABELS = {
   idle: "резерв",
   connecting: "подключение",
@@ -294,11 +301,28 @@ function summarize(snapshot, error) {
       dcLabel: "DC неизвестен", lanes: ROUTES.map(route => ({ ...route, status: "idle", counts: {} })),
       sessions: [], truncated: false, hedged: [], activeConnections: 0,
       acceptedConnections: 0, mediaSessions: 0, cooldowns: [], cooldownDurationMs: 0,
-      dcActivity: telegramDcActivity([]),
+      dcActivity: telegramDcActivity([]), routeResponses: null, dcResponses: null,
     };
   }
 
   const activeConnections = Math.max(0, Number(snapshot?.active_connections) || 0);
+  const acceptedConnections = Number(snapshot.accepted_connections) || 0;
+  const responseCounters = snapshot.sessions_by_dc_transport;
+  const hasResponseCounters = responseCounters && typeof responseCounters === "object"
+    && !Array.isArray(responseCounters);
+  const routeResponses = hasResponseCounters ? ROUTES.map(() => 0) : null;
+  const dcResponses = hasResponseCounters ? [0, 0, 0, 0, 0] : null;
+  if (hasResponseCounters) {
+    for (const [key, count] of Object.entries(responseCounters)) {
+      const match = /^dc(\d+):(.+)$/.exec(key);
+      if (!match || !Number.isSafeInteger(count) || count < 0) continue;
+      const dc = telegramDcNumber(match[1]);
+      const lane = RESPONSE_TRANSPORT_TO_LANE.get(match[2]);
+      if (dc !== null) dcResponses[dc - 1] += count;
+      if (lane !== undefined) routeResponses[lane] += count;
+    }
+  }
+  const responseHistory = { routeResponses, dcResponses };
   const sessions = Array.isArray(snapshot?.active_sessions) ? snapshot.active_sessions.slice(0, 64) : [];
   const cooldowns = normalizeCooldowns(snapshot);
   const cooldownDurationMs = Math.max(0, Number(snapshot?.route_cooldown_ms) || 0);
@@ -318,17 +342,20 @@ function summarize(snapshot, error) {
         caption: `Последняя ошибка: ${failure.stage} · ${failure.dc} · ${failure.route}`,
         transportLabel: "Недоступно", dcLabel: failure.dc, lanes, sessions: [],
         truncated: Boolean(snapshot?.route_sessions_truncated), hedged: [], activeConnections,
-        acceptedConnections: Number(snapshot?.accepted_connections) || 0, mediaSessions: 0,
+        acceptedConnections, mediaSessions: 0, ...responseHistory,
         cooldowns, cooldownDurationMs, dcActivity: telegramDcActivity([]),
       };
     }
     return {
       state: cooldowns.length ? "cooling" : "idle",
-      caption: cooldowns.length ? "Нет активных сессий · часть маршрутов на паузе" : "Нет активных соединений",
+      caption: cooldowns.length ? "Нет активных сессий · часть маршрутов на паузе"
+        : snapshot.listener_ready === true && snapshot.accepted_connections === 0
+          ? "Прокси слушает, но ещё не принял ни одного подключения с момента запуска"
+          : "Нет активных соединений",
       transportLabel: cooldowns.length ? "Маршруты на паузе" : "Нет подключений",
       dcLabel: "DC неизвестен", lanes, sessions: [],
       truncated: Boolean(snapshot?.route_sessions_truncated), hedged: [], activeConnections,
-      acceptedConnections: Number(snapshot?.accepted_connections) || 0, mediaSessions: 0,
+      acceptedConnections, mediaSessions: 0, ...responseHistory,
       cooldowns, cooldownDurationMs, dcActivity: telegramDcActivity([]),
     };
   }
@@ -338,7 +365,7 @@ function summarize(snapshot, error) {
       state: "unavailable", caption: "Активные соединения есть, маршрут пока не определён", transportLabel: "Определяется",
       dcLabel: "DC неизвестен", lanes: emptyLanes, sessions: [],
       truncated: Boolean(snapshot?.route_sessions_truncated), hedged: [], activeConnections,
-      acceptedConnections: Number(snapshot?.accepted_connections) || 0, mediaSessions: 0,
+      acceptedConnections, mediaSessions: 0, ...responseHistory,
       cooldowns, cooldownDurationMs, dcActivity: telegramDcActivity([]),
     };
   }
@@ -431,7 +458,7 @@ function summarize(snapshot, error) {
   return {
     state, caption, transportLabel, dcLabel, lanes, sessions,
     truncated: Boolean(snapshot.route_sessions_truncated), hedged, activeConnections,
-    acceptedConnections: Number(snapshot.accepted_connections) || 0, mediaSessions,
+    acceptedConnections, mediaSessions, ...responseHistory,
     cooldowns, cooldownDurationMs, dcActivity: telegramDcActivity(sessions),
   };
 }

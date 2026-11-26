@@ -43,6 +43,15 @@ assert.equal(view.acceptedConnections, 7);
 assert.equal(view.lanes[0].counts.selected, 1);
 assert.equal(view.lanes[0].confirmed, 1);
 assert.deepEqual(view.dcActivity[1], { active: 1, media: 0, confirmed: 1 });
+assert.deepEqual(view.routeResponses, [4, 0, 0, 0]);
+const idle = flow.summarizeTelegramFlow({ ...stats, active_connections: 0, active_sessions: [],
+  sessions_by_dc_transport: { "dc2:direct-wss": 4, "dc203:cf-worker": 3, "dc5:cf-proxy": 2, "dc5:cf-h2": 1 } });
+assert.deepEqual(idle.routeResponses, [4, 3, 3, 0]);
+assert.deepEqual(idle.dcResponses, [0, 7, 0, 0, 3]);
+assert.equal(flow.motionRoutes(idle).size, 0);
+assert.match(flow.summarizeTelegramFlow({ ...stats, active_connections: 0,
+  accepted_connections: 0, active_sessions: [] }).caption, /не принял ни одного подключения/);
+assert.equal(flow.summarizeTelegramFlow(null).routeResponses, null);
 assert.deepEqual([...flow.motionRoutes(view)], [["0:2", { lane: 0, dc: 2, state: "confirmed" }]]);
 const alternate = { ...stats.active_sessions[0], dc: 5, events: [], direct_state: "cancelled",
   fallback_transport: "cloudflare_worker", fallback_state: "connecting",
