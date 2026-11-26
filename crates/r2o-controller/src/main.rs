@@ -21212,6 +21212,7 @@ group_block_proven: false,
         let failure_key = r2o_discovery_failure_key(&target);
         let mut bypass_direct_clear = false;
         let mut cleared_failure = false;
+        let mut previous_retry = None;
         let bypass_late_rst_only = self
             .cooldown_ring
             .endpoint_state(&failure_key, now)
@@ -21234,6 +21235,16 @@ group_block_proven: false,
                     }
                 }
             } else {
+                // Keep the ordinary endpoint delay for a retry that actually
+                // starts. Clearing admission state must not reset its backoff.
+                if !self.clear_streaks.contains_key(&failure_key)
+                    && self
+                        .cooldown_ring
+                        .endpoint_state(&failure_key, failed_at)
+                        .is_some_and(|(_, late_rst_only)| !late_rst_only)
+                {
+                    previous_retry = Some(retry_after);
+                }
                 self.r2o_clear_failed_endpoint(&failure_key);
                 cleared_failure = true;
             }
@@ -21262,6 +21273,9 @@ group_block_proven: false,
         let enqueued = queue.enqueue_with_planned(target.clone(), now, trigger_planned);
         let queue_full = !enqueued && queue.entries.len() >= R2O_DISCOVERY_TASK_CAPACITY;
         if enqueued {
+            if let Some(delay) = previous_retry {
+                self.failed_retry_after.insert(failure_key.clone(), delay);
+            }
             if r2o_discovery_transport(&target) == 6
                 && !self
                     .client_hellos
@@ -45642,7 +45656,25 @@ mod tests {
             worker.queue_with_planned(target.clone(), false),
             "после истечения backoff Discovery обязан снова принять имя"
         );
-        let _ = worker.try_outcome();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(outcome) = worker.try_outcome() {
+                assert!(outcome.plan_text.is_none());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "исход повторного поиска не пришёл"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            worker
+                .failed_retry_after
+                .get(&super::r2o_discovery_failure_key(&target)),
+            Some(&Duration::from_millis(300)),
+            "повторный отказ должен удвоить начальную задержку"
+        );
     }
 
     #[cfg(unix)]
