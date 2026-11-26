@@ -205,6 +205,15 @@ pub async fn run_with_listen(
     );
 
     tokio::pin!(shutdown);
+    #[cfg(target_os = "linux")]
+    let network_events =
+        match crate::outbound::NetworkEvents::subscribe(runtime.outbound().network()) {
+            Ok(events) => Some(events),
+            Err(error) => {
+                tracing::debug!("Telegram: подписка на изменения сети недоступна: {error}");
+                None
+            }
+        };
     let cf_snapshot = runtime.cf_domains();
     info!(
         "Пул CF-прокси готов: {} доменов, поколение {}, время последнего обновления {}",
@@ -301,6 +310,25 @@ pub async fn run_with_listen(
 
     let config = Arc::new(config);
     let mut background_tasks = JoinSet::new();
+    #[cfg(target_os = "linux")]
+    if let Some(events) = network_events {
+        let runtime = Arc::clone(&runtime);
+        background_tasks.spawn(async move {
+            loop {
+                match events.changed(runtime.outbound().network()).await {
+                    Ok(()) => {
+                        crate::routing::network_changed();
+                        runtime.dc_map().request_refresh();
+                    }
+                    Err(error) => {
+                        warn!("Telegram: потеряна подписка на изменения сети: {error}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     {
         let stats = Arc::clone(runtime.stats());
         let runtime = Arc::clone(&runtime);

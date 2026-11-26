@@ -245,7 +245,7 @@ async fn fetch_from_worker(
     address: &str,
     dc: u32,
 ) -> Result<DcSnapshot, String> {
-    let ws = connect_cf_worker_ws_for_dc_with_outbound_opts(
+    let result = connect_cf_worker_ws_for_dc_with_outbound_opts(
         worker_domain,
         address,
         dc,
@@ -259,8 +259,10 @@ async fn fetch_from_worker(
             ca_bundle: runtime.ca_bundle(),
         },
     )
-    .await
-    .ok_or_else(|| "Worker не установил WSS-соединение".to_string())?;
+    .await;
+    let crate::ws_client::WsConnectResult::Connected(ws) = result else {
+        return Err(format!("Worker не установил WSS-соединение: {result:?}"));
+    };
     info!(
         "Получение help.getConfig через настроенный Worker {} для DC{}",
         worker_domain, dc

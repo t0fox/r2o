@@ -63,7 +63,7 @@ fn queue_ws_candidate<'a, T, E, F, Fut>(
 
 pub(crate) async fn race_ws_candidates<'a, T, E, F, Fut>(
     domains: Vec<String>,
-    hedge_delay: Duration,
+    hedge_delay: impl Into<Option<Duration>>,
     connect: F,
     should_stop: impl Fn(&[(String, E)]) -> bool + Send,
 ) -> (Option<(String, T)>, Vec<(String, E)>)
@@ -79,7 +79,8 @@ where
         queue_ws_candidate(domain, &mut pending, &connect);
     }
 
-    let delay = tokio::time::sleep(hedge_delay);
+    let hedge_delay = hedge_delay.into();
+    let delay = tokio::time::sleep(hedge_delay.unwrap_or_default());
     tokio::pin!(delay);
     let mut hedge_started = false;
     let mut failures = Vec::new();
@@ -109,7 +110,7 @@ where
                     }
                 }
             }
-            _ = &mut delay, if !hedge_started && pending.len() < 2 && !remaining.is_empty() => {
+            _ = &mut delay, if hedge_delay.is_some() && !hedge_started && pending.len() < 2 && !remaining.is_empty() => {
                 hedge_started = true;
                 if let Some(domain) = remaining.pop_front() {
                     queue_ws_candidate(domain, &mut pending, &connect);
@@ -155,8 +156,14 @@ pub(crate) fn media_tag(is_media: bool) -> &'static str {
 /// между узлами Cloudflare, а не направлять её только на первый адрес.
 static CF_IP_ROTATION: AtomicUsize = AtomicUsize::new(0);
 
+struct Cooldown {
+    until: Instant,
+    forget_after: Instant,
+    failures: u8,
+}
+
 pub(crate) struct CooldownMap<K> {
-    entries: StdMutex<Option<HashMap<K, Instant>>>,
+    entries: StdMutex<Option<HashMap<K, Cooldown>>>,
 }
 
 impl<K: Eq + Hash> CooldownMap<K> {
@@ -166,24 +173,69 @@ impl<K: Eq + Hash> CooldownMap<K> {
         }
     }
 
+    pub(crate) fn clear_all(&self) {
+        if let Some(entries) = &mut *self.entries.lock().unwrap() {
+            entries.clear();
+        }
+    }
+
     pub(crate) fn set(&self, key: K, cooldown: Duration)
+    where
+        K: Clone,
+    {
+        self.update(key, cooldown, false);
+    }
+
+    pub(crate) fn fail(&self, key: K, cooldown: Duration)
+    where
+        K: Clone,
+    {
+        self.update(key, cooldown, true);
+    }
+
+    fn update(&self, key: K, cooldown: Duration, adaptive: bool)
     where
         K: Clone,
     {
         let mut entries = self.entries.lock().unwrap();
         let entries = entries.get_or_insert_with(HashMap::new);
         let now = Instant::now();
-        entries.retain(|_, until| now < *until);
-        if entries.len() >= 512
-            && !entries.contains_key(&key)
-            && let Some(oldest) = entries
-                .iter()
-                .min_by_key(|(_, until)| *until)
-                .map(|(key, _)| key.clone())
-        {
-            entries.remove(&oldest);
+        if entries.len() >= 512 && !entries.contains_key(&key) {
+            entries.retain(|_, entry| now < entry.forget_after);
+            if entries.len() >= 512
+                && let Some(oldest) = entries
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.forget_after)
+                    .map(|(key, _)| key.clone())
+            {
+                entries.remove(&oldest);
+            }
         }
-        entries.insert(key, now + cooldown);
+        let failures = if adaptive {
+            entries
+                .get(&key)
+                .filter(|entry| now < entry.forget_after)
+                .map_or(1, |entry| (entry.failures + 1).min(6))
+        } else {
+            0
+        };
+        let delay = if failures > 0 {
+            let cap = cooldown.max(Duration::from_secs(120));
+            let delay = cooldown.saturating_mul(1 << (failures - 1));
+            let jitter_ms = (delay.as_millis() / 4).min(5_000) as u64;
+            (delay + Duration::from_millis(rand::random_range(0..=jitter_ms))).min(cap)
+        } else {
+            cooldown
+        };
+        let until = now + delay;
+        entries.insert(
+            key,
+            Cooldown {
+                until,
+                forget_after: until + Duration::from_secs(120),
+                failures,
+            },
+        );
     }
 
     pub(crate) fn clear<Q>(&self, key: &Q)
@@ -203,7 +255,7 @@ impl<K: Eq + Hash> CooldownMap<K> {
     {
         let entries = self.entries.lock().unwrap();
         match entries.as_ref().and_then(|entries| entries.get(key)) {
-            Some(&until) => Instant::now() < until,
+            Some(entry) => Instant::now() < entry.until,
             None => false,
         }
     }
@@ -217,7 +269,8 @@ impl<K: Eq + Hash> CooldownMap<K> {
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|entries| entries.contains_key(key))
+            .and_then(|entries| entries.get(key))
+            .is_some_and(|entry| Instant::now() < entry.forget_after)
     }
 }
 
@@ -262,6 +315,14 @@ type CfEdgeRouteKey = (IpAddr, String, String);
 static CF_EDGE_TLS_FAIL: CooldownMap<CfEdgeRouteKey> = CooldownMap::new();
 static CF_EDGE_MTPROTO_FAIL: CooldownMap<CfEdgeRouteKey> = CooldownMap::new();
 static CF_EDGE_PREFERRED: OnceLock<StdMutex<HashMap<String, (IpAddr, Instant)>>> = OnceLock::new();
+pub(crate) fn network_changed() {
+    CF_EDGE_TLS_FAIL.clear_all();
+    CF_EDGE_MTPROTO_FAIL.clear_all();
+    if let Some(preferred) = CF_EDGE_PREFERRED.get() {
+        preferred.lock().unwrap().clear();
+    }
+}
+
 const CF_EDGE_PREFERENCE_TTL: Duration = Duration::from_secs(120);
 const CF_EDGE_HEDGE_DELAY: Duration = Duration::from_millis(125);
 
@@ -298,10 +359,8 @@ fn cf_ip_attempts(
         entries
             .as_ref()
             .and_then(|entries| entries.get(&(*ip, domain.to_string(), route_scope.to_string())))
-            .is_some_and(|&until| now < until)
+            .is_some_and(|entry| now < entry.until)
     };
-    let all_cooling = ips.iter().all(is_cooling);
-    let limit = if all_cooling { 1 } else { ips.len() };
     let mut ordered = (0..ips.len())
         .map(move |offset| ips[(first + offset) % ips.len()])
         .collect::<Vec<_>>();
@@ -310,11 +369,7 @@ fn cf_ip_attempts(
     {
         ordered.swap(0, position);
     }
-    ordered
-        .into_iter()
-        .filter(|ip| all_cooling || !is_cooling(ip))
-        .take(limit)
-        .collect()
+    ordered.into_iter().filter(|ip| !is_cooling(ip)).collect()
 }
 
 fn preferred_cf_edge(domain: &str) -> Option<IpAddr> {
@@ -368,7 +423,9 @@ pub(crate) fn cf_worker_scope(dc: u32, is_media: bool, dst: &str) -> String {
 
 pub(crate) fn confirm_cf_ws(host: &str, scope: &str, peer: SocketAddr) {
     let scope = format!("{scope};tls={}", u8::from(peer.port() == 443));
-    CF_EDGE_MTPROTO_FAIL.clear(&(peer.ip(), host.to_owned(), scope.clone()));
+    let key = (peer.ip(), host.to_owned(), scope.clone());
+    CF_EDGE_TLS_FAIL.clear(&key);
+    CF_EDGE_MTPROTO_FAIL.clear(&key);
     remember_cf_edge(&format!("{host};{scope}"), peer.ip());
 }
 
@@ -384,7 +441,7 @@ pub(crate) fn fail_cf_ws(host: &str, scope: &str, peer: SocketAddr, cooldown: Du
             entries.remove(&key);
         }
     }
-    CF_EDGE_MTPROTO_FAIL.set((peer.ip(), host.to_owned(), scope), cooldown);
+    CF_EDGE_MTPROTO_FAIL.fail((peer.ip(), host.to_owned(), scope), cooldown);
 }
 
 /// Домены WebSocket для заданного DC.
@@ -908,6 +965,9 @@ async fn connect_cf_with_path_mode(
     let first = cf_ip_start(&ips);
     let cooldowns = &CF_EDGE_TLS_FAIL;
     let route_ips = cf_ip_attempts(&ips, first, domain, &route_scope, cooldowns);
+    if route_ips.is_empty() {
+        return WsConnectResult::Failed("Edge на паузе после транспортной ошибки".into());
+    }
     let candidates = route_ips
         .iter()
         .map(ToString::to_string)
@@ -954,13 +1014,6 @@ async fn connect_cf_with_path_mode(
     )
     .await;
 
-    if let Some((target, ws)) = winner
-        && let Ok(ip) = target.parse::<IpAddr>()
-    {
-        cooldowns.clear(&(ip, domain.to_string(), route_scope.to_string()));
-        return WsConnectResult::Connected(ws);
-    }
-
     let mut last_non_redirect = None;
     let mut last_redirect = None;
     for (target, result) in failures {
@@ -975,7 +1028,9 @@ async fn connect_cf_with_path_mode(
             }
             WsConnectResult::HttpStatus(429) => {
                 cooldowns.clear(&route_key);
-                return WsConnectResult::HttpStatus(429);
+                if winner.is_none() {
+                    return WsConnectResult::HttpStatus(429);
+                }
             }
             WsConnectResult::HttpStatus(code) => {
                 cooldowns.clear(&route_key);
@@ -986,21 +1041,25 @@ async fn connect_cf_with_path_mode(
                 last_non_redirect = Some(WsConnectResult::DnsFailed(reason));
             }
             WsConnectResult::Failed(reason) => {
-                cooldowns.set(route_key, opts.fail_cooldown);
+                cooldowns.fail(route_key, opts.fail_cooldown);
                 last_non_redirect = Some(WsConnectResult::Failed(reason));
             }
             WsConnectResult::TimedOut => {
-                cooldowns.set(route_key, opts.fail_cooldown);
+                cooldowns.fail(route_key, opts.fail_cooldown);
                 last_non_redirect = Some(WsConnectResult::TimedOut);
             }
             WsConnectResult::ConnectTimedOut(reason) => {
-                cooldowns.set(route_key, opts.fail_cooldown);
+                cooldowns.fail(route_key, opts.fail_cooldown);
                 last_non_redirect = Some(WsConnectResult::ConnectTimedOut(reason));
             }
             WsConnectResult::Connected(_) => {
                 unreachable!("race returns successful streams separately")
             }
         }
+    }
+
+    if let Some((_, ws)) = winner {
+        return WsConnectResult::Connected(ws);
     }
 
     last_non_redirect.unwrap_or_else(|| {
@@ -1563,7 +1622,7 @@ pub(crate) async fn connect_cf_worker_ws_for_dc_with_outbound_opts(
     timeout: Duration,
     outbound: &OutboundConnector,
     opts: CfDialOpts<'_>,
-) -> Option<TgWsStream> {
+) -> WsConnectResult {
     let path = cf_worker_path(dst, dc, is_media);
     let media = media_tag(is_media);
     let route_scope = cf_worker_scope(dc, is_media, dst);
@@ -1572,7 +1631,7 @@ pub(crate) async fn connect_cf_worker_ws_for_dc_with_outbound_opts(
         dc, media, dst, worker_domain
     );
 
-    match connect_cf_with_path(
+    connect_cf_with_path(
         worker_domain,
         &path,
         &route_scope,
@@ -1582,44 +1641,6 @@ pub(crate) async fn connect_cf_worker_ws_for_dc_with_outbound_opts(
         opts,
     )
     .await
-    {
-        WsConnectResult::Connected(ws) => Some(ws),
-        WsConnectResult::Redirect(code) => {
-            warn!(
-                "DC{}{}: CF Worker {} ответил кодом HTTP {} (перенаправление)",
-                dc, media, worker_domain, code
-            );
-            None
-        }
-        WsConnectResult::HttpStatus(code) => {
-            warn!(
-                "DC{}{}: CF Worker {} ответил HTTP {}",
-                dc, media, worker_domain, code
-            );
-            None
-        }
-        WsConnectResult::DnsFailed(reason) => {
-            warn!(
-                "DC{}{}: DNS-ошибка CF Worker {}: {}",
-                dc, media, worker_domain, reason
-            );
-            None
-        }
-        WsConnectResult::Failed(reason) => {
-            warn!(
-                "DC{}{}: ошибка CF Worker-подключения к {}: {}",
-                dc, media, worker_domain, reason
-            );
-            None
-        }
-        WsConnectResult::TimedOut | WsConnectResult::ConnectTimedOut(_) => {
-            warn!(
-                "DC{}{}: истекло время ожидания CF Worker {}",
-                dc, media, worker_domain
-            );
-            None
-        }
-    }
 }
 /// Отправить двоичное сообщение WebSocket и очистить буфер.
 pub async fn ws_send(ws: &mut TgWsStream, data: Vec<u8>) -> Result<(), String> {

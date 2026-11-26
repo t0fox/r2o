@@ -204,74 +204,107 @@ impl PayloadActivity {
         loop {
             let elapsed_ms = self.started.elapsed().as_millis() as usize;
             let last_payload_ms = self.last_payload_ms.load(Ordering::Relaxed);
-            let idle_for_ms = elapsed_ms.saturating_sub(last_payload_ms);
+            let idle_for_ms = elapsed_ms.wrapping_sub(last_payload_ms);
             if idle_for_ms >= idle_ms {
                 return;
             }
 
-            let remaining_ms = (idle_ms - idle_for_ms).clamp(1, 1_000) as u64;
+            let remaining_ms = (idle_ms - idle_for_ms) as u64;
             tokio::time::sleep(Duration::from_millis(remaining_ms)).await;
         }
     }
 }
 
-enum RelayDirection<T> {
-    Upload(T),
-    Download(T),
+enum UploadEnd {
+    Fin,
+    Aborted(String),
 }
 
-enum RelayCompletion<T> {
-    Ended {
-        direction: RelayDirection<T>,
-        drained: bool,
-    },
+enum DownloadEnd {
+    PeerClose(String),
+    ClientError(String),
+    UpstreamError(String),
+}
+
+// Pending I/O owns both stream halves in Open. TCP FIN enters Draining;
+// a WebSocket Close or a bounded drain transitions to Closing. I/O errors
+// enter Aborted without waiting for a peer that can no longer complete Close.
+enum RelayCompletion {
+    ClientFin,
+    PeerClose(String),
+    Aborted { side: &'static str, reason: String },
     Idle,
 }
 
-async fn race_directions<U, D>(
-    upload: U,
-    download: D,
-    drain_timeout: Duration,
-) -> (RelayDirection<U::Output>, bool)
-where
-    U: Future<Output = D::Output>,
-    D: Future,
-{
-    tokio::pin!(upload);
-    tokio::pin!(download);
+impl From<DownloadEnd> for RelayCompletion {
+    fn from(value: DownloadEnd) -> Self {
+        match value {
+            DownloadEnd::PeerClose(reason) => Self::PeerClose(reason),
+            DownloadEnd::ClientError(reason) => Self::Aborted {
+                side: "клиент",
+                reason,
+            },
+            DownloadEnd::UpstreamError(reason) => Self::Aborted {
+                side: "upstream",
+                reason,
+            },
+        }
+    }
+}
 
+async fn race_directions(
+    upload: impl Future<Output = UploadEnd>,
+    download: impl Future<Output = DownloadEnd>,
+    drain_timeout: Duration,
+) -> RelayCompletion {
+    tokio::pin!(upload, download);
     tokio::select! {
-        result = &mut upload => {
-            let drained = tokio::time::timeout(drain_timeout, &mut download).await.is_ok();
-            (RelayDirection::Upload(result), drained)
-        },
-        result = &mut download => {
-            let drained = tokio::time::timeout(drain_timeout, &mut upload).await.is_ok();
-            (RelayDirection::Download(result), drained)
+        result = &mut download => result.into(),
+        result = &mut upload => match result {
+            UploadEnd::Fin => match tokio::time::timeout(drain_timeout, download).await {
+                Ok(result) => result.into(),
+                Err(_) => RelayCompletion::ClientFin,
+            },
+            UploadEnd::Aborted(reason) => RelayCompletion::Aborted { side: "передача в upstream", reason },
         },
     }
 }
 
-async fn supervise_directions<U, D>(
-    upload: U,
-    download: D,
+async fn supervise_directions(
+    upload: impl Future<Output = UploadEnd>,
+    download: impl Future<Output = DownloadEnd>,
     activity: &PayloadActivity,
     idle_timeout: Duration,
     drain_timeout: Duration,
-) -> RelayCompletion<U::Output>
-where
-    U: Future<Output = D::Output>,
-    D: Future,
-{
+) -> RelayCompletion {
     tokio::select! {
-        ended = race_directions(upload, download, drain_timeout) => {
-            RelayCompletion::Ended {
-                direction: ended.0,
-                drained: ended.1,
-            }
-        },
+        ended = race_directions(upload, download, drain_timeout) => ended,
         _ = activity.idle_reached(idle_timeout) => RelayCompletion::Idle,
     }
+}
+
+async fn complete_ws_close<S, R>(
+    write: &mut S,
+    read: &mut R,
+    peer_started: bool,
+) -> Result<(), tungstenite::Error>
+where
+    S: futures_util::Sink<Message, Error = tungstenite::Error> + Unpin,
+    R: futures_util::Stream<Item = Result<Message, tungstenite::Error>> + Unpin,
+{
+    if peer_started {
+        // tungstenite queues the matching Close as soon as Stream yields it.
+        return write.flush().await;
+    }
+    write.send(Message::Close(None)).await?;
+    while let Some(message) = read.next().await {
+        if matches!(message?, Message::Close(_)) {
+            return write.flush().await;
+        }
+    }
+    Err(tungstenite::Error::Protocol(
+        tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -340,7 +373,11 @@ pub(crate) async fn bridge_transparent_ws(
             let init_reservation = match memory_budget.as_ref() {
                 Some(budget) => match BudgetReservation::acquire(budget, init.len()) {
                     Some(reservation) => Some(reservation),
-                    None => return "бюджет памяти Telegram исчерпан для init".to_string(),
+                    None => {
+                        return UploadEnd::Aborted(
+                            "бюджет памяти Telegram исчерпан для init".into(),
+                        );
+                    }
                 },
                 None => None,
             };
@@ -351,7 +388,7 @@ pub(crate) async fn bridge_transparent_ws(
                 .await
                 .is_err()
             {
-                return "не удалось отправить init по WSS".to_string();
+                return UploadEnd::Aborted("не удалось отправить init по WSS".into());
             }
             drop(init_reservation);
             bytes_up.fetch_add(init.len(), Ordering::Relaxed);
@@ -360,10 +397,12 @@ pub(crate) async fn bridge_transparent_ws(
             let (mut decrypt, mut encrypt) = transparent::direct_stream_ciphers(&init);
             let mut splitter = (framing == WsFraming::Packets).then(|| MsgSplitter::new(proto));
             let mut buffer = vec![0u8; RELAY_BUF_SIZE];
-            let close_reason = loop {
+            loop {
                 let length = match client_read.read(&mut buffer).await {
-                    Ok(0) => break "клиент закрыл TCP".to_string(),
-                    Err(error) => break format!("ошибка чтения TCP клиента: {error}"),
+                    Ok(0) => break,
+                    Err(error) => {
+                        return UploadEnd::Aborted(format!("ошибка чтения TCP клиента: {error}"));
+                    }
                     Ok(length) => length,
                 };
                 telemetry.record_client_bytes(length as u64);
@@ -372,7 +411,7 @@ pub(crate) async fn bridge_transparent_ws(
                     decrypt.apply_keystream(&mut buffer[..length]);
                     let frames = splitter.split_and_encrypt(&mut buffer[..length], &mut encrypt);
                     if let Some(error) = splitter.error() {
-                        return format!("ошибка кадрирования MTProto: {error}");
+                        return UploadEnd::Aborted(format!("ошибка кадрирования MTProto: {error}"));
                     }
                     for frame in frames {
                         let frame_len = frame.len();
@@ -380,8 +419,9 @@ pub(crate) async fn bridge_transparent_ws(
                             Some(budget) => match BudgetReservation::acquire(budget, frame_len) {
                                 Some(reservation) => Some(reservation),
                                 None => {
-                                    return "бюджет памяти Telegram исчерпан для кадра WSS"
-                                        .to_string();
+                                    return UploadEnd::Aborted(
+                                        "бюджет памяти Telegram исчерпан для кадра WSS".into(),
+                                    );
                                 }
                             },
                             None => None,
@@ -398,7 +438,7 @@ pub(crate) async fn bridge_transparent_ws(
                         )
                         .await
                         {
-                            return error;
+                            return UploadEnd::Aborted(error);
                         }
                         bytes_up.fetch_add(frame_len, Ordering::Relaxed);
                         activity.touch();
@@ -408,7 +448,9 @@ pub(crate) async fn bridge_transparent_ws(
                         Some(budget) => match BudgetReservation::acquire(budget, length) {
                             Some(reservation) => Some(reservation),
                             None => {
-                                return "бюджет памяти Telegram исчерпан для кадра WSS".to_string();
+                                return UploadEnd::Aborted(
+                                    "бюджет памяти Telegram исчерпан для кадра WSS".into(),
+                                );
                             }
                         },
                         None => None,
@@ -425,12 +467,12 @@ pub(crate) async fn bridge_transparent_ws(
                     )
                     .await
                     {
-                        return error;
+                        return UploadEnd::Aborted(error);
                     }
                     bytes_up.fetch_add(length, Ordering::Relaxed);
                     activity.touch();
                 }
-            };
+            }
 
             if let Some(splitter) = splitter.as_mut() {
                 let pending = splitter.pending_len();
@@ -440,41 +482,14 @@ pub(crate) async fn bridge_transparent_ws(
                         label, pending
                     );
                 }
-                for frame in splitter.flush() {
-                    let frame_len = frame.len();
-                    let _frame_reservation = match memory_budget.as_ref() {
-                        Some(budget) => match BudgetReservation::acquire(budget, frame_len) {
-                            Some(reservation) => Some(reservation),
-                            None => {
-                                return "бюджет памяти Telegram исчерпан для кадра WSS".to_string();
-                            }
-                        },
-                        None => None,
-                    };
-                    if let Some(progress) = progress {
-                        progress.sent();
-                    }
-                    if let Err(error) = send_application_frame(
-                        &ws_write,
-                        &response_state,
-                        &feedback,
-                        first_request_signal,
-                        frame,
-                    )
-                    .await
-                    {
-                        return error;
-                    }
-                    bytes_up.fetch_add(frame_len, Ordering::Relaxed);
-                    activity.touch();
-                }
+                // A partial MTProto frame cannot be carried as a valid packet.
             }
-
-            close_reason
+            UploadEnd::Fin
         }
     };
 
     let download = {
+        let ws_read = &mut ws_read;
         let ws_write = Arc::clone(&ws_write);
         let bytes_down = Arc::clone(&bytes_down);
         let activity = activity.clone();
@@ -496,8 +511,9 @@ pub(crate) async fn bridge_transparent_ws(
                                 None => {
                                     record_mtproto_failure_if_pending(&response_state, &feedback)
                                         .await;
-                                    return "бюджет памяти Telegram исчерпан для ответа WSS"
-                                        .to_string();
+                                    return DownloadEnd::ClientError(
+                                        "бюджет памяти Telegram исчерпан для ответа WSS".into(),
+                                    );
                                 }
                             },
                             None => None,
@@ -534,7 +550,9 @@ pub(crate) async fn bridge_transparent_ws(
                             }
                         }
                         if let Err(error) = client_write.write_all(&data).await {
-                            return format!("ошибка записи в TCP клиента: {error}");
+                            return DownloadEnd::ClientError(format!(
+                                "ошибка записи в TCP клиента: {error}"
+                            ));
                         }
                         if !data.is_empty()
                             && let Some(progress) = progress
@@ -556,49 +574,55 @@ pub(crate) async fn bridge_transparent_ws(
                                 None => {
                                     record_mtproto_failure_if_pending(&response_state, &feedback)
                                         .await;
-                                    return "бюджет памяти Telegram исчерпан для ответа WSS"
-                                        .to_string();
+                                    return DownloadEnd::ClientError(
+                                        "бюджет памяти Telegram исчерпан для ответа WSS".into(),
+                                    );
                                 }
                             },
                             None => None,
                         };
                         telemetry.record_upstream_bytes(length as u64);
                         if let Err(error) = client_write.write_all(data.as_bytes()).await {
-                            return format!("ошибка записи текста WSS в TCP клиента: {error}");
+                            return DownloadEnd::ClientError(format!(
+                                "ошибка записи текста WSS в TCP клиента: {error}"
+                            ));
                         }
                         bytes_down.fetch_add(length, Ordering::Relaxed);
                         activity.touch();
                     }
-                    Ok(Message::Ping(data)) => {
-                        if let Err(error) = ws_write.lock().await.send(Message::Pong(data)).await {
-                            return format!("ошибка ответа на WSS ping: {error}");
+                    Ok(Message::Ping(_)) => {
+                        // tungstenite has already queued a Pong with the same payload.
+                        if let Err(error) = ws_write.lock().await.flush().await {
+                            return DownloadEnd::UpstreamError(format!(
+                                "ошибка ответа на WSS ping: {error}"
+                            ));
                         }
                     }
                     Ok(Message::Pong(_)) => {}
                     Ok(Message::Close(frame)) => {
                         record_mtproto_failure_if_pending(&response_state, &feedback).await;
-                        let _ = client_write.shutdown().await;
-                        return match frame {
+                        return DownloadEnd::PeerClose(match frame {
                             Some(frame) => format!(
                                 "upstream закрыл WSS: код={:?}, причина={}",
                                 frame.code, frame.reason
                             ),
                             None => "upstream закрыл WSS без кода".to_string(),
-                        };
+                        });
                     }
                     Err(error) => {
                         record_mtproto_failure_if_pending(&response_state, &feedback).await;
-                        return format!("ошибка чтения WSS: {error}");
+                        return DownloadEnd::UpstreamError(format!("ошибка чтения WSS: {error}"));
                     }
                     _ => {
                         record_mtproto_failure_if_pending(&response_state, &feedback).await;
-                        return "upstream прислал неподдерживаемый кадр WSS".to_string();
+                        return DownloadEnd::UpstreamError(
+                            "upstream прислал неподдерживаемый кадр WSS".into(),
+                        );
                     }
                 }
             }
             record_mtproto_failure_if_pending(&response_state, &feedback).await;
-            let _ = client_write.shutdown().await;
-            "upstream завершил поток WSS".to_string()
+            DownloadEnd::UpstreamError("upstream завершил WSS без Close".into())
         }
     };
 
@@ -622,13 +646,14 @@ pub(crate) async fn bridge_transparent_ws(
         _ = first_response_timeout => Err(false),
         _ = media_timeout => Err(true),
     };
-    let (closed_by, reason) = match completion {
+    let (closed_by, reason, closing) = match completion {
         Err(false) => {
             record_mtproto_failure_if_pending(&response_state, &feedback).await;
             telemetry.set_stage("mtproto_timeout");
             (
                 "таймер MTProto",
-                "нет входящих данных перед подтверждением MTProto".to_owned(),
+                "нет входящих данных перед подтверждением MTProto".into(),
+                Some(false),
             )
         }
         Err(true) => {
@@ -636,52 +661,48 @@ pub(crate) async fn bridge_transparent_ws(
             telemetry.set_stage("media_stall");
             (
                 "таймер медиа",
-                "после запроса нет данных от сервера".to_owned(),
+                "после запроса нет данных от сервера".into(),
+                Some(false),
             )
         }
-        Ok(RelayCompletion::Ended {
-            direction: RelayDirection::Upload(reason),
-            drained,
-        }) => {
-            if !drained {
-                warn!(
-                    "[{}] вторая сторона не завершилась за {:?}; завершаю WSS",
-                    label, RELAY_DRAIN_TIMEOUT
-                );
-            }
-            ("клиент", reason)
-        }
-        Ok(RelayCompletion::Ended {
-            direction: RelayDirection::Download(reason),
-            drained,
-        }) => {
-            if !drained {
-                warn!(
-                    "[{}] вторая сторона не завершилась за {:?}; завершаю WSS",
-                    label, RELAY_DRAIN_TIMEOUT
-                );
-            }
-            ("upstream", reason)
-        }
+        Ok(RelayCompletion::ClientFin) => ("клиент", "клиент закрыл TCP".into(), Some(false)),
+        Ok(RelayCompletion::PeerClose(reason)) => ("upstream", reason, Some(true)),
+        Ok(RelayCompletion::Aborted { side, reason }) => (side, reason, None),
         Ok(RelayCompletion::Idle) => (
             "таймер простоя",
-            format!("нет MTProto-данных {:?}", SESSION_IDLE_TIMEOUT),
+            format!("нет MTProto-данных {SESSION_IDLE_TIMEOUT:?}"),
+            Some(false),
         ),
     };
-    if let Ok(Err(error)) = tokio::time::timeout(RELAY_DRAIN_TIMEOUT, async {
-        ws_write.lock().await.close().await
-    })
-    .await
-    {
-        warn!("[{}] ошибка закрытия WSS: {}", label, error);
-    }
+    let close_state = if let Some(peer_started) = closing {
+        let handshake = async {
+            complete_ws_close(&mut *ws_write.lock().await, &mut ws_read, peer_started).await
+        };
+        match tokio::time::timeout(RELAY_DRAIN_TIMEOUT, handshake).await {
+            Ok(Ok(())) => "CLOSED",
+            Ok(Err(error)) => {
+                warn!("[{}] ошибка завершения WSS Close: {}", label, error);
+                "ABORTED"
+            }
+            Err(_) => {
+                warn!(
+                    "[{}] нет подтверждения WSS Close за {:?}",
+                    label, RELAY_DRAIN_TIMEOUT
+                );
+                "ABORTED"
+            }
+        }
+    } else {
+        "ABORTED"
+    };
     info!(
-        "[{}] сессия DC{}{} через {} закрыта стороной {}: причина={}, вверх {} байт, вниз {} байт",
+        "[{}] сессия DC{}{} через {} закрыта стороной {}: состояние={}, причина={}, вверх {} байт, вниз {} байт",
         label,
         dc,
         media_tag(is_media),
         route_type,
         closed_by,
+        close_state,
         reason,
         bytes_up.load(Ordering::Relaxed),
         bytes_down.load(Ordering::Relaxed)
@@ -691,8 +712,8 @@ pub(crate) async fn bridge_transparent_ws(
 #[cfg(test)]
 mod tests {
     use super::{
-        FIRST_RESPONSE_TIMEOUT, MtprotoResponseState, PayloadActivity, RelayCompletion,
-        RelayDirection, ResponseProgress, observe_and_record_first_mtproto_response,
+        DownloadEnd, FIRST_RESPONSE_TIMEOUT, MtprotoResponseState, PayloadActivity,
+        RelayCompletion, ResponseProgress, UploadEnd, observe_and_record_first_mtproto_response,
         race_directions, record_first_mtproto_response, record_first_response_progress,
         send_application_frame, supervise_directions, wait_for_first_response_stall,
     };
@@ -938,6 +959,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_handshake_works_in_both_directions_over_tcp() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio_tungstenite::{accept_async, client_async};
+
+        for server_starts in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = async {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = accept_async(tcp).await.unwrap();
+                if server_starts {
+                    ws.send(Message::Close(None)).await.unwrap();
+                }
+                assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+                if !server_starts {
+                    ws.flush().await.unwrap();
+                }
+            };
+            let client = async {
+                let tcp = TcpStream::connect(address).await.unwrap();
+                let (ws, _) = client_async(format!("ws://{address}/"), tcp).await.unwrap();
+                let (mut write, mut read) = ws.split();
+                if server_starts {
+                    assert!(matches!(read.next().await, Some(Ok(Message::Close(_)))));
+                }
+                super::complete_ws_close(&mut write, &mut read, server_starts)
+                    .await
+                    .unwrap();
+            };
+            tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::join!(server, client);
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn cancelling_bridge_drops_both_direction_futures() {
         let dropped = Arc::new(AtomicUsize::new(0));
         let started = Arc::new(AtomicUsize::new(0));
@@ -949,12 +1009,12 @@ mod tests {
             async move {
                 upload_started.fetch_add(1, Ordering::SeqCst);
                 let _drop_count = DropCount(upload_drop);
-                future::pending::<()>().await;
+                future::pending().await
             },
             async move {
                 download_started.fetch_add(1, Ordering::SeqCst);
                 let _drop_count = DropCount(download_drop);
-                future::pending::<()>().await;
+                future::pending().await
             },
             Duration::from_millis(10),
         ));
@@ -978,11 +1038,11 @@ mod tests {
         let (finish_tx, finish_rx) = oneshot::channel();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            let _ = finish_tx.send("upstream завершён".to_string());
+            let _ = finish_tx.send(DownloadEnd::PeerClose("upstream завершён".to_string()));
         });
 
         let result = supervise_directions(
-            async { "клиент закрыл TCP".to_string() },
+            async { UploadEnd::Fin },
             async move { finish_rx.await.unwrap() },
             &activity,
             Duration::from_secs(1),
@@ -992,10 +1052,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            RelayCompletion::Ended {
-                direction: RelayDirection::Upload(ref reason),
-                drained: true,
-            } if reason == "клиент закрыл TCP"
+            RelayCompletion::PeerClose(reason) if reason == "upstream завершён"
         ));
     }
 
@@ -1013,12 +1070,12 @@ mod tests {
                 async move {
                     let _drop_count = DropCount(upload_drop);
                     let _ = upload_started_tx.send(());
-                    future::pending::<()>().await;
+                    future::pending().await
                 },
                 async move {
                     let _drop_count = DropCount(download_drop);
                     let _ = download_started_tx.send(());
-                    future::pending::<()>().await;
+                    future::pending().await
                 },
                 &activity,
                 Duration::from_millis(10),

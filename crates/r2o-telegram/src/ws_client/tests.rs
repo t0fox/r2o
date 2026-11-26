@@ -136,7 +136,7 @@ fn cf_ip_cooldowns_are_scoped_by_domain_and_transport_route() {
 }
 
 #[test]
-fn cf_ip_attempts_try_one_edge_when_every_edge_is_cooling() {
+fn cf_ip_attempts_skip_open_edges() {
     let cooldowns = CooldownMap::new();
     let ips = ["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
     for ip in ips {
@@ -148,7 +148,7 @@ fn cf_ip_attempts_try_one_edge_when_every_edge_is_cooling() {
 
     assert_eq!(
         cf_ip_attempts(&ips, 1, "kws2.edge.example", "dc2-proxy", &cooldowns),
-        [ips[1]]
+        Vec::<IpAddr>::new()
     );
 }
 
