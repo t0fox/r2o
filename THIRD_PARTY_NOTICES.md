@@ -35,7 +35,13 @@ Rust сохраняет первый снимок FastNAT до подтверж�
 использование сокета из [`dump_rules`, `lookup_route` и `d2k_routemark_load`](https://github.com/necronicle/d2k/blob/8c6bcdc28b3aedeca8618ff645215bfd6408047c/datapath/routemark_nl.c).
 Фильтр по политике, метке и выходному интерфейсу из
 [`d2k_routemark_gate`](https://github.com/necronicle/d2k/blob/8c6bcdc28b3aedeca8618ff645215bfd6408047c/datapath/routemark.c)
-применяется перед дополнительными запросами эффективных маршрутов R2O.
+определяет допуск на Keenetic. На OpenWrt после него по-прежнему выполняются
+дополнительные запросы эффективных маршрутов R2O.
+Из [`fw_family_up`, `fw_family_installed`, `voice_late_rules`, `user_rules_save` и `user_rules_restore`](https://github.com/necronicle/d2k/blob/8c6bcdc28b3aedeca8618ff645215bfd6408047c/files/S99d2k)
+адаптированы исключение метки верификатора из общего пропуска DNS, порядок
+правила MASQUERADE для raw UDP, проверка переходов и покрытия NFQUEUE,
+приём поздних STUN-пакетов и сохранение исключений владельца при
+восстановлении цепочек Keenetic.
 [MIT, Copyright (c) 2026 Necronicle](docs/licenses/d2k.txt).
 
 ## Telegram MTProto/WSS-прокси

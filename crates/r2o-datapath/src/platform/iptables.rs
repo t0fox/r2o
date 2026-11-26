@@ -221,15 +221,77 @@ impl Rules {
     }
 }
 
+// D2K user_rules_save/user_rules_restore. An absent chain was lost during a
+// rebuild, while a readable chain is authoritative even if its owner removed
+// every exception. Keep the snapshots independent across chains and families.
+fn owner_rules(
+    platform: &Platform,
+    version: u8,
+    live: &Rules,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let mut owners = BTreeMap::new();
+    for chain in ["R2O_OUT", "R2O_IN"] {
+        let snapshot = platform
+            .run
+            .join(format!("platform.owner.{version}.{chain}"));
+        let saved = optional(&snapshot)?;
+        let rules = if let Some(rules) = live.chains.get(chain) {
+            let rules: Vec<_> = rules
+                .iter()
+                .filter(|rule| owner_rule(rule))
+                .cloned()
+                .collect();
+            if rules.is_empty() {
+                remove(&snapshot)?;
+            } else {
+                let text = rules.join("\n");
+                if saved.as_deref() != Some(text.as_str()) {
+                    atomic(&snapshot, &text)?;
+                }
+            }
+            rules
+        } else {
+            saved
+                .as_deref()
+                .unwrap_or_default()
+                .lines()
+                .filter(|rule| owner_rule(rule))
+                .map(str::to_owned)
+                .collect()
+        };
+        if !rules.is_empty() {
+            owners.insert(chain.to_owned(), rules);
+        }
+    }
+    Ok(owners)
+}
+
+fn owner_rule(rule: &str) -> bool {
+    rule.starts_with('-')
+        && rule
+            .split_once("-m comment --comment ")
+            .is_some_and(|(_, rest)| !rest.trim_start_matches('"').starts_with("r2o-"))
+}
+
+#[derive(Clone, Copy)]
+struct OptionalMatches {
+    ppe: bool,
+    late_stun: bool,
+}
+
 fn mangle(
     platform: &Platform,
     version: u8,
     sources: &str,
     sets: &BTreeSet<DnsSet>,
     broadcast: &[IpAddr],
-    ppe: bool,
+    matches: OptionalMatches,
+    owner_rules: &BTreeMap<String, Vec<String>>,
 ) -> Rules {
-    let mut rules = Rules::default();
+    let mut rules = Rules {
+        chains: owner_rules.clone(),
+        ..Rules::default()
+    };
     let queue = platform.queue(version);
     let target = format!("-j NFQUEUE --queue-num {queue} --queue-bypass");
     let loopback = if version == 4 {
@@ -245,6 +307,11 @@ fn mangle(
     let raw = platform.raw;
     let measure = platform.measure;
     let probe = platform.probe;
+    let dns_probe_match = if platform.kind == Kind::Keenetic && probe != 0 {
+        format!(" -m mark ! --mark {probe}")
+    } else {
+        String::new()
+    };
     let early = format!("0:{}", platform.early);
     let voice = format!("{}:{}", platform.voice_window.0, platform.voice_window.1);
     let late = format!("{}:", u32::from(platform.early) + 1);
@@ -351,10 +418,15 @@ fn mangle(
             }
         }
         for proto in ["tcp", "udp"] {
+            let except_probe = if chain == "R2O_OUT" {
+                &dns_probe_match
+            } else {
+                ""
+            };
             rules.push(
                 chain,
                 format!(
-                    "-p {proto} -m multiport {selector} {} -j RETURN",
+                    "-p {proto} -m multiport {selector} {}{except_probe} -j RETURN",
                     platform.dns
                 ),
             );
@@ -368,6 +440,17 @@ fn mangle(
             rules.push(chain, capture(proto, &platform.ports, &early, ""));
         }
         rules.push(chain, capture("udp", &platform.voice, &voice, ""));
+        if matches.late_stun {
+            // D2K voice_late_rules: only UDP with the STUN cookie, never media.
+            let cookie = if version == 4 {
+                "0>>22&0x3C@12=0x2112A442"
+            } else {
+                "4>>8&0xFF=17&&52=0x2112A442"
+            };
+            let late_voice = format!("{}:", u32::from(platform.voice_window.1) + 1);
+            let stun = format!("-m u32 --u32 \"{cookie}\" ");
+            rules.push(chain, capture("udp", &platform.voice, &late_voice, &stun));
+        }
         for flag in ["RST", "FIN"] {
             rules.push(
                 chain,
@@ -387,7 +470,7 @@ fn mangle(
         "-p ipv6-icmp --icmpv6-type 3/0"
     };
     rules.push("R2O_IN", format!("{icmp} {target}"));
-    if ppe
+    if matches.ppe
         && value("R2O_PPE_DEOFFLOAD", "1") != "0"
         && let Some(target) = ppe_target(platform, version)
     {
@@ -655,14 +738,28 @@ pub(super) fn forget(endpoint: Endpoint) -> Result<()> {
     Ok(())
 }
 
-fn nat(platform: &Platform) -> Rules {
+fn nat(platform: &Platform, before: &Rules, listing: &str) -> Rules {
     let mut rules = Rules::default();
-    rules.hook(
-        "POSTROUTING",
-        format!(
-            "-p udp -m mark --mark {} -m comment --comment {NAT_TAG} -j MASQUERADE",
-            platform.raw
-        ),
+    let index = if platform.kind == Kind::Keenetic {
+        // NDM's existing source-specific SNAT rules take precedence.
+        listing
+            .lines()
+            .filter(|line| line.starts_with("-A POSTROUTING "))
+            .count()
+            - before.hooks.get("POSTROUTING").map_or(0, Vec::len)
+            + 1
+    } else {
+        1
+    };
+    rules.hooks.insert(
+        "POSTROUTING".into(),
+        vec![(
+            index,
+            format!(
+                "-p udp -m mark --mark {} -m comment --comment {NAT_TAG} -j MASQUERADE",
+                platform.raw
+            ),
+        )],
     );
     rules
 }
@@ -673,6 +770,9 @@ pub(super) fn fingerprint(platform: &Platform, ipv6: bool, hash: &mut Sha256) ->
             continue;
         }
         let state = split_state(platform, table, &list(version, table)?);
+        if platform.kind == Kind::Keenetic {
+            verify_keenetic_rules(platform, version, table, &state)?;
+        }
         hash.update(format!(
             "{version}:{table}:{:?}:{:?}",
             state.chains, state.hooks
@@ -680,6 +780,79 @@ pub(super) fn fingerprint(platform: &Platform, ipv6: bool, hash: &mut Sha256) ->
         if table == "mangle" && value("R2O_PPE_DEOFFLOAD", "1") != "0" {
             // После перезагрузки NDM цель PPE может появиться после базовых цепочек.
             hash.update(ppe_target(platform, version).unwrap_or_default());
+        }
+    }
+    Ok(())
+}
+
+fn verify_keenetic_rules(
+    platform: &Platform,
+    version: u8,
+    table: &str,
+    state: &Rules,
+) -> Result<()> {
+    let attached = |hook: &str, jump: &str| {
+        state
+            .hooks
+            .get(hook)
+            .is_some_and(|rules| rules.iter().any(|(_, rule)| rule == jump))
+    };
+    if table == "nat" {
+        if state.hooks.get("POSTROUTING").is_some_and(|rules| {
+            rules
+                .iter()
+                .any(|(_, rule)| rule.starts_with("-p udp ") && rule.ends_with(" -j MASQUERADE"))
+        }) {
+            return Ok(());
+        }
+        return Err(error("IPv4 nat: отсутствует MASQUERADE для raw UDP"));
+    }
+    for (hook, jump) in [
+        ("POSTROUTING", "-j R2O_OUT"),
+        ("FORWARD", "-j R2O_IN"),
+        ("INPUT", "-j R2O_INPUT"),
+    ] {
+        if !attached(hook, jump) {
+            return Err(error(format!(
+                "IPv{version} mangle: отсутствует переход {hook} {jump}"
+            )));
+        }
+    }
+    if !state
+        .chains
+        .get("R2O_INPUT")
+        .is_some_and(|rules| rules.iter().any(|rule| rule == "-j R2O_IN"))
+    {
+        return Err(error(format!(
+            "IPv{version} mangle: отсутствует вход к NFQUEUE"
+        )));
+    }
+    let queue = platform.queue(version).to_string();
+    let window = format!(" --connbytes 0:{} ", platform.early);
+    for (chain, direction) in [
+        ("R2O_OUT", " --ctdir ORIGINAL "),
+        ("R2O_IN", " --ctdir REPLY "),
+    ] {
+        for protocol in ["-p tcp ", "-p udp "] {
+            if !state.chains.get(chain).is_some_and(|rules| {
+                rules.iter().any(|rule| {
+                    rule.starts_with(protocol)
+                        && rule.contains(direction)
+                        && rule.contains(&window)
+                        && rule.contains(" -j NFQUEUE ")
+                        && rule
+                            .split_whitespace()
+                            .skip_while(|arg| *arg != "--queue-num")
+                            .nth(1)
+                            == Some(queue.as_str())
+                        && rule.split_whitespace().any(|arg| arg == "--queue-bypass")
+                })
+            }) {
+                return Err(error(format!(
+                    "IPv{version} {chain}: отсутствует правило NFQUEUE ({})",
+                    protocol.trim()
+                )));
+            }
         }
     }
     Ok(())
@@ -800,17 +973,34 @@ pub(super) fn install(
                 list(version, table)?
             };
             let before = split_state(platform, table, &listing);
+            let owners = if table == "mangle" && platform.kind == Kind::Keenetic {
+                owner_rules(platform, version, &before)?
+            } else {
+                BTreeMap::new()
+            };
             let sets = if table == "mangle" && (version == 4 || ipv6) {
                 prepare_sets(version, leases)?
             } else {
                 BTreeSet::new()
             };
+            let mut features = OptionalMatches {
+                ppe: true,
+                late_stun: table == "mangle"
+                    && (version == 4 || ipv6)
+                    && platform.kind == Kind::Keenetic
+                    && command(tool(version), &["-m", "u32", "--help"], None).is_ok(),
+            };
+            let make_mangle = |broadcast: &[IpAddr], features| {
+                mangle(
+                    platform, version, exclusions, &sets, broadcast, features, &owners,
+                )
+            };
             let desired = if table == "nat" {
-                nat(platform)
+                nat(platform, &before, &listing)
             } else if version == 6 && !ipv6 {
                 Rules::default()
             } else {
-                mangle(platform, version, exclusions, &sets, &[], true)
+                make_mangle(&[], features)
             };
             let backend = Iptables { version, table };
             let mut result = backend.apply(&render(&before, &desired));
@@ -822,7 +1012,7 @@ pub(super) fn install(
                     .is_err_and(|err| err.to_string().contains("addrtype"))
             {
                 addresses = broadcast_addresses();
-                let fallback = mangle(platform, version, exclusions, &sets, &addresses, true);
+                let fallback = make_mangle(&addresses, features);
                 result = backend.apply(&render(&before, &fallback));
             }
             if let Err(err) = result {
@@ -831,23 +1021,51 @@ pub(super) fn install(
                     .values()
                     .flatten()
                     .any(|(_, rule)| rule.contains(PPE_TAG));
-                if table != "mangle" || !optional_ppe {
+                if table != "mangle" || !optional_ppe && !features.late_stun {
                     return Err(err);
                 }
-                let fallback = mangle(platform, version, exclusions, &sets, &addresses, false);
-                backend
-                    .apply(&render(&before, &fallback))
-                    .map_err(|fallback| error(format!("{err}; повтор без PPE: {fallback}")))?;
-                ppe_error = Some(format!("IPv{version} PPE: {err}"));
-                eprintln!("r2o-platform: IPv{version} без подтверждённой поддержки PPE: {err}");
+                let try_mangle =
+                    |features| backend.apply(&render(&before, &make_mangle(&addresses, features)));
+                if features.late_stun
+                    && try_mangle(OptionalMatches {
+                        late_stun: false,
+                        ..features
+                    })
+                    .is_ok()
+                {
+                    eprintln!("r2o-platform: IPv{version} поздний STUN недоступен: {err}");
+                } else if optional_ppe {
+                    features.ppe = false;
+                    if let Err(fallback) = try_mangle(features) {
+                        if !features.late_stun {
+                            return Err(error(format!("{err}; повтор без PPE: {fallback}")));
+                        }
+                        features.late_stun = false;
+                        try_mangle(features).map_err(|fallback| {
+                            error(format!("{err}; повтор без PPE и позднего STUN: {fallback}"))
+                        })?;
+                        eprintln!("r2o-platform: IPv{version} поздний STUN недоступен: {err}");
+                    }
+                    ppe_error = Some(format!("IPv{version} PPE: {err}"));
+                    eprintln!("r2o-platform: IPv{version} без подтверждённой поддержки PPE: {err}");
+                } else {
+                    return Err(err);
+                }
             }
             applied.push((version, table, before));
         }
+        let signature = (platform.kind == Kind::Keenetic)
+            .then(|| platform.fingerprint(ipv6))
+            .transpose()?;
         let state = platform.run.join("platform.offload-error");
         match ppe_error {
             Some(reason) => atomic(&state, &reason),
             None => remove(&state),
+        }?;
+        if let Some(signature) = signature {
+            atomic(&platform.run.join(RULES), &signature)?;
         }
+        Ok(())
     })();
     if let Err(err) = result {
         let mut errors = vec![err.to_string()];
@@ -871,10 +1089,11 @@ pub(super) fn down(platform: &Platform) -> Result<()> {
             continue;
         }
         let result = list(version, table).and_then(|listing| {
-            Iptables { version, table }.apply(&render(
-                &split_state(platform, table, &listing),
-                &Rules::default(),
-            ))
+            let before = split_state(platform, table, &listing);
+            if table == "mangle" && platform.kind == Kind::Keenetic {
+                owner_rules(platform, version, &before)?;
+            }
+            Iptables { version, table }.apply(&render(&before, &Rules::default()))
         });
         if let Err(err) = result
             && (version == 4 || platform.ipv6 && !err.to_string().contains("Table does not exist"))
@@ -938,7 +1157,18 @@ mod tests {
         for kind in [Kind::Keenetic, Kind::OpenWrt] {
             platform.kind = kind;
             for version in [4, 6] {
-                let rules = mangle(&platform, version, "", &BTreeSet::new(), &[], false);
+                let rules = mangle(
+                    &platform,
+                    version,
+                    "",
+                    &BTreeSet::new(),
+                    &[],
+                    OptionalMatches {
+                        ppe: false,
+                        late_stun: false,
+                    },
+                    &BTreeMap::new(),
+                );
                 let out = &rules.chains["R2O_OUT"];
                 let capture = out
                     .iter()

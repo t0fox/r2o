@@ -100,15 +100,14 @@ snapshot() {
         sample=$root/$1.$family.json
         cp "$root/run/datapath-health.$family.json" "$sample"
         printf '%s IPv%s %s\n' "$1" "$family" "$(cat "$sample")"
-        expect=$(counter "$sample" "$2")
         previously=0
         if [ -n "${previous:-}" ]; then
-            previously=$(counter "$root/$previous.$family.json" "$2")
-            if [ "$2" != equivalent_packets ]; then
-                [ "$(counter "$sample" equivalent_packets)" = "$(counter "$root/$previous.$family.json" equivalent_packets)" ]
-            fi
+            previously=$(counter "$root/$previous.$family.json" packets)
         fi
-        [ "$expect" -gt "$previously" ]
+        [ "$(counter "$sample" packets)" -gt "$previously" ]
+        for metric in checks_started pending_packets unavailable_packets different_packets equivalent_packets rpdb_observe_only_packets; do
+            [ "$(counter "$sample" "$metric")" -eq 0 ]
+        done
         [ "$(counter "$sample" receive_errors)" -eq 0 ]
         [ "$(counter "$sample" verdict_failures)" -eq 0 ]
     done
@@ -122,53 +121,53 @@ traffic() {
     ip netns exec rpdb-lan "$probe" client 2001:db8:3::4
 }
 run_case() {
-    # Даём существующему worker обработать уведомления и новый lookup.
+    # Даём существующему worker обработать уведомления о смене маршрутов.
     sleep 2
     traffic
     sleep 1
     traffic
     sleep 6
-    snapshot "$1" "$2"
+    snapshot "$1"
 }
-run_case equivalent equivalent_packets
-# Немаркированное соединение самого роутера тоже должно пройти проверку.
+run_case equivalent
+# Немаркированное соединение самого роутера тоже проходит через NFQUEUE.
 for address in 192.0.2.4 2001:db8:3::4; do
     "$probe" client "$address"
     sleep 1
     "$probe" client "$address"
 done
 sleep 6
-snapshot router_local equivalent_packets
+snapshot router_local
 ip rule add pref 8 fwmark 46 lookup 301
 ip -6 rule add pref 8 fwmark 46 lookup 301
-run_case vpn different_packets
+run_case vpn
 ip rule del pref 8
 ip -6 rule del pref 8
 ip route add default via 198.51.100.3 table 4096
 ip -6 route add default via 2001:db8:2::3 table 4096
 ip rule add pref 8 fwmark 47 lookup 4096
 ip -6 rule add pref 8 fwmark 47 lookup 4096
-run_case second_gateway different_packets
+run_case second_gateway
 ip rule del pref 8
 ip -6 rule del pref 8
 ip rule add pref 8 from 198.51.100.1 fwmark 46 lookup 4096
 ip -6 rule add pref 8 from 2001:db8:1::2 fwmark 45 lookup 4096
-run_case source_selected different_packets
+run_case source_selected
 ip rule del pref 8
 ip -6 rule del pref 8
 ip route add unreachable default table 302
 ip -6 route add unreachable default table 302
 ip rule add pref 8 fwmark 45 lookup 302
 ip -6 rule add pref 8 fwmark 45 lookup 302
-run_case unreachable different_packets
+run_case unreachable
 ip rule del pref 8
 ip -6 rule del pref 8
 ip rule add pref 7 iif rvpn lookup 301
 ip -6 rule add pref 7 iif rvpn lookup 301
-run_case unknown_context unavailable_packets
+run_case unknown_context
 ip rule del pref 7
 ip -6 rule del pref 7
-run_case restored equivalent_packets
+run_case restored
 "$dp" --platform down
 cat "$root/dp.log"
 echo KEENETIC_EFFECTIVE_RPDB_PASS

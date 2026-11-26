@@ -234,6 +234,15 @@ impl Kind {
             _ => Kind::Linux,
         }
     }
+
+    fn checks_effective_routes(self) -> bool {
+        // Keenetic uses the existing fwmark and egress-interface gate.
+        self != Self::Keenetic
+    }
+}
+
+pub fn checks_effective_routes() -> bool {
+    Kind::detect().checks_effective_routes()
 }
 
 impl Platform {
@@ -542,7 +551,14 @@ impl Platform {
     fn install(&self, ipv6: bool, leases: &Leases, exclusions: &str) -> Result<()> {
         match self.backend {
             Backend::Nft => nft::install(self, ipv6, leases)?,
-            Backend::Iptables => iptables::install(self, ipv6, leases, exclusions)?,
+            Backend::Iptables => {
+                iptables::install(self, ipv6, leases, exclusions)?;
+                if self.kind == Kind::Keenetic {
+                    // The legacy adapter records the verified signature before
+                    // releasing its rollback snapshots.
+                    return Ok(());
+                }
+            }
         }
         atomic(&self.run.join(RULES), &self.fingerprint(ipv6)?)
     }
@@ -1286,6 +1302,13 @@ fn run_worker(platform: &Platform, listener: &UnixDatagram) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_keenetic_skips_additional_effective_route_checks() {
+        assert!(!Kind::Keenetic.checks_effective_routes());
+        assert!(Kind::OpenWrt.checks_effective_routes());
+        assert!(Kind::Linux.checks_effective_routes());
+    }
 
     #[test]
     fn reports_conntrack_entries_created_without_accounting() {

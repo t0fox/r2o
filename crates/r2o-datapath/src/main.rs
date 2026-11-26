@@ -1669,6 +1669,8 @@ mod app {
             }
         }
         let router_runtime = std::env::var("R2O_PLATFORM_RUNTIME").as_deref() == Ok("1");
+        let check_effective_routes =
+            router_runtime && r2o_datapath::platform::checks_effective_routes();
         let route_family = if options.protocol_family == libc::AF_INET6 as u16 {
             R2oRouteFamily::Ipv6
         } else {
@@ -2701,7 +2703,7 @@ mod app {
                     }
                     let mut verified_path = false;
                     let mut rpdb_blocks_apply = false;
-                    if router_runtime
+                    if check_effective_routes
                         && options.mode == RuntimeMode::Apply
                         && outbound
                         && original_from_queue.is_some()

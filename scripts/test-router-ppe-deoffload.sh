@@ -34,6 +34,8 @@ v = "6" if pathlib.Path(sys.argv[0]).name.startswith("ip6") else "4"
 args = sys.argv[1:]
 if args == ["--version"]:
     print("iptables v1.4.21")
+elif args == ["-m", "u32", "--help"]:
+    sys.exit(0 if os.environ.get("WITH_U32") == "1" else 2)
 elif args[:2] == ["-w", "-t"] and args[3:] == ["-S"]:
     print((work / (v + args[2])).read_text(), end="")
 elif args == ["--noflush"]:
@@ -49,6 +51,8 @@ elif args == ["--noflush"]:
         op.startswith("-A ") and "-m addrtype " in op for op in ops
     ):
         sys.exit("unknown match addrtype")
+    if os.environ.get("FAIL_RESTORE") == "stun" and any("--u32 " in op for op in ops):
+        sys.exit("kernel rejected xt_u32")
     state = work / (v + table.removeprefix("*"))
     rules = state.read_text().splitlines()
     for op in ops:
@@ -66,6 +70,8 @@ elif args == ["--noflush"]:
             rules.append(op)
         elif cmd == "-I":
             index, spec = rest[0].split(maxsplit=1)
+            if os.environ.get("DROP_CAPTURE_HOOK") == "1" and chain == "FORWARD" and spec == "-j R2O_IN":
+                continue
             indices = [i for i, r in enumerate(rules) if r.startswith(prefix)]
             position = int(index) - 1
             assert 0 <= position <= len(indices), op
@@ -91,7 +97,8 @@ cat > "$WORK/foreign" <<'RULES'
 RULES
 cp "$WORK/foreign" "$WORK/4mangle"
 cp "$WORK/foreign" "$WORK/6mangle"
-: > "$WORK/4nat"
+printf '%s\n' '-A POSTROUTING -p udp -s 192.0.2.0/24 -j SNAT --to-source 198.51.100.2' > "$WORK/foreign-nat"
+cp "$WORK/foreign-nat" "$WORK/4nat"
 
 platform() { "$R2O_DATAPATH_BIN" --platform "$@"; }
 ppe() { grep -- '--comment r2o-ppe' "$WORK/${1}mangle"; }
@@ -120,6 +127,15 @@ compare_d2k() {
 }
 
 expect_status 'target=present.*ipv4_rules=missing(0/8).*lan_coverage=unverified'
+if DROP_CAPTURE_HOOK=1 platform up; then
+    echo 'firewall up accepted a missing inbound NFQUEUE hook' >&2
+    exit 1
+fi
+test "$(cat "$fastnat")" = 1
+test ! -e "$journal"
+cmp "$WORK/foreign" "$WORK/4mangle"
+cmp "$WORK/foreign" "$WORK/6mangle"
+cmp "$WORK/foreign-nat" "$WORK/4nat"
 if FAIL_RESTORE=all platform up; then exit 1; fi
 test "$(cat "$fastnat")" = 1
 test ! -e "$journal"
@@ -128,6 +144,12 @@ test "$(cat "$fastnat")" = 0
 test "$(cat "$journal")" = 1
 grep -q '255\.255\.255\.255 -j RETURN' "$WORK/4mangle"
 compare_d2k
+for family in 4 6; do
+    grep -q -- '^-A R2O_OUT -p udp -m multiport --dports 53,853 -m mark ! --mark 46 -j RETURN$' "$WORK/${family}mangle"
+    grep -q -- '^-A R2O_IN -p udp -m multiport --sports 53,853 -j RETURN$' "$WORK/${family}mangle"
+done
+head -n 1 "$WORK/4nat" | cmp "$WORK/foreign-nat" -
+grep -q -- '^-A POSTROUTING -p udp -m mark --mark 45 -m comment --comment r2o-raw-udp -j MASQUERADE$' "$WORK/4nat"
 expect_status 'ipv4_rules=installed(8/8).*ipv6_rules=installed(8/8) FastNAT=0'
 platform flowoffload-restore
 test "$(cat "$fastnat")" = 0
@@ -190,6 +212,7 @@ test "$(cat "$fastnat")" = 1
 test ! -e "$journal"
 cmp "$WORK/foreign" "$WORK/4mangle"
 cmp "$WORK/foreign" "$WORK/6mangle"
+cmp "$WORK/foreign-nat" "$WORK/4nat"
 
 # Поддержка семейств независима. Отключение PPE не снимает защиту FastNAT.
 rm "$proc/net/ip6_tables_targets"
@@ -209,5 +232,52 @@ test "$(cat "$journal")" = 0
 platform down
 test "$(cat "$fastnat")" = 0
 test ! -e "$journal"
+
+platform up
+first='-A R2O_OUT -s 192.0.2.11 -m comment --comment "owner first" -j RETURN'
+second='-A R2O_OUT -s 192.0.2.12 -m comment --comment "owner second" -j RETURN'
+other='-A R2O_IN -s 2001:db8::11 -m comment --comment "owner v6" -j RETURN'
+printf '%s\n' "$first" "$second" '-A R2O_OUT -m comment --comment r2o-dns-route -j RETURN' >> "$WORK/4mangle"
+printf '%s\n' "$other" >> "$WORK/6mangle"
+"$HELPER" ensure
+assert_owner_rules() {
+    grep -- '^-A R2O_OUT ' "$WORK/4mangle" | head -n 2 > "$WORK/owners"
+    printf '%s\n' "$first" "$second" | cmp "$WORK/owners" -
+    grep -- '^-A R2O_IN ' "$WORK/6mangle" | head -n 1 > "$WORK/owners"
+    printf '%s\n' "$other" | cmp "$WORK/owners" -
+    if grep -q -- '--comment r2o-dns-route ' "$WORK/4mangle"; then exit 1; fi
+}
+assert_owner_rules
+# NDM can remove just one chain, including its hook, during a rebuild.
+awk '!/^-N R2O_OUT$|^-A R2O_OUT | -j R2O_OUT$/' "$WORK/4mangle" > "$WORK/partial"
+mv "$WORK/partial" "$WORK/4mangle"
+"$HELPER" ensure
+assert_owner_rules
+platform down
+platform up
+assert_owner_rules
+# A readable chain with no owner rules supersedes the saved snapshot.
+sed '/--comment "owner /d' "$WORK/4mangle" > "$WORK/removed"
+mv "$WORK/removed" "$WORK/4mangle"
+"$HELPER" ensure
+platform down
+platform up
+if grep -q -- 'owner ' "$WORK/4mangle"; then exit 1; fi
+grep -Fxq -- "$other" "$WORK/6mangle"
+platform down
+
+WITH_U32=1 platform up
+for family in 4 6; do
+    if [ "$family" = 4 ]; then cookie='0>>22&0x3C@12=0x2112A442'; else cookie='4>>8&0xFF=17&&52=0x2112A442'; fi
+    grep -F -- "--u32 \"$cookie\"" "$WORK/${family}mangle" > "$WORK/stun"
+    test "$(wc -l < "$WORK/stun")" -eq 2
+    grep -Eq 'R2O_OUT -p udp.*--ctdir ORIGINAL.*--connbytes 5:.*-j NFQUEUE' "$WORK/stun"
+    grep -Eq 'R2O_IN -p udp.*--ctdir REPLY.*--connbytes 5:.*-j NFQUEUE' "$WORK/stun"
+done
+platform down
+WITH_U32=1 FAIL_RESTORE=stun platform up
+if grep -q -- '--u32 ' "$WORK/4mangle" "$WORK/6mangle"; then exit 1; fi
+expect_status 'ipv4_rules=installed.*ipv6_rules=installed'
+platform down
 
 printf '%s\n' 'Keenetic: PPE IPv4/IPv6, исключение чужих правил, FastNAT, восстановление после NDM и откат'
