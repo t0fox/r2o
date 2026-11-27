@@ -11,7 +11,9 @@ use tokio::net::TcpStream;
 
 use cipher::StreamCipher;
 
-use crate::crypto::{AesCtr256, DC_IDX_POS, HANDSHAKE_LEN, PROTO_TAG_POS, ProtoTag, make_cipher};
+use crate::crypto::{
+    AesCtr256, HANDSHAKE_LEN, PROTO_TAG_POS, ProtoTag, make_cipher, reserved_handshake_prefix,
+};
 
 /// Метаданные obfuscated2: DC может отсутствовать в прямом подключении.
 pub struct ClientInit {
@@ -96,27 +98,6 @@ pub fn destination_allowed(
 /// Проверить исходный IP по CIDR общей политики перехвата.
 pub fn is_telegram_destination(ip: IpAddr, cidrs: &[String]) -> bool {
     cidrs.iter().any(|cidr| cidr_contains(cidr, ip))
-}
-
-/// Публичные диапазоны Telegram из core.telegram.org/resources/cidr.txt.
-pub(crate) fn is_official_telegram_destination(ip: IpAddr) -> bool {
-    const CIDRS: &[&str] = &[
-        "91.108.4.0/22",
-        "91.108.8.0/22",
-        "91.108.12.0/22",
-        "91.108.16.0/22",
-        "91.108.20.0/22",
-        "91.108.56.0/22",
-        "91.105.192.0/23",
-        "149.154.160.0/20",
-        "185.76.151.0/24",
-        "2001:67c:4e8::/48",
-        "2001:b28:f23c::/47",
-        "2001:b28:f23f::/48",
-        "2a0a:f280::/32",
-    ];
-    let ip = ip.to_canonical();
-    CIDRS.iter().any(|cidr| cidr_contains(cidr, ip))
 }
 
 fn cidr_contains(cidr: &str, ip: IpAddr) -> bool {
@@ -320,14 +301,15 @@ pub fn original_destination(stream: &TcpStream) -> io::Result<SocketAddr> {
 
 /// Распознать obfuscated2; DC ID присутствует только в MTProxy-рукопожатии.
 pub fn parse_client_init(init: &[u8; HANDSHAKE_LEN]) -> Option<ClientInit> {
+    if reserved_handshake_prefix(init) {
+        return None;
+    }
     let mut decoded = *init;
-    make_cipher(&init[8..40], &init[40..56]).apply_keystream(&mut decoded);
+    make_cipher(&init[8..40], &init[40..56]).apply_keystream(&mut decoded[..PROTO_TAG_POS + 4]);
     let proto = ProtoTag::from_bytes(&decoded[PROTO_TAG_POS..PROTO_TAG_POS + 4])?;
-    let dc_idx = i16::from_le_bytes([decoded[DC_IDX_POS], decoded[DC_IDX_POS + 1]]);
-    let raw_dc = dc_idx.unsigned_abs() as u32;
     Some(ClientInit {
-        dc: (1..=999).contains(&raw_dc).then_some(raw_dc),
-        is_media: dc_idx < 0,
+        dc: None,
+        is_media: false,
         proto,
         used_official_secret: false,
     })
@@ -351,10 +333,11 @@ pub fn parse_client_init_with_secrets(
         let Some(handshake) = crate::crypto::parse_handshake(init, secret) else {
             continue;
         };
+        if !(1..=999).contains(&handshake.dc_id) {
+            return None;
+        }
         let candidate = ClientInit {
-            dc: (1..=999)
-                .contains(&handshake.dc_id)
-                .then_some(handshake.dc_id),
+            dc: Some(handshake.dc_id),
             is_media: handshake.is_media,
             proto: handshake.proto,
             used_official_secret: true,

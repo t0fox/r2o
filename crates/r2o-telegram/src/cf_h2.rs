@@ -55,9 +55,7 @@ pub(crate) struct MediaClient {
     pub(crate) peer: SocketAddr,
     sender: h2::client::SendRequest<Bytes>,
     driver: JoinHandle<()>,
-    _permit: SemaphorePermit<'static>,
     buffers: Option<Arc<MemoryBudget>>,
-    _window: Option<BudgetReservation>,
 }
 
 struct MediaRetry {
@@ -170,6 +168,10 @@ pub(crate) struct MediaError {
 }
 
 impl MediaError {
+    pub(crate) fn is_upstream_failure(&self) -> bool {
+        !matches!(self.stage, "client" | "capacity" | "memory")
+    }
+
     fn new(stage: &'static str, reason: impl ToString) -> Self {
         Self {
             stage,
@@ -316,6 +318,8 @@ async fn open(
         .map_err(|_| MediaError::new("http", "тайм-аут установки HTTP/2"))?
         .map_err(|error| MediaError::new("http", error))?;
     let driver = tokio::spawn(async move {
+        let _permit = permit;
+        let _window = reservation;
         let _ = connection.await;
     });
     let client = MediaClient {
@@ -323,9 +327,7 @@ async fn open(
         peer,
         sender,
         driver,
-        _permit: permit,
         buffers,
-        _window: reservation,
     };
     let (nonce, request) = plain_probe_request().map_err(|e| MediaError::new("mtproto", e))?;
     let started = Instant::now();
@@ -582,8 +584,11 @@ impl MediaClient {
                         } else {
                             std::future::pending::<()>().await;
                         }
-                    }, if !confirmed => return Err(MediaError::new("mtproto", "тайм-аут первого MTProto-ответа /api")),
+                    }, if !confirmed && pending.is_empty() => return Err(no_first_response()),
                 }
+            }
+            if first.is_some() && !confirmed {
+                return Err(no_first_response());
             }
             Ok(())
         };
@@ -592,6 +597,10 @@ impl MediaClient {
             _ = activity.idle_reached(SESSION_IDLE_TIMEOUT) => Ok(()),
         }
     }
+}
+
+fn no_first_response() -> MediaError {
+    MediaError::new("mtproto", "нет первого MTProto-ответа /api")
 }
 
 async fn read_packet(

@@ -78,6 +78,9 @@ async fn media_post_по_tls_h2_проверяет_nonce_ошибку_http_и_п
                 } else if number == 2 {
                     let head = http::Response::builder().status(503).body(()).unwrap();
                     reply.send_response(head, true).unwrap();
+                } else if data == [0x54; 40] {
+                    let head = http::Response::builder().status(404).body(()).unwrap();
+                    reply.send_response(head, true).unwrap();
                 } else if data == [0x51; 40] {
                     tokio::time::sleep(RESPONSE_IDLE_TIMEOUT * 2).await;
                     drop(reply);
@@ -144,6 +147,13 @@ async fn media_post_по_tls_h2_проверяет_nonce_ошибку_http_и_п
     .await
     .unwrap();
     assert_eq!(result.err().unwrap().http_status, Some(503));
+    let missing = client
+        .post(Bytes::from_static(&[0x54; 40]), 1024)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(missing.http_status, Some(404));
+    assert!(missing.is_upstream_failure());
     let packet = Bytes::from_static(&[0; 40]);
     let replies = tokio::time::timeout(
         SETUP_TIMEOUT,
@@ -178,7 +188,13 @@ async fn media_post_по_tls_h2_проверяет_nonce_ошибку_http_и_п
     assert_eq!(advancing.unwrap().bytes, b"abcdefghi");
     assert_eq!(budget.used(), WINDOW * 2);
     drop(client);
-    assert_eq!(budget.used(), 0);
+    tokio::time::timeout(SETUP_TIMEOUT, async {
+        while budget.used() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("отменённый HTTP/2 driver должен освободить память и сокет");
     server.abort();
 }
 

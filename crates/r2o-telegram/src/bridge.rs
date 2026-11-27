@@ -21,7 +21,7 @@ use crate::routing::{RouteFeedback, WsFraming};
 use crate::splitter::MsgSplitter;
 use crate::stats::ConnectionTelemetry;
 use crate::transparent;
-use crate::ws_client::{TgWsStream, media_tag};
+use crate::ws_client::{TgWsStream, WsTcpStream, media_tag};
 
 const RELAY_BUF_SIZE: usize = 16 * 1024;
 const RELAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -51,6 +51,14 @@ impl ResponseProgress {
     }
 
     pub(crate) async fn stalled(&self, timeout: Duration) {
+        self.stalled_while_reading(timeout, None).await;
+    }
+
+    async fn stalled_while_reading(
+        &self,
+        timeout: Duration,
+        read_progress: Option<&Mutex<Option<tokio::time::Instant>>>,
+    ) {
         loop {
             let changed = self.changed.notified();
             let pending = *self.pending_since.lock().unwrap();
@@ -58,11 +66,14 @@ impl ResponseProgress {
                 changed.await;
                 continue;
             };
+            let deadline = recent_read_or(sent, read_progress) + timeout;
             tokio::select! {
                 biased;
                 _ = changed => {}
-                _ = tokio::time::sleep_until(sent + timeout) => {
-                    if *self.pending_since.lock().unwrap() == Some(sent) {
+                _ = tokio::time::sleep_until(deadline) => {
+                    if *self.pending_since.lock().unwrap() == Some(sent)
+                        && recent_read_or(sent, read_progress).elapsed() >= timeout
+                    {
                         return;
                     }
                 }
@@ -133,20 +144,31 @@ async fn record_first_response_progress(response_state: &AsyncMutex<MtprotoRespo
     }
 }
 
+fn recent_read_or(
+    baseline: tokio::time::Instant,
+    read_progress: Option<&Mutex<Option<tokio::time::Instant>>>,
+) -> tokio::time::Instant {
+    read_progress
+        .and_then(|progress| *progress.lock().unwrap())
+        .map_or(baseline, |read| read.max(baseline))
+}
+
 async fn wait_for_first_response_stall(
     response_state: &AsyncMutex<MtprotoResponseState>,
     first_request: &Notify,
+    read_progress: Option<&Mutex<Option<tokio::time::Instant>>>,
 ) {
-    first_request.notified().await;
     loop {
         let deadline = match *response_state.lock().await {
             MtprotoResponseState::Awaiting { last_delivery, .. } => {
-                Some(last_delivery + FIRST_RESPONSE_TIMEOUT)
+                Some(recent_read_or(last_delivery, read_progress) + FIRST_RESPONSE_TIMEOUT)
             }
-            _ => None,
+            MtprotoResponseState::NotSent => None,
+            _ => return std::future::pending().await,
         };
         let Some(deadline) = deadline else {
-            return std::future::pending().await;
+            first_request.notified().await;
+            continue;
         };
         if tokio::time::Instant::now() >= deadline {
             return;
@@ -221,6 +243,7 @@ enum UploadEnd {
 }
 
 enum DownloadEnd {
+    ResponseTimeout { media: bool },
     PeerClose(String),
     ClientError(String),
     UpstreamError(String),
@@ -230,6 +253,7 @@ enum DownloadEnd {
 // a WebSocket Close or a bounded drain transitions to Closing. I/O errors
 // enter Aborted without waiting for a peer that can no longer complete Close.
 enum RelayCompletion {
+    ResponseTimeout { media: bool },
     ClientFin,
     PeerClose(String),
     Aborted { side: &'static str, reason: String },
@@ -239,6 +263,7 @@ enum RelayCompletion {
 impl From<DownloadEnd> for RelayCompletion {
     fn from(value: DownloadEnd) -> Self {
         match value {
+            DownloadEnd::ResponseTimeout { media } => Self::ResponseTimeout { media },
             DownloadEnd::PeerClose(reason) => Self::PeerClose(reason),
             DownloadEnd::ClientError(reason) => Self::Aborted {
                 side: "клиент",
@@ -310,7 +335,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn bridge_transparent_ws(
     stream: TcpStream,
-    ws: TgWsStream,
+    mut ws: TgWsStream,
     init: [u8; crate::crypto::HANDSHAKE_LEN],
     label: SocketAddr,
     destination: SocketAddr,
@@ -349,6 +374,7 @@ pub(crate) async fn bridge_transparent_ws(
         None => None,
     };
     let (mut client_read, mut client_write) = stream.into_split();
+    let read_progress = WsTcpStream::track_read_progress(&mut ws);
     let (ws_write, mut ws_read) = ws.split();
     let ws_write = Arc::new(AsyncMutex::new(ws_write));
     let bytes_up = Arc::new(AtomicUsize::new(0));
@@ -501,7 +527,30 @@ pub(crate) async fn bridge_transparent_ws(
         async move {
             let mut response_observer_enabled = true;
             let mut first_response_seen = false;
-            while let Some(message) = ws_read.next().await {
+            loop {
+                // Пока tungstenite собирает один кадр, учитываем частичные
+                // чтения. Завершённый Ping/Pong не считается ответом MTProto.
+                *read_progress.lock().unwrap() = None;
+                let media_timeout = async {
+                    if let Some(progress) = progress {
+                        progress
+                            .stalled_while_reading(MEDIA_RESPONSE_TIMEOUT, Some(&read_progress))
+                            .await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                };
+                let message = tokio::select! {
+                    biased;
+                    message = ws_read.next() => message,
+                    _ = wait_for_first_response_stall(&response_state, first_request_signal, Some(&read_progress)) => {
+                        return DownloadEnd::ResponseTimeout { media: false };
+                    }
+                    _ = media_timeout => return DownloadEnd::ResponseTimeout { media: true },
+                };
+                let Some(message) = message else {
+                    break;
+                };
                 match message {
                     Ok(Message::Binary(data)) => {
                         let length = data.len();
@@ -509,8 +558,6 @@ pub(crate) async fn bridge_transparent_ws(
                             Some(budget) => match BudgetReservation::acquire(budget, length) {
                                 Some(reservation) => Some(reservation),
                                 None => {
-                                    record_mtproto_failure_if_pending(&response_state, &feedback)
-                                        .await;
                                     return DownloadEnd::ClientError(
                                         "бюджет памяти Telegram исчерпан для ответа WSS".into(),
                                     );
@@ -572,8 +619,6 @@ pub(crate) async fn bridge_transparent_ws(
                             Some(budget) => match BudgetReservation::acquire(budget, length) {
                                 Some(reservation) => Some(reservation),
                                 None => {
-                                    record_mtproto_failure_if_pending(&response_state, &feedback)
-                                        .await;
                                     return DownloadEnd::ClientError(
                                         "бюджет памяти Telegram исчерпан для ответа WSS".into(),
                                     );
@@ -626,28 +671,16 @@ pub(crate) async fn bridge_transparent_ws(
         }
     };
 
-    let relay = supervise_directions(
+    let completion = supervise_directions(
         upload,
         download,
         &activity,
         SESSION_IDLE_TIMEOUT,
         RELAY_DRAIN_TIMEOUT,
-    );
-    let first_response_timeout = wait_for_first_response_stall(&response_state, &first_request);
-    let media_timeout = async {
-        if let Some(progress) = progress {
-            progress.stalled(MEDIA_RESPONSE_TIMEOUT).await;
-        } else {
-            std::future::pending::<()>().await;
-        }
-    };
-    let completion = tokio::select! {
-        result = relay => Ok(result),
-        _ = first_response_timeout => Err(false),
-        _ = media_timeout => Err(true),
-    };
+    )
+    .await;
     let (closed_by, reason, closing) = match completion {
-        Err(false) => {
+        RelayCompletion::ResponseTimeout { media: false } => {
             record_mtproto_failure_if_pending(&response_state, &feedback).await;
             telemetry.set_stage("mtproto_timeout");
             (
@@ -656,7 +689,7 @@ pub(crate) async fn bridge_transparent_ws(
                 Some(false),
             )
         }
-        Err(true) => {
+        RelayCompletion::ResponseTimeout { media: true } => {
             crate::routing::record_mtproto_failure(&feedback);
             telemetry.set_stage("media_stall");
             (
@@ -665,10 +698,10 @@ pub(crate) async fn bridge_transparent_ws(
                 Some(false),
             )
         }
-        Ok(RelayCompletion::ClientFin) => ("клиент", "клиент закрыл TCP".into(), Some(false)),
-        Ok(RelayCompletion::PeerClose(reason)) => ("upstream", reason, Some(true)),
-        Ok(RelayCompletion::Aborted { side, reason }) => (side, reason, None),
-        Ok(RelayCompletion::Idle) => (
+        RelayCompletion::ClientFin => ("клиент", "клиент закрыл TCP".into(), Some(false)),
+        RelayCompletion::PeerClose(reason) => ("upstream", reason, Some(true)),
+        RelayCompletion::Aborted { side, reason } => (side, reason, None),
+        RelayCompletion::Idle => (
             "таймер простоя",
             format!("нет MTProto-данных {SESSION_IDLE_TIMEOUT:?}"),
             Some(false),
@@ -907,7 +940,7 @@ mod tests {
         send_application_frame(&sink, &state, &feedback, &first_request, vec![1, 2, 3])
             .await
             .unwrap();
-        let stalled = wait_for_first_response_stall(&state, &first_request);
+        let stalled = wait_for_first_response_stall(&state, &first_request, None);
         tokio::pin!(stalled);
 
         let gap = FIRST_RESPONSE_TIMEOUT - Duration::from_secs(1);
@@ -922,6 +955,52 @@ mod tests {
         let last_delivery = tokio::time::Instant::now();
         stalled.await;
         assert_eq!(last_delivery.elapsed(), FIRST_RESPONSE_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_ws_frames_extend_response_deadline_until_message_arrives() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+        use tungstenite::protocol::Role;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let mut ws = WebSocketStream::from_raw_socket(
+            MaybeTlsStream::Plain(crate::ws_client::WsTcpStream::new(tcp)),
+            Role::Client,
+            None,
+        )
+        .await;
+        let progress = crate::ws_client::WsTcpStream::track_read_progress(&mut ws);
+        let now = tokio::time::Instant::now();
+        let state = tokio::sync::Mutex::new(MtprotoResponseState::Awaiting {
+            started: now,
+            last_delivery: now,
+        });
+        let first_request = tokio::sync::Notify::new();
+        let gap = FIRST_RESPONSE_TIMEOUT - Duration::from_secs(1);
+        let send = async move {
+            // Frame start, then the second payload byte from a partial TCP read,
+            // then the final continuation frame.
+            peer.write_all(&[0x02, 2, 0x11]).await.unwrap();
+            tokio::time::sleep(gap).await;
+            peer.write_all(&[0x22]).await.unwrap();
+            tokio::time::sleep(gap).await;
+            peer.write_all(&[0x80, 1, 0x33]).await.unwrap();
+        };
+        let receive = async {
+            use futures_util::StreamExt;
+            tokio::select! {
+                message = ws.next() => assert_eq!(message.unwrap().unwrap(), Message::Binary(vec![0x11, 0x22, 0x33])),
+                _ = wait_for_first_response_stall(&state, &first_request, Some(&progress)) => panic!("partial frame timed out"),
+            }
+        };
+        tokio::join!(send, receive);
+        assert!(now.elapsed() > FIRST_RESPONSE_TIMEOUT);
     }
 
     #[tokio::test]

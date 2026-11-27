@@ -78,15 +78,14 @@ pub async fn fetch_config(runtime: &Runtime) -> Result<DcSnapshot, String> {
         };
         for domain in worker_domains_for_discovery(runtime)
             .iter()
+            .filter(|domain| !crate::routing::worker_domain_cooling(domain))
             .take(MAX_DISCOVERY_WORKER_ATTEMPTS)
         {
             match fetch_from_worker(runtime, domain, address, dc).await {
                 Ok(snapshot) => {
-                    runtime.stats().record_worker_success(domain);
                     return Ok(snapshot);
                 }
                 Err(error) => {
-                    runtime.stats().record_worker_failure(domain, &error);
                     failures.push(format!("DC{dc} через Worker {domain}: {error}"));
                 }
             }

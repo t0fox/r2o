@@ -77,7 +77,7 @@ pub struct HandshakeInfo {
 
 /// Префиксы, которые Telegram/HTTP/TLS уже заняли: такой поток не может быть
 /// obfuscated2. C `reserved_handshake_prefix`.
-fn reserved_handshake_prefix(packet: &[u8; HANDSHAKE_LEN]) -> bool {
+pub(crate) fn reserved_handshake_prefix(packet: &[u8; HANDSHAKE_LEN]) -> bool {
     if packet[0] == 0xef || packet[4..8] == [0, 0, 0, 0] {
         return true;
     }

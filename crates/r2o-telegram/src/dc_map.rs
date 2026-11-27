@@ -309,7 +309,7 @@ impl DcMapStore {
         media_hint: bool,
         dc_hint: Option<u32>,
     ) -> Result<(DcEndpoint, RouteMapSource), RouteLookupError> {
-        self.resolve_with_source_policy(address, original_port, media_hint, dc_hint, false)
+        self.resolve_with_source_policy(address, original_port, Some(media_hint), dc_hint, false)
     }
 
     /// Разрешает официальный CDN endpoint только для прозрачного TCP-маршрута.
@@ -321,14 +321,30 @@ impl DcMapStore {
         media_hint: bool,
         dc_hint: Option<u32>,
     ) -> Result<(DcEndpoint, RouteMapSource), RouteLookupError> {
-        self.resolve_with_source_policy(address, original_port, media_hint, dc_hint, true)
+        self.resolve_with_source_policy(address, original_port, Some(media_hint), dc_hint, true)
+    }
+
+    pub(crate) fn resolve_transparent_client(
+        &self,
+        address: IpAddr,
+        original_port: u16,
+        init: &crate::transparent::ClientInit,
+    ) -> Result<(DcEndpoint, RouteMapSource), RouteLookupError> {
+        let media_hint = init.used_official_secret.then_some(init.is_media);
+        self.resolve_with_source_policy(
+            address.to_canonical(),
+            original_port,
+            media_hint,
+            init.dc,
+            true,
+        )
     }
 
     fn resolve_with_source_policy(
         &self,
         address: IpAddr,
         original_port: u16,
-        media_hint: bool,
+        media_hint: Option<bool>,
         dc_hint: Option<u32>,
         allow_cdn: bool,
     ) -> Result<(DcEndpoint, RouteMapSource), RouteLookupError> {
@@ -351,7 +367,7 @@ impl DcMapStore {
 
         let (id, media_only) = crate::config::default_dc_route_for_ip(address)
             .ok_or(RouteLookupError::AddressNotListed)?;
-        if media_only && !media_hint {
+        if media_only && media_hint == Some(false) {
             return Err(RouteLookupError::MediaFlagMismatch);
         }
         if dc_hint.is_some_and(|hint| hint != id) {
@@ -398,70 +414,71 @@ pub fn lookup_endpoint(
     media_hint: bool,
     dc_hint: Option<u32>,
 ) -> Result<DcEndpoint, RouteLookupError> {
-    lookup_endpoint_with_policy(snapshot, address, original_port, media_hint, dc_hint, false)
+    lookup_endpoint_with_policy(
+        snapshot,
+        address,
+        original_port,
+        Some(media_hint),
+        dc_hint,
+        false,
+    )
 }
 
 fn lookup_endpoint_with_policy(
     snapshot: &DcSnapshot,
     address: IpAddr,
     original_port: u16,
-    media_hint: bool,
+    media_hint: Option<bool>,
     dc_hint: Option<u32>,
     allow_cdn: bool,
 ) -> Result<DcEndpoint, RouteLookupError> {
-    let for_address: Vec<&DcEndpoint> = snapshot
+    let for_address = snapshot
         .endpoints
         .iter()
-        .filter(|endpoint| endpoint.address == address)
-        .collect();
-    if for_address.is_empty() {
+        .filter(|endpoint| endpoint.address == address);
+    if for_address.clone().next().is_none() {
         return Err(RouteLookupError::AddressNotListed);
     }
 
-    let for_port: Vec<&DcEndpoint> = for_address
-        .iter()
-        .copied()
-        .filter(|endpoint| !endpoint.this_port_only || endpoint.port == original_port)
-        .collect();
-    if for_port.is_empty() {
+    let for_port =
+        for_address.filter(|endpoint| !endpoint.this_port_only || endpoint.port == original_port);
+    if for_port.clone().next().is_none() {
         return Err(RouteLookupError::PortNotAllowed);
     }
 
-    let for_media: Vec<&DcEndpoint> = for_port
-        .iter()
-        .copied()
-        .filter(|endpoint| !endpoint.media_only || media_hint)
-        .collect();
-    if for_media.is_empty() {
+    let use_exact_port = media_hint.is_none()
+        && for_port
+            .clone()
+            .any(|endpoint| endpoint.port == original_port);
+    let for_media = for_port.filter(|endpoint| {
+        (!use_exact_port || endpoint.port == original_port)
+            && (!endpoint.media_only || media_hint != Some(false))
+    });
+    if for_media.clone().next().is_none() {
         return Err(RouteLookupError::MediaFlagMismatch);
     }
 
-    let for_dc: Vec<&DcEndpoint> = for_media
-        .iter()
-        .copied()
-        .filter(|endpoint| dc_hint.is_none_or(|hint| endpoint.id == hint))
-        .collect();
-    if for_dc.is_empty() {
-        return Err(RouteLookupError::DcMismatch);
-    }
-
-    let first = for_dc[0];
-    if !allow_cdn && for_dc.iter().all(|endpoint| endpoint.cdn) {
+    let mut for_dc = for_media.filter(|endpoint| dc_hint.is_none_or(|hint| endpoint.id == hint));
+    let first = for_dc.next().ok_or(RouteLookupError::DcMismatch)?;
+    if !allow_cdn && first.cdn && for_dc.clone().all(|endpoint| endpoint.cdn) {
         return Err(RouteLookupError::CdnEndpoint);
     }
-    if for_dc.iter().any(|endpoint| {
+    if for_dc.clone().any(|endpoint| {
         endpoint.id != first.id
             || endpoint.media_only != first.media_only
             || endpoint.cdn != first.cdn
+            || (media_hint.is_none() && endpoint.tcpo_only != first.tcpo_only)
     }) {
         return Err(RouteLookupError::Ambiguous);
     }
 
-    let selected = for_dc
-        .iter()
-        .copied()
-        .find(|endpoint| endpoint.this_port_only && endpoint.port == original_port)
-        .unwrap_or(first);
+    let selected = if first.this_port_only && first.port == original_port {
+        first
+    } else {
+        for_dc
+            .find(|endpoint| endpoint.this_port_only && endpoint.port == original_port)
+            .unwrap_or(first)
+    };
     Ok(selected.clone())
 }
 
@@ -1326,6 +1343,76 @@ mod tests {
             result.is_err(),
             "CDN-only dcOption нельзя направлять в обычный MTProto DC"
         );
+    }
+
+    #[test]
+    fn direct_obfuscated2_uses_exact_port_and_preserves_ambiguous_and_cdn_routes() {
+        use crate::crypto::{ProtoTag, generate_relay_init};
+        use crate::transparent::{
+            TransparentSelection, parse_client_init, select_transparent_route,
+        };
+
+        let directory = test_directory("obfuscated2-routing");
+        let now = unix_time();
+        let media_address = "149.154.167.151";
+        let cdn_address = "91.105.192.203";
+        let mut endpoints = primary_endpoints_at(now);
+        let mut media = endpoint_at(2, media_address, true, false, false, now);
+        media.tcpo_only = false;
+        media.secret = None;
+        endpoints.push(media);
+        let mut port_specific = endpoint_at(2, media_address, false, false, true, now);
+        port_specific.port = 5222;
+        port_specific.tcpo_only = false;
+        port_specific.secret = None;
+        endpoints.push(port_specific);
+        let mut cdn = endpoint_at(203, cdn_address, true, true, true, now);
+        cdn.port = 443;
+        endpoints.push(cdn);
+        let store = DcMapStore::without_cache(directory.join("map.json"));
+        store
+            .install(current_complete(endpoints.clone()), now)
+            .unwrap();
+        let packet = generate_relay_init(ProtoTag::Intermediate, -572);
+        let init = parse_client_init(&packet).unwrap();
+        let media_address = media_address.parse().unwrap();
+        for (port, is_media) in [(443, true), (5222, false)] {
+            let (route, _) = store
+                .resolve_transparent_client(media_address, port, &init)
+                .unwrap();
+            assert_eq!(
+                select_transparent_route(&init, Some(&route)),
+                TransparentSelection::Wss { dc: 2, is_media }
+            );
+        }
+        let cdn_address = cdn_address.parse().unwrap();
+        let (cdn, _) = store
+            .resolve_transparent_client(cdn_address, 443, &init)
+            .unwrap();
+        assert_eq!(
+            select_transparent_route(&init, Some(&cdn)),
+            TransparentSelection::DirectTcp {
+                dc: 203,
+                is_media: true
+            }
+        );
+        assert_eq!(
+            store.resolve_transparent_client(cdn_address, 5222, &init),
+            Err(RouteLookupError::PortNotAllowed)
+        );
+        assert_eq!(
+            store.resolve_transparent_client("149.154.167.199".parse().unwrap(), 443, &init),
+            Err(RouteLookupError::AddressNotListed)
+        );
+        let mut same_port = endpoint_at(4, "149.154.167.151", false, false, false, now);
+        same_port.port = 443;
+        endpoints.push(same_port);
+        store.install(current_complete(endpoints), now).unwrap();
+        assert_eq!(
+            store.resolve_transparent_client(media_address, 443, &init),
+            Err(RouteLookupError::Ambiguous)
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

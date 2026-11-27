@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tokio::time::{Instant, timeout_at};
 use tracing::{debug, info, warn};
 
 use crate::cf_domain_pool::CfDomainPool;
@@ -417,6 +418,7 @@ static WS_PROBE_WAIT: CooldownMap<DirectRouteKey> = CooldownMap::new();
 static ACTIVE_DIRECT_PROBES: ProbeSet<DirectRouteKey> = ProbeSet::new();
 /// Ошибка Worker относится к конкретному DC, media hint, IP и домену Worker.
 static CF_WORKER_FAIL: CooldownMap<WorkerRouteKey> = CooldownMap::new();
+static CF_WORKER_DOMAIN_FAIL: CooldownMap<String> = CooldownMap::new();
 static ACTIVE_CF_WORKER_PROBES: ProbeSet<WorkerRouteKey> = ProbeSet::new();
 /// Ошибка CF proxy относится к конкретному DC, media hint, IP и домену.
 static CF_PROXY_FAIL: CooldownMap<CfProxyRouteKey> = CooldownMap::new();
@@ -425,6 +427,7 @@ static ACTIVE_CF_PROXY_PROBES: ProbeSet<CfProxyRouteKey> = ProbeSet::new();
 static CF_PROXY_ROUTE_FAIL: CooldownMap<DirectRouteKey> = CooldownMap::new();
 static ACTIVE_CF_PROXY_ROUTE_PROBES: ProbeSet<DirectRouteKey> = ProbeSet::new();
 const CF_PROXY_503_COOLDOWN: Duration = Duration::from_secs(15);
+const CF_ROUTE_NOT_FOUND_COOLDOWN: Duration = Duration::from_secs(15);
 /// Недавно победивший в hedge CF маршрут временно выбирается первым.
 static PREFERRED_CF: CooldownMap<DirectRouteKey> = CooldownMap::new();
 static ACTIVE_HEDGES: AtomicUsize = AtomicUsize::new(0);
@@ -497,6 +500,7 @@ const CF_PROXY_HEDGE_DELAY: Duration = Duration::from_millis(125);
 enum CfFailureAction {
     RateLimited,
     ServiceUnavailable,
+    RouteNotFound,
     RouteCooldown,
     Rotate,
 }
@@ -511,13 +515,35 @@ fn cf_failure_action(result: &WsConnectResult) -> CfFailureAction {
     match result {
         WsConnectResult::HttpStatus(429) => CfFailureAction::RateLimited,
         WsConnectResult::HttpStatus(503) => CfFailureAction::ServiceUnavailable,
+        WsConnectResult::HttpStatus(404) => CfFailureAction::RouteNotFound,
         WsConnectResult::HttpStatus(_) | WsConnectResult::Redirect(_) => CfFailureAction::Rotate,
-        WsConnectResult::Connected(_) => CfFailureAction::Rotate,
+        WsConnectResult::Connected(_) | WsConnectResult::Cooling => CfFailureAction::Rotate,
         WsConnectResult::Failed(_)
         | WsConnectResult::DnsFailed(_)
         | WsConnectResult::ConnectTimedOut(_)
         | WsConnectResult::TimedOut => CfFailureAction::RouteCooldown,
     }
+}
+
+fn worker_domain_cooldown(result: &WsConnectResult, since_epoch: Duration) -> Option<Duration> {
+    match result {
+        WsConnectResult::HttpStatus(429) => {
+            const DAY_SECONDS: u64 = 24 * 60 * 60;
+            Some(Duration::from_secs(
+                DAY_SECONDS - since_epoch.as_secs() % DAY_SECONDS,
+            ))
+        }
+        WsConnectResult::HttpStatus(500..=599)
+        | WsConnectResult::DnsFailed(_)
+        | WsConnectResult::Failed(_)
+        | WsConnectResult::ConnectTimedOut(_)
+        | WsConnectResult::TimedOut => Some(Duration::from_secs(60)),
+        _ => None,
+    }
+}
+
+pub(crate) fn worker_domain_cooling(domain: &str) -> bool {
+    CF_WORKER_DOMAIN_FAIL.active(domain)
 }
 
 fn should_stop_cf_proxy_race(failures: &[(String, CfCandidateFailure)]) -> bool {
@@ -539,11 +565,7 @@ fn cf_proxy_domain_order(domains: &[String], route: (u32, bool), balance: bool) 
     if domains.is_empty() {
         return Vec::new();
     }
-    let sticky = CF_PROXY_STICKY
-        .lock()
-        .expect("повреждена блокировка закреплённых доменов Cloudflare")
-        .get(&route)
-        .cloned();
+    let sticky = confirmed_cf_proxy_domain(route);
     let first = if let Some(sticky) = sticky.as_ref()
         && let Some(index) = domains.iter().position(|domain| domain == sticky)
     {
@@ -559,6 +581,14 @@ fn cf_proxy_domain_order(domains: &[String], route: (u32, bool), balance: bool) 
             % domains.len()
     };
     domain_order(domains, first).map(str::to_owned).collect()
+}
+
+fn confirmed_cf_proxy_domain(route: (u32, bool)) -> Option<String> {
+    CF_PROXY_STICKY
+        .lock()
+        .expect("повреждена блокировка закреплённых доменов Cloudflare")
+        .get(&route)
+        .cloned()
 }
 
 fn remember_cf_proxy_success(route: (u32, bool), domains: &[String], domain: &str) {
@@ -983,7 +1013,20 @@ impl Route<'_> {
     /// `--cf-priority` и на каждом соединении ждала полный тайм-аут прямого WS,
     /// прежде чем перейти к единственному рабочему маршруту.
     pub(crate) async fn cf_tiers(&self, dst: &str, reason: &str) -> Option<Upstream> {
-        if let Some((ws, feedback)) = self.cf_worker(dst, reason).await {
+        let started = Instant::now();
+        let deadline = started + self.timeouts.cf_connect;
+        let has_proxy = !self.runtime.cf_domains().domains.is_empty();
+        let worker_deadline = if has_proxy {
+            started + self.timeouts.cf_connect / 2
+        } else {
+            deadline
+        };
+        if let Ok(Some((ws, feedback))) = timeout_at(
+            worker_deadline,
+            self.cf_worker(dst, reason, worker_deadline),
+        )
+        .await
+        {
             return Some(Upstream::Ws {
                 ws: Box::new(ws),
                 framing: WsFraming::Tunnel,
@@ -991,12 +1034,17 @@ impl Route<'_> {
                 feedback,
             });
         }
-        if let Some(upstream) = self.cf_media().await {
+        // Оставить время на KWS, если HTTP/2 не подтвердит /api.
+        let now = Instant::now();
+        let media_deadline = now + deadline.saturating_duration_since(now) / 2;
+        if let Ok(Some(upstream)) = timeout_at(media_deadline, self.cf_media()).await {
             return Some(upstream);
         }
 
-        self.cf_proxy(dst, reason)
+        timeout_at(deadline, self.cf_proxy(dst, reason, deadline))
             .await
+            .ok()
+            .flatten()
             .map(|(ws, feedback)| Upstream::Ws {
                 ws: Box::new(ws),
                 framing: WsFraming::Packets,
@@ -1013,10 +1061,15 @@ impl Route<'_> {
             return None;
         }
         let pool = self.runtime.cf_domains();
-        let zone = pool.domains.iter().find(|zone| {
+        let qualifies = |zone: &str| {
             !self.runtime.cf_domain_pool().is_rate_limited(zone)
                 && !crate::cf_h2::cooling(self.dc, zone)
-        })?;
+        };
+        let sticky = confirmed_cf_proxy_domain((self.dc, self.is_media));
+        let zone = sticky
+            .as_ref()
+            .filter(|zone| pool.domains.contains(zone) && qualifies(zone))
+            .or_else(|| pool.domains.iter().find(|zone| qualifies(zone)))?;
         let route = crate::cf_h2::LiveRoute::admit(self.dc)?;
         let attempt = self.attempt("fallback", "cloudflare_h2");
         match crate::cf_h2::connect(self.runtime, self.dc, zone).await {
@@ -1035,7 +1088,12 @@ impl Route<'_> {
                 if let Some(attempt) = attempt {
                     attempt.finish("failed");
                 }
-                route.failed(zone);
+                if error.http_status == Some(429) {
+                    self.runtime.cf_domain_pool().mark_rate_limited(zone);
+                }
+                if error.is_upstream_failure() {
+                    route.failed(zone);
+                }
                 debug!(
                     "[{}] DC{}m: HTTP/2 /api через {}: {}: {}; пробую WebSocket",
                     self.label, self.dc, zone, error.stage, error.reason
@@ -1051,7 +1109,12 @@ impl Route<'_> {
     }
 
     /// Перебрать настроенные Cloudflare Worker по порядку балансировки.
-    async fn cf_worker(&self, dst: &str, reason: &str) -> Option<(TgWsStream, RouteFeedback)> {
+    async fn cf_worker(
+        &self,
+        dst: &str,
+        reason: &str,
+        deadline: Instant,
+    ) -> Option<(TgWsStream, RouteFeedback)> {
         let worker_domains = self.config.cf_worker_domains();
         if worker_domains.is_empty() {
             return None;
@@ -1064,6 +1127,8 @@ impl Route<'_> {
             &CF_WORKER_BALANCE_COUNTER,
         );
 
+        let candidate_budget = deadline.saturating_duration_since(Instant::now())
+            / if worker_domains.len() > 1 { 2 } else { 1 };
         for worker_domain in domain_order(worker_domains, first_worker) {
             let route_key = (
                 self.dc,
@@ -1071,7 +1136,7 @@ impl Route<'_> {
                 dst.to_string(),
                 worker_domain.to_string(),
             );
-            if CF_WORKER_FAIL.active(&route_key) {
+            if worker_domain_cooling(worker_domain) || CF_WORKER_FAIL.active(&route_key) {
                 self.mark_cooldown("fallback", "cloudflare_worker");
                 debug!(
                     "[{}] DC{}{}: Cloudflare Worker {} на паузе, пропуск",
@@ -1096,12 +1161,20 @@ impl Route<'_> {
             let attempt = self.attempt("fallback", "cloudflare_worker");
 
             let _dial = CF_DIALS.acquire().await.expect("semaphore CF");
-            let result = connect_cf_worker_ws_for_dc_with_outbound_opts(
+            if worker_domain_cooling(worker_domain) {
+                continue;
+            }
+            let now = Instant::now();
+            let timeout = candidate_budget.min(deadline.saturating_duration_since(now));
+            if timeout.is_zero() {
+                return None;
+            }
+            let connect = connect_cf_worker_ws_for_dc_with_outbound_opts(
                 worker_domain,
                 dst,
                 self.dc,
                 self.is_media,
-                self.timeouts.cf_connect,
+                timeout,
                 self.runtime.outbound(),
                 CfDialOpts {
                     cf_ips: self.runtime.cf_ips(),
@@ -1109,8 +1182,12 @@ impl Route<'_> {
                     transport: self.runtime.cf_transport(),
                     ca_bundle: self.runtime.ca_bundle(),
                 },
-            )
-            .await;
+            );
+            let result = match timeout_at(now + timeout, connect).await {
+                Ok(result) => result,
+                Err(_) if now + timeout < deadline => WsConnectResult::TimedOut,
+                Err(_) => return None,
+            };
 
             match result {
                 WsConnectResult::Connected(ws) => {
@@ -1132,30 +1209,31 @@ impl Route<'_> {
                     .with_probe(_probe.map(|_permit| RecoveryProbe::Worker { _permit }));
                     return Some((ws, feedback));
                 }
+                WsConnectResult::Cooling => {
+                    if let Some(attempt) = attempt {
+                        attempt.finish("cooldown");
+                    }
+                }
                 result => {
                     if let Some(attempt) = attempt {
                         attempt.finish("failed");
                     }
-                    let cooldown = match cf_failure_action(&result) {
-                        CfFailureAction::ServiceUnavailable => CF_PROXY_503_COOLDOWN,
-                        CfFailureAction::RateLimited => {
-                            Duration::from_secs(60).max(self.timeouts.cf_fail_cooldown)
-                        }
-                        _ => self.timeouts.cf_fail_cooldown,
-                    };
-                    CF_WORKER_FAIL.fail(route_key, cooldown);
-                    self.mark_cooldown("fallback", "cloudflare_worker");
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default();
+                    if let Some(cooldown) = worker_domain_cooldown(&result, now) {
+                        CF_WORKER_DOMAIN_FAIL.extend(worker_domain.to_string(), cooldown);
+                    } else if matches!(result, WsConnectResult::HttpStatus(404)) {
+                        // HTTP 404 зависит от маршрута/пути, а не от лимита Worker.
+                        CF_WORKER_FAIL.extend(route_key, CF_ROUTE_NOT_FOUND_COOLDOWN);
+                    }
                     self.runtime.stats().record_worker_failure(
                         worker_domain,
                         &format!("не установлено WSS-соединение до DC: {result:?}"),
                     );
-                    warn!(
-                        "[{}] DC{}{}: Cloudflare Worker {} недоступен, пауза {} с",
-                        self.label,
-                        self.dc,
-                        self.media,
-                        worker_domain,
-                        cooldown.as_secs()
+                    debug!(
+                        "[{}] DC{}{}: отказ Cloudflare Worker {}: {:?}",
+                        self.label, self.dc, self.media, worker_domain, result
                     );
                 }
             }
@@ -1166,7 +1244,12 @@ impl Route<'_> {
 
     /// Перебрать CF proxy-домены в порядке `--cf-balance`, помня сбой отдельно
     /// для DC, media hint, проверенного адреса и домена.
-    async fn cf_proxy(&self, dst: &str, reason: &str) -> Option<(TgWsStream, RouteFeedback)> {
+    async fn cf_proxy(
+        &self,
+        dst: &str,
+        reason: &str,
+        deadline: Instant,
+    ) -> Option<(TgWsStream, RouteFeedback)> {
         let route_key = direct_route_key(self.dc, self.is_media, dst);
         if CF_PROXY_ROUTE_FAIL.active(&route_key) {
             self.mark_cooldown("fallback", "cloudflare_proxy");
@@ -1229,13 +1312,20 @@ impl Route<'_> {
             return None;
         }
 
-        let domains = candidates.clone();
+        let candidate_count = candidates.len();
         let dc = self.dc;
         let is_media = self.is_media;
         let destination = dst.to_string();
-        let timeout = self.timeouts.cf_connect;
+        let candidate_budget = deadline.saturating_duration_since(Instant::now())
+            / if candidates.len() > 1 { 2 } else { 1 };
+        let sticky_media =
+            is_media && confirmed_cf_proxy_domain((dc, is_media)).as_ref() == candidates.first();
         let attempt = self.attempt("fallback", "cloudflare_proxy");
-        let hedge_limit = self.hedging_budget();
+        let hedge_limit = if sticky_media {
+            0
+        } else {
+            self.hedging_budget()
+        };
         let hedge = HedgePermit::try_acquire(hedge_limit);
         let delay = hedge
             .as_ref()
@@ -1264,7 +1354,9 @@ impl Route<'_> {
                         .acquire()
                         .await
                         .expect("семафор подключений CF-прокси неожиданно закрыт");
-                    match connect_cf_domain_with_outbound_opts(
+                    let timeout =
+                        candidate_budget.min(deadline.saturating_duration_since(Instant::now()));
+                    let connect = connect_cf_domain_with_outbound_opts(
                         dc,
                         &domain,
                         is_media,
@@ -1276,11 +1368,13 @@ impl Route<'_> {
                             transport: route.config.cf_transport,
                             ca_bundle: route.runtime.ca_bundle(),
                         },
-                    )
-                    .await
-                    {
-                        (WsConnectResult::Connected(ws), host) => Ok((ws, host, _probe)),
-                        (result, _) => Err(CfCandidateFailure::Connect(Box::new(result))),
+                    );
+                    match tokio::time::timeout(timeout, connect).await {
+                        Ok((WsConnectResult::Connected(ws), host)) => Ok((ws, host, _probe)),
+                        Ok((result, _)) => Err(CfCandidateFailure::Connect(Box::new(result))),
+                        Err(_) => Err(CfCandidateFailure::Connect(Box::new(
+                            WsConnectResult::TimedOut,
+                        ))),
                     }
                 }
             },
@@ -1289,12 +1383,17 @@ impl Route<'_> {
         .await;
 
         let route_unavailable = should_stop_cf_proxy_race(&failures);
+        let has_failure = failures.iter().any(|(_, failure)| {
+            matches!(failure, CfCandidateFailure::Connect(result) if !matches!(**result, WsConnectResult::Cooling))
+        });
         for (domain, failure) in failures {
             match failure {
                 CfCandidateFailure::ProbeBusy => debug!(
                     "[{}] DC{}{}: параллельная проверка CF-домена {} уже выполняется",
                     self.label, self.dc, self.media, domain
                 ),
+                CfCandidateFailure::Connect(result)
+                    if matches!(*result, WsConnectResult::Cooling) => {}
                 CfCandidateFailure::Connect(result) => match cf_failure_action(&result) {
                     CfFailureAction::RateLimited => {
                         self.runtime.cf_domain_pool().mark_rate_limited(&domain);
@@ -1314,6 +1413,10 @@ impl Route<'_> {
                             domain,
                             CF_PROXY_503_COOLDOWN.as_secs()
                         );
+                    }
+                    CfFailureAction::RouteNotFound => {
+                        let route_key = (self.dc, self.is_media, dst.to_string(), domain);
+                        CF_PROXY_FAIL.extend(route_key, CF_ROUTE_NOT_FOUND_COOLDOWN);
                     }
                     CfFailureAction::RouteCooldown => {
                         let route_key = (self.dc, self.is_media, dst.to_string(), domain.clone());
@@ -1376,10 +1479,12 @@ impl Route<'_> {
         }
 
         if let Some(attempt) = attempt {
-            attempt.finish("failed");
+            attempt.finish(if has_failure { "failed" } else { "cooldown" });
         }
 
-        advance_cf_proxy_domain((self.dc, self.is_media), &pool.domains, domains.len());
+        if has_failure {
+            advance_cf_proxy_domain((self.dc, self.is_media), &pool.domains, candidate_count);
+        }
         None
     }
 
@@ -1594,6 +1699,35 @@ mod tests {
     }
 
     #[test]
+    fn worker_cooldown_is_domain_wide_and_a_transport_error_cannot_shorten_429() {
+        use super::{
+            CF_WORKER_DOMAIN_FAIL, CF_WORKER_FAIL, worker_domain_cooldown, worker_domain_cooling,
+        };
+        let domain = "worker-cooldown.example";
+        let before_midnight = Duration::from_secs(2 * 86_400 - 3_600);
+        let quota =
+            worker_domain_cooldown(&WsConnectResult::HttpStatus(429), before_midnight).unwrap();
+        let network = worker_domain_cooldown(&WsConnectResult::TimedOut, before_midnight).unwrap();
+        assert_eq!(quota, Duration::from_secs(3_600));
+        assert_eq!(network, Duration::from_secs(60));
+        assert_eq!(
+            worker_domain_cooldown(&WsConnectResult::HttpStatus(404), before_midnight),
+            None
+        );
+        CF_WORKER_DOMAIN_FAIL.extend(domain.to_owned(), quota);
+        CF_WORKER_DOMAIN_FAIL.extend(domain.to_owned(), network);
+        assert!(worker_domain_cooling(domain));
+        assert!(!worker_domain_cooling("other.example"));
+        assert!(!CF_WORKER_FAIL.active(&(
+            2,
+            true,
+            "149.154.167.151".to_owned(),
+            domain.to_owned()
+        )));
+        CF_WORKER_DOMAIN_FAIL.clear(domain);
+    }
+
+    #[test]
     fn cf_proxy_dial_budget_allows_eight_parallel_connections() {
         let permits = CF_DIALS
             .try_acquire_many(8)
@@ -1619,13 +1753,23 @@ mod tests {
         );
 
         CF_PROXY_ROUTE_FAIL.fail(key.clone(), Duration::from_secs(30));
-        assert!(route.cf_proxy(ip, "test").await.is_none());
+        assert!(
+            route
+                .cf_proxy(ip, "test", super::Instant::now() + Duration::from_secs(1))
+                .await
+                .is_none()
+        );
         assert!(CF_PROXY_ROUTE_FAIL.active(&key));
 
         CF_PROXY_ROUTE_FAIL.fail(key.clone(), Duration::ZERO);
         assert!(!CF_PROXY_ROUTE_FAIL.active(&key));
         assert!(CF_PROXY_ROUTE_FAIL.contains(&key));
-        assert!(route.cf_proxy(ip, "test").await.is_none());
+        assert!(
+            route
+                .cf_proxy(ip, "test", super::Instant::now() + Duration::from_secs(1))
+                .await
+                .is_none()
+        );
         assert!(CF_PROXY_ROUTE_FAIL.active(&key));
         let probe = ACTIVE_CF_PROXY_ROUTE_PROBES
             .try_acquire(key.clone())
@@ -2192,7 +2336,11 @@ mod tests {
         );
 
         let _ = route
-            .cf_worker("149.154.167.151", "тест динамического media DC")
+            .cf_worker(
+                "149.154.167.151",
+                "тест динамического media DC",
+                super::Instant::now() + Duration::from_secs(10),
+            )
             .await;
 
         let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();

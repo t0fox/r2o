@@ -19,12 +19,14 @@ fn transparent_mode_is_implicit_and_legacy_switch_is_rejected() {
 }
 
 #[test]
-fn transparent_init_accepts_dc_and_media_marker_without_a_proxy_secret() {
-    let init = generate_relay_init(ProtoTag::Intermediate, -4);
-    let parsed = parse_client_init(&init).expect("корректный obfuscated2-пакет без секрета");
-    assert_eq!(parsed.dc, Some(4));
-    assert!(parsed.is_media);
-    assert_eq!(parsed.proto, ProtoTag::Intermediate);
+fn transparent_init_ignores_ordinary_obfuscated2_padding() {
+    for padding in [4, -4, 222, -222, 572, -572, 203, -301, i16::MIN] {
+        let init = generate_relay_init(ProtoTag::Intermediate, padding);
+        let parsed = parse_client_init(&init).expect("корректный obfuscated2-пакет без секрета");
+        assert_eq!(parsed.dc, None, "padding {padding}");
+        assert!(!parsed.is_media, "padding {padding}");
+        assert_eq!(parsed.proto, ProtoTag::Intermediate);
+    }
 }
 
 #[test]
@@ -200,21 +202,13 @@ fn transparent_packet_framing_survives_partial_tcp_reads_without_changing_cipher
 }
 
 #[test]
-fn transparent_init_accepts_cdn_dc_203() {
-    let init = generate_relay_init(ProtoTag::PaddedIntermediate, 203);
-    let parsed = parse_client_init(&init).expect("начальный пакет DC203");
-    assert_eq!(parsed.dc, Some(203));
-    assert!(!parsed.is_media);
-}
-
-#[test]
-fn transparent_init_preserves_dynamic_dc_and_rejects_random_data() {
-    let parsed = parse_client_init(&generate_relay_init(ProtoTag::Intermediate, 6)).unwrap();
-    assert_eq!(parsed.dc, Some(6));
-    let parsed = parse_client_init(&generate_relay_init(ProtoTag::Intermediate, -301)).unwrap();
-    assert_eq!(parsed.dc, Some(301));
-    assert!(parsed.is_media);
+fn transparent_init_rejects_random_data_and_invalid_secret_dc() {
     assert!(parse_client_init(&[0; 64]).is_none());
+    let secret = [0x12, 0x34, 0x56, 0x78];
+    for dc in [0, 1000, -1000] {
+        let (init, _, _) = generate_client_handshake(&secret, dc, ProtoTag::Intermediate);
+        assert!(parse_client_init_with_secrets(&init, &[secret.to_vec()]).is_none());
+    }
 }
 
 #[test]

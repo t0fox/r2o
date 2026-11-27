@@ -146,30 +146,22 @@ async fn read_initial_prefix(
     Ok(prefix)
 }
 
-fn effective_media_route(client_is_media: bool, endpoint_media_only: bool) -> bool {
-    client_is_media || endpoint_media_only
-}
-
-fn should_forward_unmapped_direct(error: &RouteLookupError) -> bool {
-    *error == RouteLookupError::AddressNotListed
-}
-
-fn dc_candidate_for_unmapped(
-    destination: SocketAddr,
+fn should_forward_unmapped_direct(
+    error: &RouteLookupError,
     init: &transparent::ClientInit,
-) -> Option<u32> {
-    if destination.port() != 443
-        || init.used_official_secret
-        || !transparent::is_official_telegram_destination(destination.ip())
-    {
-        return None;
-    }
+) -> bool {
+    !init.used_official_secret
+        && matches!(
+            error,
+            RouteLookupError::AddressNotListed | RouteLookupError::Ambiguous
+        )
+}
+
+fn dc_candidate_for_unmapped(destination: SocketAddr) -> Option<u32> {
     // Точный адрес подтвердил DC5 в аутентифицированном help.getConfig.
-    if destination.ip().to_canonical() == Ipv4Addr::new(91, 108, 56, 137) {
-        return init.dc.is_none_or(|hint| hint == 5).then_some(5);
-    }
-    // Подсказка клиента выбирает кандидата, но не дополняет официальную DC-карту.
-    init.dc.filter(|dc| (1..=5).contains(dc))
+    (destination.port() == 443
+        && destination.ip().to_canonical() == Ipv4Addr::new(91, 108, 56, 137))
+    .then_some(5)
 }
 
 async fn wait_for_client_reset(client: &TcpStream) {
@@ -326,7 +318,8 @@ async fn bridge_direct_payload(
 }
 
 /// Путь для прозрачного перехвата правилами REDIRECT на роутере. Начальный
-/// пакет obfuscated2 содержит DC и признак media, а SO_ORIGINAL_DST — точный IP DC.
+/// пакет обычного obfuscated2 определяет только формат MTProto.
+/// DC и media определяются по SO_ORIGINAL_DST и карте dcOption.
 /// Начальный пакет и все последующие байты передаются выбранному узлу без изменений.
 pub async fn handle_transparent_client_with_runtime(
     mut stream: TcpStream,
@@ -436,15 +429,14 @@ pub async fn handle_transparent_client_with_runtime(
             runtime.outbound().network().generation(),
         )
     };
-    let route = runtime.dc_map().resolve_for_transparent_with_source(
+    let route = runtime.dc_map().resolve_transparent_client(
         destination.ip(),
         destination.port(),
-        init_info.is_media,
-        init_info.dc,
+        &init_info,
     );
     let (dc, is_media, unlisted_cf_route) = match route {
         Ok((endpoint, map_source)) => {
-            let is_media = effective_media_route(init_info.is_media, endpoint.media_only);
+            let is_media = init_info.is_media || endpoint.media_only;
             telemetry.set_dc(endpoint.id, is_media);
             telemetry.set_stage("routing");
             info!(
@@ -499,10 +491,12 @@ pub async fn handle_transparent_client_with_runtime(
                 transparent::TransparentSelection::Wss { dc, is_media } => (dc, is_media, false),
             }
         }
-        Err(error) if should_forward_unmapped_direct(&error) => {
+        Err(error) if should_forward_unmapped_direct(&error, &init_info) => {
             runtime.dc_map().request_refresh();
-            let cf_dc = dc_candidate_for_unmapped(destination, &init_info)
-                .filter(|_| routing::has_cf_fallback(&config, &runtime));
+            let cf_dc = dc_candidate_for_unmapped(destination).filter(|_| {
+                error == RouteLookupError::AddressNotListed
+                    && routing::has_cf_fallback(&config, &runtime)
+            });
             let Some(dc) = cf_dc else {
                 bridge_direct_payload(
                     stream,
@@ -644,11 +638,13 @@ pub async fn handle_transparent_client_with_runtime(
                 .relay(stream, init, init_info.proto, &mut route, &telemetry)
                 .await
             {
-                if error.stage != "client" {
+                if error.is_upstream_failure() {
                     route.failed(&zone);
-                    if error.stage != "memory" {
-                        runtime.stats().record_mtproto_failure(error.stage);
+                    runtime.stats().record_mtproto_failure(error.stage);
+                    if error.http_status == Some(429) {
+                        runtime.cf_domain_pool().mark_rate_limited(&zone);
                     }
+                    telemetry.set_stage("mtproto_upstream_error");
                 }
                 warn!(
                     "[{}] DC{}m: HTTP/2 /api через {} закрыт: {}: {}",
@@ -747,7 +743,7 @@ mod tests {
     use super::{
         DIRECT_RECOVERY_WAIT, DirectPayload, TelemetryStream, TrafficDirection,
         bridge_direct_payload, complete_unless_client_resets, copy_bidirectional_with_telemetry,
-        dc_candidate_for_unmapped, effective_media_route, should_forward_unmapped_direct,
+        dc_candidate_for_unmapped, should_forward_unmapped_direct,
     };
     use crate::dc_map::{DcEndpoint, DcMapStore, DcSnapshot, RouteLookupError, lookup_endpoint};
     use crate::outbound::OutboundConnector;
@@ -827,22 +823,30 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_dc_option_preserves_the_clients_media_session_hint() {
-        assert!(effective_media_route(true, false));
-        assert!(effective_media_route(true, true));
-        assert!(!effective_media_route(false, false));
-    }
-
-    #[test]
-    fn unmapped_tcp_passthrough_does_not_guess_a_dc_or_bypass_other_validation_errors() {
-        assert!(should_forward_unmapped_direct(
-            &RouteLookupError::AddressNotListed
-        ));
+    fn unknown_or_ambiguous_destination_is_direct_only_for_unsecret_handshakes() {
+        let mut init = crate::transparent::ClientInit {
+            dc: None,
+            is_media: false,
+            proto: crate::crypto::ProtoTag::Intermediate,
+            used_official_secret: false,
+        };
+        for error in [
+            RouteLookupError::AddressNotListed,
+            RouteLookupError::Ambiguous,
+        ] {
+            assert!(should_forward_unmapped_direct(&error, &init));
+        }
+        for error in [
+            RouteLookupError::MediaFlagMismatch,
+            RouteLookupError::DcMismatch,
+            RouteLookupError::PortNotAllowed,
+        ] {
+            assert!(!should_forward_unmapped_direct(&error, &init));
+        }
+        init.used_official_secret = true;
         assert!(!should_forward_unmapped_direct(
-            &RouteLookupError::MediaFlagMismatch
-        ));
-        assert!(!should_forward_unmapped_direct(
-            &RouteLookupError::DcMismatch
+            &RouteLookupError::AddressNotListed,
+            &init
         ));
     }
 
@@ -855,7 +859,42 @@ mod tests {
                     .resolve_for_transparent_with_source(address.parse().unwrap(), 443, true, hint)
                     .unwrap_err();
                 assert_eq!(error, RouteLookupError::AddressNotListed, "{address}");
-                assert!(should_forward_unmapped_direct(&error), "{address}");
+            }
+        }
+    }
+
+    #[test]
+    fn dc2_media_443_and_5222_ignore_unsecret_padding_without_weakening_proxy_checks() {
+        use crate::crypto::{ProtoTag, generate_client_handshake, generate_relay_init};
+        use crate::transparent::{parse_client_init, parse_client_init_with_secrets};
+
+        let store = DcMapStore::without_cache("unused");
+        let address = "149.154.167.151".parse().unwrap();
+        for port in [443, 5222] {
+            for padding in [0, 222, 572, -222, -572] {
+                let packet = generate_relay_init(ProtoTag::Intermediate, padding);
+                let init = parse_client_init(&packet).unwrap();
+                let (endpoint, _) = store
+                    .resolve_transparent_client(address, port, &init)
+                    .unwrap();
+                assert_eq!(
+                    (endpoint.id, endpoint.media_only, endpoint.port),
+                    (2, true, port)
+                );
+            }
+            for (dc, expected) in [
+                (222, RouteLookupError::MediaFlagMismatch),
+                (572, RouteLookupError::MediaFlagMismatch),
+                (-222, RouteLookupError::DcMismatch),
+                (-572, RouteLookupError::DcMismatch),
+            ] {
+                let secret = vec![0x12, 0x34, 0x56, 0x78];
+                let (packet, _, _) = generate_client_handshake(&secret, dc, ProtoTag::Intermediate);
+                let init = parse_client_init_with_secrets(&packet, &[secret]).unwrap();
+                assert_eq!(
+                    store.resolve_transparent_client(address, port, &init),
+                    Err(expected)
+                );
             }
         }
     }
@@ -893,7 +932,6 @@ mod tests {
         )
         .unwrap();
         assert!(!route.media_only);
-        assert!(effective_media_route(true, route.media_only));
 
         let mut media_only_snapshot = snapshot;
         media_only_snapshot.endpoints[0].media_only = true;
@@ -1044,53 +1082,17 @@ mod tests {
     }
 
     #[test]
-    fn tcp_timeout_fallback_is_scoped_to_the_verified_dc_endpoint() {
-        use crate::{crypto::ProtoTag, transparent::ClientInit};
-
-        let mut init = ClientInit {
-            dc: Some(5),
-            is_media: true,
-            proto: ProtoTag::Intermediate,
-            used_official_secret: false,
-        };
-        let exact = "91.108.56.137:443".parse().unwrap();
-        assert_eq!(dc_candidate_for_unmapped(exact, &init), Some(5));
-        assert_eq!(
-            dc_candidate_for_unmapped("[::ffff:91.108.56.137]:443".parse().unwrap(), &init),
-            Some(5)
-        );
-        for address in ["91.108.56.137:5222", "8.8.8.8:443"] {
-            assert_eq!(
-                dc_candidate_for_unmapped(address.parse().unwrap(), &init),
-                None
-            );
+    fn unmapped_cloudflare_route_requires_the_exact_verified_endpoint() {
+        for address in ["91.108.56.137:443", "[::ffff:91.108.56.137]:443"] {
+            assert_eq!(dc_candidate_for_unmapped(address.parse().unwrap()), Some(5));
         }
-        init.dc = Some(2);
-        assert_eq!(dc_candidate_for_unmapped(exact, &init), None);
-        init.dc = None;
-        assert_eq!(dc_candidate_for_unmapped(exact, &init), Some(5));
-        init.used_official_secret = true;
-        assert_eq!(dc_candidate_for_unmapped(exact, &init), None);
-    }
-
-    #[test]
-    fn unmapped_telegram_ipv4_and_ipv6_can_try_the_clients_dc() {
-        use crate::{crypto::ProtoTag, transparent::ClientInit};
-
-        let mut init = ClientInit {
-            dc: Some(2),
-            is_media: true,
-            proto: ProtoTag::Intermediate,
-            used_official_secret: false,
-        };
-        for address in ["149.154.167.199:443", "[2001:b28:f23c:f001::be]:443"] {
-            let address = address.parse().unwrap();
-            assert_eq!(dc_candidate_for_unmapped(address, &init), Some(2));
-            init.dc = None;
-            assert_eq!(dc_candidate_for_unmapped(address, &init), None);
-            init.dc = Some(203);
-            assert_eq!(dc_candidate_for_unmapped(address, &init), None);
-            init.dc = Some(2);
+        for address in [
+            "91.108.56.137:5222",
+            "8.8.8.8:443",
+            "149.154.167.199:443",
+            "[2001:b28:f23c:f001::be]:443",
+        ] {
+            assert_eq!(dc_candidate_for_unmapped(address.parse().unwrap()), None);
         }
     }
 

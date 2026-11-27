@@ -403,9 +403,10 @@ async fn фрагментированное_binary_сообщение_возвр
     let request = format!("ws://{address}/apiws")
         .into_client_request()
         .unwrap();
-    let (mut websocket, _) = client_async_tls_with_config(request, stream, Some(ws_config()), None)
-        .await
-        .unwrap();
+    let (mut websocket, _) =
+        client_async_tls_with_config(request, WsTcpStream::new(stream), Some(ws_config()), None)
+            .await
+            .unwrap();
 
     assert_eq!(
         ws_recv(&mut websocket).await.as_deref(),
@@ -765,4 +766,14 @@ fn сбой_mtproto_не_отключает_другой_транспорт_и_�
         preferred_cf_edge(&format!("{host};{chat};tls=0")),
         Some(plain.ip())
     );
+}
+
+#[test]
+fn extending_cooldown_keeps_its_existing_deadline_when_the_new_pause_is_shorter() {
+    let map = CooldownMap::new();
+    map.extend("worker", Duration::from_secs(3_600));
+    let first = map.entries.lock().unwrap().as_ref().unwrap()["worker"].until;
+    map.extend("worker", Duration::from_secs(60));
+    let second = map.entries.lock().unwrap().as_ref().unwrap()["worker"].until;
+    assert_eq!(first, second);
 }

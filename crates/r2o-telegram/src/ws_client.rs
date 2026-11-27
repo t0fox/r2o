@@ -20,10 +20,12 @@ use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::Hash;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use crate::config::{CfTransportMode, websocket_dc};
@@ -31,6 +33,7 @@ use crate::outbound::OutboundConnector;
 
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
 use rustls_pki_types::ServerName;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config,
@@ -42,7 +45,82 @@ use tungstenite::Message;
 use tungstenite::protocol::WebSocketConfig;
 
 /// Открытое WebSocket-соединение с узлом Telegram DC.
-pub type TgWsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub type TgWsStream = WebSocketStream<MaybeTlsStream<WsTcpStream>>;
+
+type ReadProgress = Arc<StdMutex<Option<tokio::time::Instant>>>;
+
+#[derive(Debug)]
+pub struct WsTcpStream {
+    tcp: TcpStream,
+    progress: Option<ReadProgress>,
+}
+
+impl WsTcpStream {
+    pub(crate) fn new(tcp: TcpStream) -> Self {
+        Self {
+            tcp,
+            progress: None,
+        }
+    }
+
+    pub(crate) fn track_read_progress(ws: &mut TgWsStream) -> ReadProgress {
+        let progress = ReadProgress::default();
+        let tcp = match ws.get_mut() {
+            MaybeTlsStream::Plain(tcp) => tcp,
+            MaybeTlsStream::Rustls(tls) => tls.get_mut().0,
+            _ => return progress,
+        };
+        tcp.progress = Some(Arc::clone(&progress));
+        progress
+    }
+}
+
+impl AsyncRead for WsTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.tcp).poll_read(cx, buf);
+        if buf.filled().len() > before
+            && let Some(progress) = &self.progress
+        {
+            *progress.lock().unwrap() = Some(tokio::time::Instant::now());
+        }
+        result
+    }
+}
+
+impl AsyncWrite for WsTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.tcp).poll_write(cx, data)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.tcp).poll_write_vectored(cx, data)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.tcp.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.tcp).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.tcp).poll_shutdown(cx)
+    }
+}
 
 type CandidateFuture<'a, T, E> = Pin<Box<dyn Future<Output = (String, Result<T, E>)> + Send + 'a>>;
 
@@ -183,17 +261,24 @@ impl<K: Eq + Hash> CooldownMap<K> {
     where
         K: Clone,
     {
-        self.update(key, cooldown, false);
+        self.update(key, cooldown, false, false);
     }
 
     pub(crate) fn fail(&self, key: K, cooldown: Duration)
     where
         K: Clone,
     {
-        self.update(key, cooldown, true);
+        self.update(key, cooldown, true, false);
     }
 
-    fn update(&self, key: K, cooldown: Duration, adaptive: bool)
+    pub(crate) fn extend(&self, key: K, cooldown: Duration)
+    where
+        K: Clone,
+    {
+        self.update(key, cooldown, false, true);
+    }
+
+    fn update(&self, key: K, cooldown: Duration, adaptive: bool, extend_only: bool)
     where
         K: Clone,
     {
@@ -228,6 +313,9 @@ impl<K: Eq + Hash> CooldownMap<K> {
             cooldown
         };
         let until = now + delay;
+        if extend_only && entries.get(&key).is_some_and(|entry| entry.until >= until) {
+            return;
+        }
         entries.insert(
             key,
             Cooldown {
@@ -407,8 +495,8 @@ fn remember_cf_edge(domain: &str, ip: IpAddr) {
 
 pub(crate) fn ws_peer(ws: &TgWsStream) -> Option<SocketAddr> {
     match ws.get_ref() {
-        MaybeTlsStream::Plain(tcp) => tcp.peer_addr().ok(),
-        MaybeTlsStream::Rustls(tls) => tls.get_ref().0.peer_addr().ok(),
+        MaybeTlsStream::Plain(tcp) => tcp.tcp.peer_addr().ok(),
+        MaybeTlsStream::Rustls(tls) => tls.get_ref().0.tcp.peer_addr().ok(),
         _ => None,
     }
 }
@@ -484,6 +572,8 @@ pub(crate) enum WsConnectResult {
     Redirect(u16),
     /// HTTP-ответ без redirect и без успешного WebSocket upgrade.
     HttpStatus(u16),
+    /// Все edge-адреса уже приостановлены, новой сетевой попытки не было.
+    Cooling,
     /// Системный DNS не смог разрешить имя Cloudflare-хоста.
     DnsFailed(String),
     /// Другая ошибка транспорта.
@@ -735,7 +825,7 @@ pub(crate) async fn connect_probe_plain_ws(
             }
         })?;
     let started = Instant::now();
-    let stream = MaybeTlsStream::Plain(tcp);
+    let stream = MaybeTlsStream::Plain(WsTcpStream::new(tcp));
     match tokio::time::timeout(
         timeout,
         tokio_tungstenite::client_async_with_config(request, stream, Some(ws_config())),
@@ -834,7 +924,7 @@ async fn connect_probe_ws_with_config(
     let started = Instant::now();
     let tls_stream = match tokio::time::timeout(
         timeout,
-        tokio_rustls::TlsConnector::from(tls_config).connect(server_name, tcp),
+        tokio_rustls::TlsConnector::from(tls_config).connect(server_name, WsTcpStream::new(tcp)),
     )
     .await
     {
@@ -960,13 +1050,13 @@ async fn connect_cf_with_path_mode(
         .filter(|ip| !CF_EDGE_MTPROTO_FAIL.active(&(*ip, domain.to_owned(), route_scope.clone())))
         .collect::<Vec<_>>();
     if ips.is_empty() {
-        return WsConnectResult::Failed("Edge на паузе после ошибки MTProto".into());
+        return WsConnectResult::Cooling;
     }
     let first = cf_ip_start(&ips);
     let cooldowns = &CF_EDGE_TLS_FAIL;
     let route_ips = cf_ip_attempts(&ips, first, domain, &route_scope, cooldowns);
     if route_ips.is_empty() {
-        return WsConnectResult::Failed("Edge на паузе после транспортной ошибки".into());
+        return WsConnectResult::Cooling;
     }
     let candidates = route_ips
         .iter()
@@ -1052,7 +1142,7 @@ async fn connect_cf_with_path_mode(
                 cooldowns.fail(route_key, opts.fail_cooldown);
                 last_non_redirect = Some(WsConnectResult::ConnectTimedOut(reason));
             }
-            WsConnectResult::Connected(_) => {
+            WsConnectResult::Cooling | WsConnectResult::Connected(_) => {
                 unreachable!("race returns successful streams separately")
             }
         }
@@ -1183,7 +1273,13 @@ where
     R: IntoClientRequest + Unpin,
 {
     let connector = Connector::Rustls(verifying_rustls_config());
-    client_async_tls_with_config(request, tcp, Some(ws_config()), Some(connector)).await
+    client_async_tls_with_config(
+        request,
+        WsTcpStream::new(tcp),
+        Some(ws_config()),
+        Some(connector),
+    )
+    .await
 }
 
 /// Plain WebSocket по TCP без TLS: CF proxy на внешнем порту 80.
@@ -1199,7 +1295,7 @@ where
 {
     tokio_tungstenite::client_async_with_config(
         request,
-        MaybeTlsStream::Plain(tcp),
+        MaybeTlsStream::Plain(WsTcpStream::new(tcp)),
         Some(ws_config()),
     )
     .await
@@ -1249,7 +1345,7 @@ async fn tls_handshake_and_upgrade_with_name_and_config(
         ServerName::try_from(server_name.to_string()).map_err(|_| WsUpgradeError::Tls)?;
     let connector = tokio_rustls::TlsConnector::from(config);
     let tls = connector
-        .connect(server_name, tcp)
+        .connect(server_name, WsTcpStream::new(tcp))
         .await
         .map_err(|_| WsUpgradeError::Tls)?;
     tokio_tungstenite::client_async_with_config(
@@ -1361,7 +1457,7 @@ pub(crate) async fn connect_ws_for_dc_with_outbound(
 fn log_ws_domain_failure(dc: u32, is_media: bool, domain: &str, result: &WsConnectResult) {
     let media = media_tag(is_media);
     match result {
-        WsConnectResult::Connected(_) => {}
+        WsConnectResult::Connected(_) | WsConnectResult::Cooling => {}
         WsConnectResult::Redirect(code) => warn!(
             "DC{}{}: домен {} ответил кодом HTTP {} (перенаправление)",
             dc, media, domain, code
@@ -1572,6 +1668,7 @@ pub(crate) async fn connect_cf_ws_for_dc_with_outbound_ordered(
         .await
         {
             WsConnectResult::Connected(ws) => return (Some(ws), Some(domain), false),
+            WsConnectResult::Cooling => continue,
             WsConnectResult::Redirect(code) => {
                 warn!(
                     "DC{}{}: CF-домен {} ответил кодом HTTP {} (перенаправление)",
