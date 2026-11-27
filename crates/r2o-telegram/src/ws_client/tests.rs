@@ -403,10 +403,9 @@ async fn фрагментированное_binary_сообщение_возвр
     let request = format!("ws://{address}/apiws")
         .into_client_request()
         .unwrap();
-    let (mut websocket, _) =
-        client_async_tls_with_config(request, WsTcpStream::new(stream), Some(ws_config()), None)
-            .await
-            .unwrap();
+    let (mut websocket, _) = client_async_tls_with_config(request, stream, Some(ws_config()), None)
+        .await
+        .unwrap();
 
     assert_eq!(
         ws_recv(&mut websocket).await.as_deref(),

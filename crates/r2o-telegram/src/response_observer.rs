@@ -2,9 +2,11 @@
 
 use crate::crypto::{AesCtr256, ProtoTag, direct_server_stream_cipher};
 use cipher::StreamCipher;
+use grammers_tl_types::Identifiable;
 
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const OBSERVER_CHUNK: usize = 16 * 1024;
+const MAX_ABRIDGED_RES_PQ_PADDING: usize = 128;
 
 pub(crate) struct MtprotoResponseObserver {
     cipher: AesCtr256,
@@ -185,11 +187,23 @@ impl MtprotoResponseObserver {
                 return 0;
             }
             let padding = self.packet_len - 20 - message_len as usize;
-            return if self.packet_padded {
-                i32::from(padding <= 15)
-            } else {
-                i32::from(padding == 0)
-            };
+            if self.packet_padded {
+                return i32::from(padding <= 15);
+            }
+            if padding == 0 {
+                return 1;
+            }
+
+            // В Abridged через WSS обслуживающий DC может добавить padding
+            // после resPQ. Поле длины по-прежнему описывает только TL-ответ.
+            return i32::from(
+                matches!(self.proto, ProtoTag::Abridged)
+                    && self.prefix[20..24]
+                        == grammers_tl_types::types::ResPq::CONSTRUCTOR_ID.to_le_bytes()
+                    && (56..=568).contains(&message_len)
+                    && message_len.is_multiple_of(4)
+                    && padding <= MAX_ABRIDGED_RES_PQ_PADDING,
+            );
         }
         if self.prefix_len < 40 || self.packet_len < 40 {
             return 0;
@@ -258,6 +272,43 @@ mod tests {
             statuses.push(status.to_string());
         }
         (name, statuses.join(","), expected)
+    }
+
+    #[test]
+    fn abridged_res_pq_accepts_bounded_trailing_padding() {
+        use grammers_tl_types::{Serializable, enums, types};
+
+        let body = enums::ResPq::Pq(types::ResPq {
+            nonce: [1; 16],
+            server_nonce: [2; 16],
+            pq: vec![3; 8],
+            server_public_key_fingerprints: vec![4],
+        })
+        .to_bytes();
+
+        for (valid_constructor, padding, expected) in [
+            (true, 0, Ok(true)),
+            (true, 120, Ok(true)),
+            (true, 128, Ok(true)),
+            (true, 132, Err(())),
+            (false, 120, Err(())),
+        ] {
+            let packet_len = 20 + body.len() + padding;
+            let mut frame = vec![u8::try_from(packet_len / 4).unwrap()];
+            frame.extend_from_slice(&0_u64.to_le_bytes());
+            frame.extend_from_slice(&1_u64.to_le_bytes());
+            frame.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            frame.extend_from_slice(&body);
+            if !valid_constructor {
+                frame[21] ^= 1;
+            }
+            frame.resize(1 + packet_len, 0xa5);
+            server_cipher(&INIT).apply_keystream(&mut frame);
+
+            let mut observer = MtprotoResponseObserver::new(&INIT, ProtoTag::Abridged);
+            assert_eq!(observer.observe(&frame[..17]), Ok(false));
+            assert_eq!(observer.observe(&frame[17..]), expected);
+        }
     }
 
     #[test]

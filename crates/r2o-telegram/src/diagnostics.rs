@@ -1130,7 +1130,7 @@ mod tests {
         let tcp = TcpStream::connect(addr).await.unwrap();
         let (ws, response) = tokio_tungstenite::client_async(
             "ws://worker.example/apiws?dst=149.154.167.51",
-            MaybeTlsStream::Plain(crate::ws_client::WsTcpStream::new(tcp)),
+            MaybeTlsStream::Plain(tcp),
         )
         .await
         .unwrap();

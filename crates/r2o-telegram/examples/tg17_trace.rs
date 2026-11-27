@@ -126,17 +126,10 @@ fn route_trace(store: &DcMapStore, dir: &Path) {
         let bytes = fs::read(dir.join(file)).expect("handshake file");
         let handshake: [u8; HANDSHAKE_LEN] = bytes.try_into().expect("64 bytes");
         let secrets = store.handshake_secrets_for_at(destination.ip(), destination.port(), NOW);
-        let Some(mut init) = parse_client_init_with_secrets(&handshake, &secrets) else {
+        let Some(init) = parse_client_init_with_secrets(&handshake, &secrets) else {
             println!("route {name} ok=0");
             continue;
         };
-        if !init.used_official_secret {
-            // Только для сравнения с историческим C-оракулом, который читал
-            // DC/media из заполнения obfuscated2. Рабочий маршрутизатор этого не делает.
-            let donor = parse_handshake(&handshake, &[]).expect("проверенный формат obfuscated2");
-            init.dc = (1..=999).contains(&donor.dc_id).then_some(donor.dc_id);
-            init.is_media = donor.is_media;
-        }
         let lookup = store.resolve_for_transparent_with_source(
             destination.ip(),
             destination.port(),
