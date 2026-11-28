@@ -1049,7 +1049,6 @@
           : "Новых выпусков нет. Установленная версия актуальна.";
     }
     write("update-version", newer ? "Что изменилось в " + (str(latest.version) || latest.release_id) : "");
-    write("update-notes-text", str(latest && latest.notes) || "Описание изменений не опубликовано.");
     var install = this.$("update-install");
     install.hidden = !newer;
     install.disabled = !!action || absent;
@@ -1109,7 +1108,10 @@
     }
     write("update-progress-text", stepText).hidden = !showStage;
     this.$("update-cancel").hidden = busy !== "staging";
-    this.renderUpdateSelection(s, action, write);
+    var describedRelease = this.renderUpdateSelection(s, action, write);
+    var notes = str(describedRelease && describedRelease.notes) || "Описание изменений не опубликовано.";
+    if (global.R2oMarkdown) global.R2oMarkdown.render(this.$("update-notes-text"), notes);
+    else write("update-notes-text", notes);
 
     var auto = this.$("update-auto");
     if (!(pending && /^auto-/.test(pending.action))) auto.checked = !absent && s.auto !== false;
@@ -1171,7 +1173,6 @@
       source.disabled = !!action;
       this.$("update-release").hidden = false;
       write("update-version", "Изменения в " + (chosen.title || chosen.version || chosen.release_id));
-      write("update-notes-text", str(chosen.notes) || "Описание изменений не опубликовано.");
     }
     this.$("update-history").hidden = !history.length;
     var list = this.$("update-history-list"), key = JSON.stringify(history);
@@ -1182,6 +1183,7 @@
         return el(doc, "li", "upd-meta", localTime(item.utc * 1000) + " · " + item.release_id + " · " + item.message);
       }));
     }
+    return chosen || latest;
   };
 
   App.prototype.updateOptions = function (select, options) {

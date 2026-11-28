@@ -415,6 +415,16 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
             "application/javascript; charset=utf-8",
         ),
         (
+            "/assets/marked.js",
+            "marked.js",
+            "application/javascript; charset=utf-8",
+        ),
+        (
+            "/assets/release-markdown.js",
+            "release-markdown.js",
+            "application/javascript; charset=utf-8",
+        ),
+        (
             "/assets/diagnostics.js",
             "diagnostics.js",
             "application/javascript; charset=utf-8",
@@ -2524,6 +2534,8 @@ fn embedded_gzip(name: &str) -> Option<&'static [u8]> {
         "index.html" => gzip!("index.html"),
         "panel.css" => gzip!("panel.css"),
         "panel.js" => gzip!("panel.js"),
+        "marked.js" => gzip!("marked.js"),
+        "release-markdown.js" => gzip!("release-markdown.js"),
         "diagnostics.js" => gzip!("diagnostics.js"),
         "telegram-flow.js" => gzip!("telegram-flow.js"),
         "telegram-flow-prototype.js" => gzip!("telegram-flow-prototype.js"),
