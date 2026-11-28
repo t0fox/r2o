@@ -1,5 +1,13 @@
 # Сведения о стороннем коде
 
+## Инструмент разработки Spec Kit
+
+- Источник: [github/spec-kit, v1.4.5](https://github.com/github/spec-kit/tree/v1.4.5).
+- Лицензия: [MIT, Copyright GitHub, Inc.](docs/licenses/spec-kit.txt).
+- Specify CLI 1.4.5 создал штатные `.specify/` scripts/templates/workflow и
+  `.agents/skills/speckit-*/` для Codex. Constitution и `specs/` содержат решения R2O.
+- Эти файлы используются при разработке; новые зависимости router runtime не добавлены.
+
 Лицензия [MIT](LICENSE) распространяется на собственный код и документацию R2O.
 Сторонние компоненты, заимствованные данные и ресурсы сохраняют исходные
 условия и уведомления. Если условия распространения конкретных данных не
