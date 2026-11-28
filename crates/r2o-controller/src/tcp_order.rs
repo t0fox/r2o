@@ -255,15 +255,21 @@ mod tests {
     #[test]
     fn permutation_keeps_byte_ranges_and_validates_complete_layout_and_limits() {
         let host = "order.example";
-        let (hello, sni) = (0..16).find_map(|_| {
-            let mut connection = crate::r2o_tls::r2o_tls_client_connection(
-                host, false, Some(640), rustls::RootCertStore::empty(),
-            ).unwrap();
-            let mut hello = Vec::new();
-            connection.write_tls(&mut hello).unwrap();
-            let sni = r2k_core::tls::complete_sni(&hello).unwrap();
-            (sni.end < hello.len()).then_some((hello, sni))
-        }).unwrap();
+        let (hello, sni) = (0..16)
+            .find_map(|_| {
+                let mut connection = crate::r2o_tls::r2o_tls_client_connection(
+                    host,
+                    false,
+                    Some(640),
+                    rustls::RootCertStore::empty(),
+                )
+                .unwrap();
+                let mut hello = Vec::new();
+                connection.write_tls(&mut hello).unwrap();
+                let sni = r2k_core::tls::complete_sni(&hello).unwrap();
+                (sni.end < hello.len()).then_some((hello, sni))
+            })
+            .unwrap();
         let mut shaped =
             crate::r2o_tls::tcp_order_connection(host, false, hello.len(), sni.start).unwrap();
         let mut actual = Vec::new();
@@ -325,7 +331,9 @@ mod tests {
         input.payload = &other;
         assert_eq!(plan.apply(&input).unwrap_err().kind(), "mixed-input");
         let mut moved = actual.clone();
-        let following_len = usize::from(u16::from_be_bytes(actual[sni.end + 2..sni.end + 4].try_into().unwrap()));
+        let following_len = usize::from(u16::from_be_bytes(
+            actual[sni.end + 2..sni.end + 4].try_into().unwrap(),
+        ));
         moved[sni.start - 9..sni.end + 4 + following_len].rotate_left(sni.len() + 9);
         let moved_sni = r2k_core::tls::complete_sni(&moved).unwrap();
         assert_eq!(&moved[moved_sni.clone()], host.as_bytes());

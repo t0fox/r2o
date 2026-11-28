@@ -54,8 +54,14 @@ fn tcp_order_nfq_lifecycle() {
         if let Some(legacy) = std::env::var_os("R2O_ORDER_TEST_LEGACY") {
             let output = std::process::Command::new(legacy)
                 .args(["--mark-recheck", "absent.example", "4", "1"])
-                .arg(&path).output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             assert_eq!(Catalog::load(&path).unwrap(), catalog);
             println!("TCP order: previous controller read and rewrote the catalog");
         }

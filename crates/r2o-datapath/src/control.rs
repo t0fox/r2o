@@ -359,8 +359,15 @@ impl NamePlans {
     }
 
     fn remove_exact_name(&mut self, key: &NamePlanKey) {
-        if self.plans.remove(key).is_some_and(|entry| entry.plan.tcp_order.is_some()) {
-            self.has_tcp_order = self.plans.values().any(|entry| entry.plan.tcp_order.is_some());
+        if self
+            .plans
+            .remove(key)
+            .is_some_and(|entry| entry.plan.tcp_order.is_some())
+        {
+            self.has_tcp_order = self
+                .plans
+                .values()
+                .any(|entry| entry.plan.tcp_order.is_some());
         }
     }
 
@@ -1983,9 +1990,12 @@ impl NamePlans {
             _ if is_tcp_context_shape(shape) => plan.proto == 1,
             _ => false,
         };
-        if plan.transport != 6 || !proto_matches || !self.r2o_plan_valid(&plan)
+        if plan.transport != 6
+            || !proto_matches
+            || !self.r2o_plan_valid(&plan)
             || plan.tcp_order.as_ref().is_some_and(|order| {
-                !tcp_order_shape(shape) || key.name.host != order.host
+                !tcp_order_shape(shape)
+                    || key.name.host != order.host
                     || (if order.endpoint.is_ipv4() { 4 } else { 6 }) != family
             })
         {
