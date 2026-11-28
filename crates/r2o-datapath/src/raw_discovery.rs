@@ -7,6 +7,9 @@ use r2k_core::raw_flow::{
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+// Одна пассивная UDP-запись оставляет остальные места общего пула TCP.
+const MAX_UDP_OBSERVATIONS: usize = 1;
+
 pub enum Observation {
     Measured(Sample),
     Attempt(Trial),
@@ -397,7 +400,9 @@ impl RawDiscovery {
             let result = (entry.sample, entry.prior_reply);
             return self.remember(result.0, now).then_some(result);
         }
-        if self.active.len() + self.udp.len() >= MAX_ACTIVE {
+        if self.udp.len() >= MAX_UDP_OBSERVATIONS
+            || self.active.len() + self.udp.len() >= MAX_ACTIVE
+        {
             return None;
         }
         self.next_measurement = self.next_measurement.wrapping_add(1).max(1);

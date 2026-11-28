@@ -2,6 +2,7 @@
 //! digest of one packet, never its application bytes.
 use crate::control::{Frame, KEY_LEN, encode_frame, valid_flow_key};
 use sha2::{Digest, Sha256};
+use std::ffi::OsStr;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -17,8 +18,69 @@ pub const LEASE: Duration = Duration::from_secs(12);
 pub const REPEAT_MIN: Duration = Duration::from_millis(150);
 pub const RETRY: Duration = Duration::from_secs(60);
 
-pub fn enabled() -> bool {
-    std::env::var_os("R2O_RAW_DISCOVERY").is_some_and(|value| value == "1")
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Setting {
+    Enabled,
+    Disabled,
+    Invalid,
+}
+
+impl Setting {
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var_os("R2O_RAW_DISCOVERY").as_deref())
+    }
+
+    pub fn parse(value: Option<&OsStr>) -> Self {
+        match value.map(OsStr::as_encoded_bytes) {
+            None | Some(b"") | Some(b"1") => Self::Enabled,
+            Some(b"0") => Self::Disabled,
+            Some(_) => Self::Invalid,
+        }
+    }
+
+    pub fn requested(self) -> bool {
+        self == Self::Enabled
+    }
+
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::Enabled => None,
+            Self::Disabled => Some("disabled-config"),
+            Self::Invalid => Some("invalid-config"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod setting_tests {
+    use super::*;
+
+    #[test]
+    fn default_and_explicit_raw_values() {
+        for (value, expected, reason) in [
+            (None, Setting::Enabled, None),
+            (Some(""), Setting::Enabled, None),
+            (Some("1"), Setting::Enabled, None),
+            (Some("0"), Setting::Disabled, Some("disabled-config")),
+            (Some("yes"), Setting::Invalid, Some("invalid-config")),
+            (Some(" 1 "), Setting::Invalid, Some("invalid-config")),
+        ] {
+            let setting = Setting::parse(value.map(OsStr::new));
+            assert_eq!(setting, expected, "{value:?}");
+            assert_eq!(setting.requested(), reason.is_none());
+            assert_eq!(setting.reason(), reason);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_environment_is_invalid_not_absent() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            Setting::parse(Some(OsStr::from_bytes(b"\xff"))),
+            Setting::Invalid
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

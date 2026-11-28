@@ -1,6 +1,6 @@
 use r2k_core::control::{ACK_OK, decode_ack, encode_ack_for_trial, read_frame};
 use r2k_core::packet::PacketView;
-use r2k_core::raw_flow::{COMMAND_RAW_TRIAL, LEASE, Report, ResultKind, Sample, Trial};
+use r2k_core::raw_flow::{COMMAND_RAW_TRIAL, LEASE, MAX_ACTIVE, Report, ResultKind, Sample, Trial};
 use r2o_controller::catalog::Catalog;
 use r2o_controller::r2o_resource_limit::R2oMeasurementGate;
 use r2o_controller::raw_discovery::{Trials, candidate, save_confirmed};
@@ -329,6 +329,7 @@ fn raw_tcp_rejects_stale_range_rst_reused_tuple_and_expired_lease() {
         "undated-ack",
         "same-batch-ack",
         "pre-execution",
+        "send-failed",
     ] {
         let mut h = Harness::new();
         flow.open(&mut h.sessions, 1000);
@@ -367,6 +368,14 @@ fn raw_tcp_rejects_stale_range_rst_reused_tuple_and_expired_lease() {
                         .is_none()
                 );
             }
+            "send-failed" => {
+                assert!(matches!(h.feed(&sent, 2), Some(Observation::Attempt(_))));
+                assert!(
+                    h.raw
+                        .finish(trial, None, h.start + 2 * TICK, captured(2))
+                        .is_none()
+                );
+            }
             "queued-ack" | "undated-ack" | "same-batch-ack" => {
                 assert!(matches!(h.feed(&sent, 2), Some(Observation::Attempt(_))));
                 assert!(
@@ -401,6 +410,65 @@ fn raw_tcp_rejects_stale_range_rst_reused_tuple_and_expired_lease() {
             "{close}"
         );
     }
+}
+
+#[test]
+fn raw_udp_saturation_preserves_tcp_slots_and_lease_cleanup() {
+    let mut h = Harness::new();
+    let mut udp = r2o_datapath::r2o_udp_sessions::R2oUdpSessions::new().unwrap();
+    let hook = Some(r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING);
+    let udp_flows = (0..MAX_ACTIVE + 2)
+        .map(|i| Flow {
+            source_port: 39_000 + i as u16,
+            ..Flow::default()
+        })
+        .collect::<Vec<_>>();
+    for (step, now) in [h.start, h.start + TICK].into_iter().enumerate() {
+        let reported = udp_flows
+            .iter()
+            .filter(|flow| {
+                let packet = flow.udp(true, DATA);
+                udp.r2o_observe_packet_at_hook(&packet, now, hook);
+                h.raw
+                    .udp(&packet, udp.raw_context(&packet).unwrap(), now)
+                    .is_some()
+            })
+            .count();
+        assert_eq!(
+            reported, step,
+            "at most one passive UDP observation is admitted"
+        );
+    }
+
+    for i in 0..MAX_ACTIVE - 1 {
+        let flow = Flow {
+            source_port: 40_000 + i as u16,
+            port: 7755 + i as u16,
+            ..Flow::default()
+        };
+        flow.open(&mut h.sessions, 1000);
+        assert_eq!(
+            h.measure(flow, 1001, 2 + 2 * i as u32, DATA)
+                .server()
+                .port(),
+            flow.port
+        );
+    }
+    let fourth = Flow {
+        port: 8000,
+        ..Flow::default()
+    };
+    fourth.open(&mut h.sessions, 3000);
+    let packet = fourth.tcp(true, 3001, 2001, 0x18, DATA);
+    assert!(h.feed(&packet, 8).is_none());
+    assert!(h.feed(&packet, 9).is_none());
+
+    h.raw.expire(h.start + LEASE);
+    fourth.open(&mut h.sessions, 5000);
+    assert_eq!(
+        h.measure(fourth, 5001, 40, DATA).server().port(),
+        fourth.port
+    );
 }
 
 #[test]

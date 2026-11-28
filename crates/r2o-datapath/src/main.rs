@@ -1848,14 +1848,34 @@ mod app {
         let mut udp_receive_seq = 0_u64;
         let mut icmp_guard = R2oIcmpGuard::default();
         let mut next_execution_id = 1_u64;
-        let mut opaque_flows = (r2k_core::raw_flow::enabled()
-            && options.control_wire == r2k_core::control::WireProfile::V48
-            && options.mode == RuntimeMode::Apply)
+        let raw_setting = r2k_core::raw_flow::Setting::from_env();
+        let raw_reason = raw_setting.reason().or_else(|| {
+            if options.control_wire != r2k_core::control::WireProfile::V48 {
+                Some("unsupported-wire")
+            } else if options.mode != RuntimeMode::Apply {
+                Some("observe-mode")
+            } else if global_plan_present {
+                Some("static-plan")
+            } else if control.is_none() {
+                Some("no-control")
+            } else if raw.is_none() {
+                Some("no-raw-socket")
+            } else if name_plans.epoch() == [0; 16] {
+                Some("no-control-epoch")
+            } else {
+                None
+            }
+        });
+        let mut opaque_flows = raw_reason
+            .is_none()
             .then(|| r2o_datapath::raw_discovery::RawDiscovery::new(name_plans.epoch()))
             .flatten();
-        if opaque_flows.is_some() {
-            eprintln!("r2o-datapath: RAW включён, TCP — измерение повтора, UDP — наблюдение");
-        }
+        eprintln!(
+            "r2o-datapath: RAW TCP requested={} ready={} reason={}",
+            raw_setting.requested(),
+            opaque_flows.is_some(),
+            raw_reason.unwrap_or("ready"),
+        );
         let mut next_session_sweep = Instant::now();
         let mut next_stats = options
             .stats_interval
@@ -2055,6 +2075,10 @@ mod app {
                     );
                     let default_egress =
                         route_gate.r2o_describe_default_ifindices(route_family, 128);
+                    let raw_inactive_reason = raw_reason.or_else(|| {
+                        (!control.as_ref().is_some_and(ControlServer::is_connected))
+                            .then_some("controller-disconnected")
+                    });
                     let mut health = serde_json::json!({
                         "pid": std::process::id(),
                         "start_ticks": start_ticks,
@@ -2080,7 +2104,12 @@ mod app {
                             "effective_lookup_enabled": check_effective_routes,
                             "configuration_is_flow_proof": false,
                         },
-                        "raw_discovery_active": opaque_flows.is_some(),
+                        "raw_discovery_active": raw_inactive_reason.is_none(),
+                        "raw_discovery": {
+                            "requested": raw_setting.requested(),
+                            "active": raw_inactive_reason.is_none(),
+                            "reason": raw_inactive_reason,
+                        },
                         "kernel_receive_losses": socket.lost_packets(),
                         "conntrack_netlink_up": ct_up,
                         "nfqueue": {

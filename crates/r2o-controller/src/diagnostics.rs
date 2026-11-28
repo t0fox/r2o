@@ -2,7 +2,7 @@
 
 mod evidence;
 mod process_memory;
-pub use evidence::Components;
+pub use evidence::{Components, RawControllerStatus};
 mod report;
 
 use crate::portable_atomic::R2oAtomicU64;

@@ -26439,9 +26439,30 @@ impl ControlClient {
             );
         let mut tcp_hello_names = R2oTcpHelloCache::default();
         let mut clean_handshakes = R2oCleanHandshakeCache::default();
-        let mut opaque_trials = (r2k_core::raw_flow::enabled()
-            && r2o_control_wire() == control::WireProfile::V48)
+        let raw_setting = r2k_core::raw_flow::Setting::from_env();
+        let raw_reason = raw_setting.reason().or_else(|| {
+            if r2o_control_wire() != control::WireProfile::V48 {
+                Some("unsupported-wire")
+            } else if discovery.is_none() {
+                Some("discovery-disabled")
+            } else {
+                None
+            }
+        });
+        let mut opaque_trials = raw_reason
+            .is_none()
             .then(r2o_controller::raw_discovery::Trials::default);
+        let raw_status = r2o_controller::diagnostics::RawControllerStatus {
+            requested: raw_setting.requested(),
+            ready: opaque_trials.is_some(),
+            reason: raw_reason,
+        };
+        eprintln!(
+            "r2o-controller: RAW TCP requested={} ready={} reason={}",
+            raw_status.requested,
+            raw_status.ready,
+            raw_status.reason.unwrap_or("ready"),
+        );
         let mut legacy_client_tcp =
             HashMap::<[u8; r2k_core::control::KEY_LEN], (Vec<u8>, std::time::Instant)>::new();
         let mut quic_deny = R2oQuicDenyCache::default();
@@ -26712,6 +26733,7 @@ impl ControlClient {
                         let (tracked_tcp, tracked_quic, tracked_tls) =
                             r2o_controller::diagnostics::tracked_memory_bytes();
                         let mut components = r2o_controller::diagnostics::Components {
+                            raw_discovery: Some(raw_status),
                             raw_trials: opaque_trials
                                 .as_ref()
                                 .map(r2o_controller::raw_discovery::Trials::diagnostic_counts),

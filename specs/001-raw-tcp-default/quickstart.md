@@ -29,6 +29,7 @@ cargo build --release --workspace --bins
 cargo test -p r2k-core raw_flow
 cargo test -p r2o-datapath raw_discovery
 cargo test -p r2o-controller --test raw_endpoint_discovery
+sh scripts/test-router-raw-default.sh
 bash scripts/test-router-openwrt-init.sh
 sh scripts/test-signed-install-rollback.sh
 ```
@@ -63,9 +64,9 @@ full/partial/stale ACK, RST, timeout, отмену, смену поколени�
 sh scripts/test-raw-discovery-nfq.sh
 ```
 
-До изменения smoke принудительно задаёт RAW=1 и проверяет IPv4. Исполнитель MUST
-доработать тест для default-on и IPv6. Если для IPv6 выбран отдельный script,
-добавить его команду сюда и в соответствующий CI job.
+Сценарий запускает оба семейства без ключа, с явными `0` и `1`, а также
+IPv4 с пустым и некорректным значениями. Отдельный сценарий можно запустить
+как `sh scripts/test-raw-discovery-nfq.sh ipv6 default`.
 
 Проверить холодный полный обмен тестового клиента, transport evidence, точную запись
 в каталог и повтор после перезапуска. Отдельно запустить explicit-0/1. Клиентский

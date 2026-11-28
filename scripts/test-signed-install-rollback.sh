@@ -79,17 +79,29 @@ install_release r2o-signed-1
 [ "$(sed -n '2p' "$INSTALL_ROOT/release-slots")" = r2o-signed-1 ] ||
     fail "первая подписанная установка не активировала релиз 1"
 [ -x "$INSTALL_ROOT/r2o-manager" ] || fail "launcher менеджера не установлен"
+# В штатной установке конфигурацию создаёт router/install.sh после активации слота.
+"$MANAGER" config-init --root "$INSTALL_ROOT" --defaults "$ROOT_DIR/router/config.default" \
+    >"$WORK/config-init.out" || fail "не удалось создать конфигурацию установки"
+[ -f "$INSTALL_ROOT/config" ] || fail "первая установка не создала конфигурацию"
+if grep -q '^R2O_RAW_DISCOVERY=' "$INSTALL_ROOT/config"; then
+    fail "новая установка должна полагаться на штатное значение RAW"
+fi
+printf '\nR2O_RAW_DISCOVERY=0\n' >>"$INSTALL_ROOT/config"
 
 install_release r2o-signed-2
 [ "$(sed -n '2p' "$INSTALL_ROOT/release-slots")" = r2o-signed-2 ] &&
     [ "$(sed -n '3p' "$INSTALL_ROOT/release-slots")" = r2o-signed-1 ] ||
     fail "вторая установка не сохранила предыдущий релиз"
+grep -qx 'R2O_RAW_DISCOVERY=0' "$INSTALL_ROOT/config" ||
+    fail "обновление потеряло явное отключение RAW"
 
 "$MANAGER" rollback --root "$INSTALL_ROOT" >"$WORK/rollback.out" ||
     fail "подписанный откат не выполнился"
 [ "$(sed -n '2p' "$INSTALL_ROOT/release-slots")" = r2o-signed-1 ] &&
     [ "$(sed -n '3p' "$INSTALL_ROOT/release-slots")" = r2o-signed-2 ] ||
     fail "откат не восстановил релиз 1"
+grep -qx 'R2O_RAW_DISCOVERY=0' "$INSTALL_ROOT/config" ||
+    fail "откат потерял явное отключение RAW"
 
 cp "$WORK/r2o-signed-2.tar.gz" "$WORK/tampered.tar.gz"
 printf 'x' >> "$WORK/tampered.tar.gz"

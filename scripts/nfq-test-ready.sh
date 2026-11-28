@@ -5,27 +5,32 @@ r2o_wait_nfq() (
     queue=$3
     control=$4
     log=$5
-    ip netns exec "$ns" nft add table ip r2o_ready
-    ip netns exec "$ns" nft add chain ip r2o_ready output \
+    case "${6:-4}" in
+        4) family=ip; address=127.0.0.1 ;;
+        6) family=ip6; address=::1 ;;
+        *) exit 2 ;;
+    esac
+    ip netns exec "$ns" nft add table "$family" r2o_ready
+    ip netns exec "$ns" nft add chain "$family" r2o_ready output \
         '{ type filter hook output priority -5; policy accept; }'
     # No bypass: a matching datagram must receive a verdict from the datapath.
-    ip netns exec "$ns" nft add rule ip r2o_ready output \
-        ip daddr 127.0.0.1 udp dport 46991 counter queue num "$queue"
+    ip netns exec "$ns" nft add rule "$family" r2o_ready output \
+        "$family" daddr "$address" udp dport 46991 counter queue num "$queue"
 
-    if ! ip netns exec "$ns" python3 - "$pid" "$control" >"$log" 2>&1 <<'PY'
+    if ! ip netns exec "$ns" python3 - "$pid" "$control" "$address" >"$log" 2>&1 <<'PY'
 import os
 import socket
 import stat
 import sys
 import time
 
-pid, control = int(sys.argv[1]), sys.argv[2]
+pid, control, address = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 deadline = time.monotonic() + 5
 # A delayed verdict still proves this run's queue path. Reusing the random
 # challenge keeps a slow runner from perpetually reading the previous reply.
 challenge = os.urandom(16)
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-    probe.bind(('127.0.0.1', 46991))
+with socket.socket(socket.AF_INET6 if address == '::1' else socket.AF_INET, socket.SOCK_DGRAM) as probe:
+    probe.bind((address, 46991))
     probe.settimeout(0.1)
     while time.monotonic() < deadline:
         os.kill(pid, 0)
@@ -43,7 +48,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         sys.exit('NFQUEUE: no verdict on readiness traffic within 5 seconds')
 PY
     then
-        ip netns exec "$ns" nft list table ip r2o_ready >>"$log" 2>&1
+        ip netns exec "$ns" nft list table "$family" r2o_ready >>"$log" 2>&1
         ip netns exec "$ns" sh -c '
             path=/proc/net/netfilter/nfnetlink_queue
             if [ -r "$path" ]; then cat "$path"; else echo "$path unavailable"; fi
@@ -52,5 +57,5 @@ PY
         exit 1
     fi
 
-    ip netns exec "$ns" nft delete table ip r2o_ready
+    ip netns exec "$ns" nft delete table "$family" r2o_ready
 )

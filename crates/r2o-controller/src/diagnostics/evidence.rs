@@ -11,6 +11,13 @@ pub struct DnsOrigin {
     pub observed: usize,
 }
 
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct RawControllerStatus {
+    pub requested: bool,
+    pub ready: bool,
+    pub reason: Option<&'static str>,
+}
+
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct Components {
     pub catalog_snapshot_bytes: Option<u64>,
@@ -25,6 +32,7 @@ pub struct Components {
     pub tcp_order_experiments: Option<u64>,
     pub tcp_order_probes: Option<u64>,
     pub tcp_order_confirmations: Option<u64>,
+    pub raw_discovery: Option<RawControllerStatus>,
     pub raw_trials: Option<[usize; 3]>,
     pub dns_inventory: usize,
     pub dns_by_source: [DnsOrigin; 6],

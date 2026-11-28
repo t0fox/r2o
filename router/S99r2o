@@ -76,7 +76,7 @@ LM_PID=$RUN/r2o-log-maintenance.pid
 META_DNS_PID=$RUN/meta-dns-scheduler.pid
 # shellcheck disable=SC1090  # конфигурация owner-managed, путь задаётся выше
 [ ! -r "$CONF" ] || . "$CONF"
-R2O_RAW_DISCOVERY=${R2O_RAW_DISCOVERY:-0}
+R2O_RAW_DISCOVERY=${R2O_RAW_DISCOVERY:-1}
 export R2O_RAW_DISCOVERY
 export R2O_GITHUB_MIRRORS
 FIREWALL=${R2O_FIREWALL:-$SCRIPT_DIR/r2o-firewall.sh}

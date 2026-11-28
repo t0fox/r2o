@@ -1,6 +1,7 @@
 # Копировать только при первой установке; существующая конфигурация сохраняется при обновлении.
 SCHEMA=1
 MODE=apply
+# RAW TCP включён по умолчанию; R2O_RAW_DISCOVERY=0 отключает его.
 STATE_DIR=/opt/r2o/state
 QUEUE_NUM=2000
 QUEUE_NUM6=2001
