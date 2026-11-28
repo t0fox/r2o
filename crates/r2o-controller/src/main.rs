@@ -14131,7 +14131,10 @@ fn diagnostic_phase_times_keep_saved_checks_and_verification_separate() {
     .elapsed("распознаём поведение", start + Duration::from_millis(40))
     .elapsed("проверяем свои планы", start + Duration::from_millis(130))
     .elapsed("выводим планы", start + Duration::from_millis(150))
-    .elapsed("проверяем выведенный план", start + Duration::from_millis(200));
+    .elapsed(
+        "проверяем выведенный план",
+        start + Duration::from_millis(200),
+    );
     assert_eq!(phases.ms, [40, 20, 90, 50, 0]);
 }
 

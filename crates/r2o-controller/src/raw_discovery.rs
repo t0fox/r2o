@@ -207,7 +207,10 @@ impl Trials {
     pub fn diagnostic_counts(&self) -> [usize; 3] {
         [
             self.pending.len(),
-            self.pending.iter().filter(|entry| entry.execution.is_some()).count(),
+            self.pending
+                .iter()
+                .filter(|entry| entry.execution.is_some())
+                .count(),
             self.recent.len(),
         ]
     }
