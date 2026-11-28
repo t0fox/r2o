@@ -10,7 +10,7 @@ fn tcp_order_nfq_lifecycle() {
     let socket = dir.join("dp.sock");
     let path = dir.join("catalog.json");
     let target = r2o_controller::discovery::DiscoveryTarget {
-        host: "order.example".into(),
+        host: "order.example.com".into(),
         endpoint: "198.51.100.2:18443".into(),
         family: 4,
         shape: SHAPE_MODERN,
