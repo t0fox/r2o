@@ -40,10 +40,12 @@ test "$(sh -c 'cat "$1/meta-protection.disabled"' sh "$STATE")" = 0
 test "$(awk 'NR == 1' "$TRACE")" = 'meta stop'
 test "$(awk 'NR == 2' "$TRACE")" = "exec --root $ROOT --component r2o-telegram -- --remove-meta-dns"
 
+printf '2026-11-28\n' > "$STATE/instagram-dns-last-success"
 meta_protection_enable
 meta_protection_enabled
 test "$(cat "$META_ENABLED")" = 1
 test ! -e "$META_DISABLED"
+test ! -e "$STATE/instagram-dns-last-success"
 test "$(tail -n 1 "$TRACE")" = 'meta start'
 test "$(wc -l < "$TRACE")" -eq 3
 if meta_protection_product malformed off; then exit 1; fi
@@ -55,4 +57,14 @@ meta_protection_disable
 if meta_protection_enabled; then exit 1; fi
 test ! -e "$META_ENABLED"
 test -f "$META_DISABLED"
-printf '%s\n' 'Meta Protection ON/OFF и сохранение состояния: OK'
+
+# Новое включение запускает начальную проверку, повторная команда on сохраняет
+# суточный ограничитель. Переопределённый путь совпадает с путём Rust scheduler.
+R2O_INSTAGRAM_SCHED_STATE=$STATE/custom-meta-success
+printf '2026-11-28\n' > "$R2O_INSTAGRAM_SCHED_STATE"
+meta_protection_enable
+test ! -e "$R2O_INSTAGRAM_SCHED_STATE"
+printf '2026-11-28\n' > "$R2O_INSTAGRAM_SCHED_STATE"
+meta_protection_enable
+test "$(cat "$R2O_INSTAGRAM_SCHED_STATE")" = '2026-11-28'
+printf '%s\n' 'Meta Protection ON/OFF, сохранение состояния и суточного расписания: OK'

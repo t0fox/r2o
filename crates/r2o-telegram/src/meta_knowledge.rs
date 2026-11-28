@@ -14,7 +14,6 @@ use std::path::Path;
 const MAX_BYTES: usize = 1536 * 1024;
 const MAX_HOSTS: usize = 640;
 const MAX_EXTERNAL_PER_PRODUCT: usize = 64;
-const CHECKS_PER_TICK: usize = 8;
 const DAY: u64 = 86400;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -317,16 +316,12 @@ impl Knowledge {
         due.sort_unstable_by_key(|(name, host)| {
             (
                 host.checked_at != 0,
+                host.checked_at,
                 host.observed_at == 0,
                 !META_HOSTS.contains(&name.as_str()),
-                host.checked_at,
             )
         });
-        due.truncate(if force {
-            3 * CHECKS_PER_TICK
-        } else {
-            CHECKS_PER_TICK
-        });
+        due.truncate(MAX_HOSTS);
         due.into_iter().map(|(host, _)| host.clone()).collect()
     }
 
@@ -381,6 +376,37 @@ fn asn_for_source(source: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daily_selection_covers_the_bounded_database_and_prioritizes_unchecked_hosts() {
+        let mut knowledge = Knowledge::default();
+        for index in 0..MAX_HOSTS + 20 {
+            let host = format!("media-{index}.whatsapp.net");
+            knowledge.add_host(&host, "tls-sni", 0);
+            if let Some(entry) = knowledge.hosts.get_mut(&host) {
+                entry.checked_at = 10;
+            }
+        }
+        let unchecked = "media-7.whatsapp.net";
+        knowledge.hosts.get_mut(unchecked).unwrap().checked_at = 0;
+        knowledge
+            .hosts
+            .get_mut("media-1.whatsapp.net")
+            .unwrap()
+            .checked_at = 1;
+        knowledge
+            .hosts
+            .get_mut("media-0.whatsapp.net")
+            .unwrap()
+            .observed_at = 30;
+        let selected = knowledge.due(DAY + 10, false, |_| true);
+        assert_eq!(selected.len(), MAX_HOSTS);
+        assert_eq!(selected.first().map(String::as_str), Some(unchecked));
+        assert_eq!(selected[1], "media-1.whatsapp.net");
+        assert_eq!(knowledge.due(11, true, |_| true).len(), MAX_HOSTS);
+        assert_eq!(knowledge.due(11, false, |_| true), [unchecked]);
+        assert!(knowledge.due(DAY + 10, true, |_| false).is_empty());
+    }
 
     #[test]
     fn observed_names_are_candidates_and_saved_snapshot_survives_corruption() {
