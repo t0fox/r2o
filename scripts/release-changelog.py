@@ -13,6 +13,8 @@ import tempfile
 import time
 import unicodedata
 
+from release_notes import load_release_notes
+
 
 MODEL_URL = (
     "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/"
@@ -28,7 +30,8 @@ NO_CHANGES = "- Изменений с предыдущего выпуска не
 INTERNAL_ONLY = "- Обновили внутренние инструменты проекта."
 NOTE_ACTIONS = ("Исправили", "Добавили", "Обновили", "Разделили", "Убрали", "Уточнили")
 INTERNAL_COMMIT = re.compile(r"^(?:(?:ci|docs|style|test)(?:\(|!:|:)|[a-z]+\((?:release|changelog|ci|build)\)!?:)")
-PRODUCT_PATHS = (".", ":(exclude).github", ":(exclude)scripts/*release*", ":(exclude)scripts/*changelog*",
+PRODUCT_PATHS = (".", ":(exclude).github", ":(exclude).changes", ":(exclude)AGENTS.md",
+                 ":(exclude)scripts/*release*", ":(exclude)scripts/*changelog*",
                  ":(exclude)docs")
 COMPONENTS = {
     "discovery": "Discovery и подключения", "catalog": "Каталог стратегий",
@@ -381,17 +384,24 @@ def generate(notes, base_tag, head, model):
     coverage = {"range": revisions, "skipped": skipped, "changes": []}
     if not changes:
         return result(INTERNAL_ONLY, "internal-only", coverage=coverage)
-    summaries, sources = {}, {}
+    try:
+        summaries, fragments = load_release_notes(revisions, head, changes)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"Проверенные заметки недоступны, использую резерв: {error}", file=sys.stderr)
+        summaries, fragments = {}, {}
+    sources = {change_id: "release-note" for change_id in summaries}
+    missing = [change for change in changes if change["id"] not in summaries]
     model_verified = False
     with tempfile.TemporaryDirectory(prefix="r2o-changelog-") as temporary:
         directory = Path(temporary)
         try:
-            llama = install(directory, "ggml-org/llama.cpp", LLAMA_TAG,
-                            f"llama-{LLAMA_TAG}-bin-ubuntu-x64.tar.gz", LLAMA_SHA256, "llama-completion")
-            download(MODEL_URL, model, MODEL_SHA256, 420)
-            model_verified = True
+            if missing:
+                llama = install(directory, "ggml-org/llama.cpp", LLAMA_TAG,
+                                f"llama-{LLAMA_TAG}-bin-ubuntu-x64.tar.gz", LLAMA_SHA256, "llama-completion")
+                download(MODEL_URL, model, MODEL_SHA256, 420)
+                model_verified = True
             deadline = time.monotonic() + MODEL_BUDGET_SECONDS
-            for batch in make_batches(changes):
+            for batch in make_batches(missing):
                 remaining = deadline - time.monotonic()
                 if remaining < 30:
                     print("Бюджет Qwen3 исчерпан; оставшиеся изменения попадут в резервный список", file=sys.stderr)
@@ -411,7 +421,8 @@ def generate(notes, base_tag, head, model):
         for change_id, lines in summaries.items():
             for line in lines:
                 if line in owners:
-                    duplicates.update((owners[line], change_id))
+                    duplicates.update(owner for owner in (owners[line], change_id)
+                                      if sources[owner] == "qwen3")
                 owners[line] = change_id
         for change_id in duplicates:
             del summaries[change_id]
@@ -426,7 +437,8 @@ def generate(notes, base_tag, head, model):
     for change in changes:
         coverage["changes"].append({"id": change["id"], "commits": change["commits"],
                                     "subject": change["subject"], "component": change["component"],
-                                    "source": sources[change["id"]], "notes": summaries[change["id"]]})
+                                    "source": sources[change["id"]], "notes": summaries[change["id"]],
+                                    "fragments": fragments.get(change["id"], [])})
     source = "+".join(dict.fromkeys(sources.values()))
     return result(body, source, model_verified, coverage)
 
@@ -438,9 +450,23 @@ def apply_notes(manifest, notes):
     manifest.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
 
 
+def needs_model(base_tag, head):
+    revisions = release_range(base_tag, head)
+    changes, _ = collect_changes(revisions)
+    if not changes:
+        return False
+    try:
+        summaries, _ = load_release_notes(revisions, head, changes)
+        return any(change["id"] not in summaries for change in changes)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return True
+
+
 def main(command, *args):
     if command == "cache-key":
         print(f"r2o-changelog-qwen3-4b-q4_k_m-{MODEL_SHA256}")
+    elif command == "needs-model":
+        print(str(needs_model(*args)).lower())
     elif command == "generate":
         base_tag, head, model = args
         generated = generate(os.environ.get("MANUAL_NOTES", ""), base_tag, head, Path(model))

@@ -98,9 +98,11 @@ jobs:
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
           key=$(python3 -B scripts/release-changelog.py cache-key)
           printf 'cache_key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+          model_needed=$(python3 -B scripts/release-changelog.py needs-model "$tag" "$GITHUB_SHA")
+          printf 'needs_model=%s\n' "$model_needed" >> "$GITHUB_OUTPUT"
       - name: Восстановить кеш модели
         id: model-cache
-        if: inputs.notes == ''
+        if: inputs.notes == '' && steps.base.outputs.needs_model == 'true'
         continue-on-error: true
         timeout-minutes: 3
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

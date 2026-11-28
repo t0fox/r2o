@@ -235,6 +235,7 @@ class ChangelogTests(unittest.TestCase):
             patch.object(changelog, "release_range", return_value="old..new"),
             patch.object(changelog, "git", return_value="src/change.rs"),
             patch.object(changelog, "collect_changes", return_value=(changes, [])),
+            patch.object(changelog, "load_release_notes", return_value=({}, {})),
             patch.object(changelog, "make_batches", return_value=[[item] for item in changes]),
             patch.object(changelog, "install", side_effect=[Path("llama-completion"), Path("git-cliff")]),
             patch.object(changelog, "download"),
@@ -260,6 +261,7 @@ class ChangelogTests(unittest.TestCase):
             patch.object(changelog, "release_range", return_value="old..new"),
             patch.object(changelog, "git", return_value="src/change.rs"),
             patch.object(changelog, "collect_changes", return_value=(changes, [])),
+            patch.object(changelog, "load_release_notes", return_value=({}, {})),
             patch.object(changelog, "install", side_effect=OSError("загрузка недоступна")),
         ):
             result = changelog.generate("", "r2o-old", "0" * 40, Path("/unused"))
@@ -279,6 +281,7 @@ class ChangelogTests(unittest.TestCase):
             patch.object(changelog, "release_range", return_value="old..new"),
             patch.object(changelog, "git", return_value="src/change.rs"),
             patch.object(changelog, "collect_changes", return_value=(changes, [])),
+            patch.object(changelog, "load_release_notes", return_value=({}, {})),
             patch.object(changelog, "make_batches", return_value=[[item] for item in changes]),
             patch.object(changelog, "install", return_value=Path("llama-completion")),
             patch.object(changelog, "download"),
@@ -303,6 +306,7 @@ class ChangelogTests(unittest.TestCase):
             patch.object(changelog, "release_range", return_value="old..new"),
             patch.object(changelog, "git", return_value="src/change.rs"),
             patch.object(changelog, "collect_changes", return_value=(changes, [])),
+            patch.object(changelog, "load_release_notes", return_value=({}, {})),
             patch.object(changelog, "make_batches", return_value=[[item] for item in changes]),
             patch.object(changelog, "install", return_value=Path("llama-completion")),
             patch.object(changelog, "download"),
@@ -328,6 +332,79 @@ class ChangelogTests(unittest.TestCase):
                 with self.subTest(invalid=invalid[:30]), self.assertRaises(ValueError):
                     changelog.apply_notes(manifest, invalid)
                 self.assertEqual(json.loads(manifest.read_bytes()), expected)
+
+    def test_reviewed_fragments_supply_exact_full_body_without_model_or_download(self):
+        changes = [change(number) for number in range(1, 4)]
+        reviewed = {item["id"]: [
+            f"- Исправили отдельный случай {index}-{number}: " + "проверку ответа сервера " * 8 + "."
+            for number in range(4)] for index, item in enumerate(changes)}
+        provenance = {item["id"]: [f".changes/reviewed-{index}.json"]
+                      for index, item in enumerate(changes)}
+        expected = "### Discovery\n\n" + "\n".join(line for lines in reviewed.values() for line in lines)
+        self.assertGreater(len(expected.encode("utf-8")), 4096)
+        with (
+            patch.object(changelog, "release_range", return_value="old..new"),
+            patch.object(changelog, "git", return_value="src/change.rs"),
+            patch.object(changelog, "collect_changes", return_value=(changes, [])),
+            patch.object(changelog, "load_release_notes", return_value=(reviewed, provenance)) as fragments,
+            patch.object(changelog, "install", side_effect=AssertionError("модель не нужна")),
+            patch.object(changelog, "download", side_effect=AssertionError("скачивание не нужно")),
+            patch.object(changelog, "run_model", side_effect=AssertionError("генерация не нужна")),
+            patch.object(changelog, "fallback_notes", side_effect=AssertionError("резерв не нужен")),
+        ):
+            result = changelog.generate("", "r2o-old", "0" * 40, Path("/unused"))
+        fragments.assert_called_once_with("old..new", "0" * 40, changes)
+        self.assertEqual(result["body"], expected)
+        self.assertEqual(result["source"], "release-note")
+        self.assertFalse(result["model_verified"])
+        changelog.validate_manifest_notes(result["notes"])
+        self.assertIn("полн", result["notes"].lower())
+        for item in result["coverage"]["changes"]:
+            self.assertEqual(item["fragments"], provenance[item["id"]])
+            self.assertEqual(item["source"], "release-note")
+
+    def test_partial_fragments_are_preserved_when_generated_note_repeats_reviewed_prose(self):
+        changes = [change(number) for number in range(1, 4)]
+        reviewed = {changes[0]["id"]: [EXAMPLE]}
+        independent_note = "- Убрали полное клонирование каталога при синхронизации."
+        generated = {changes[1]["id"]: [EXAMPLE], changes[2]["id"]: [independent_note]}
+        fallback = {changes[1]["id"]: [f"- {changes[1]['subject']}."]}
+        with (
+            patch.object(changelog, "release_range", return_value="old..new"),
+            patch.object(changelog, "git", return_value="src/change.rs"),
+            patch.object(changelog, "collect_changes", return_value=(changes, [])),
+            patch.object(changelog, "load_release_notes", return_value=(reviewed, {})),
+            patch.object(changelog, "install", return_value=Path("llama-completion")),
+            patch.object(changelog, "download"),
+            patch.object(changelog, "run_model", return_value=generated) as model,
+            patch.object(changelog, "fallback_notes", return_value=(fallback, "git")) as reserve,
+        ):
+            result = changelog.generate("", "r2o-old", "0" * 40, Path("/unused"))
+        model.assert_called_once()
+        self.assertEqual(model.call_args.args[2], changes[1:])
+        self.assertEqual(reserve.call_args.args[0], [changes[1]])
+        self.assertEqual(result["body"].count(EXAMPLE), 1)
+        self.assertIn(independent_note, result["body"])
+        self.assertIn(changes[1]["subject"], result["body"])
+        self.assertEqual({item["id"]: item["source"] for item in result["coverage"]["changes"]},
+                         {changes[0]["id"]: "release-note", changes[1]["id"]: "git",
+                          changes[2]["id"]: "qwen3"})
+
+    def test_malformed_fragments_fall_back_to_complete_source_list(self):
+        changes = [change(1), change(2)]
+        with (
+            patch.object(changelog, "release_range", return_value="old..new"),
+            patch.object(changelog, "git", return_value="src/change.rs"),
+            patch.object(changelog, "collect_changes", return_value=(changes, [])),
+            patch.object(changelog, "load_release_notes", side_effect=ValueError("некорректный фрагмент")),
+            patch.object(changelog, "install", side_effect=OSError("загрузка недоступна")),
+        ):
+            result = changelog.generate("", "r2o-old", "0" * 40, Path("/unused"))
+        for item in changes:
+            self.assertIn(item["subject"], result["body"])
+        self.assertEqual(len(result["coverage"]["changes"]), len(changes))
+        self.assertEqual(result["source"], "git")
+        self.assertFalse(result["model_verified"])
 
     def test_published_tag_controls_range_even_with_newer_local_tag(self):
         with repository() as (git, commit):
