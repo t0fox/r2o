@@ -9,12 +9,13 @@ TEMP=$(mktemp -d "$TEMP_BASE/r2o-process-supervisor.XXXXXX")
 case "$TEMP" in "$TEMP_BASE"/r2o-process-supervisor.*) ;; *) exit 2 ;; esac
 trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 
-INIT=$ROOT/router/S99r2o
+INIT=$TEMP/S99r2o
 TEST_ROOT=$TEMP/root
 CONFIG=$TEMP/config
 RUNTIME=$TEMP/runtime
-FIREWALL=$TEMP/firewall
+FIREWALL=$TEMP/r2o-firewall.sh
 mkdir -p "$TEST_ROOT" "$RUNTIME"
+cp "$ROOT/router/S99r2o" "$INIT"
 cat >"$CONFIG" <<EOF
 MODE=observe
 QUEUE_NUM=2000
@@ -30,6 +31,7 @@ STATE_DIR=$TEMP/state
 EOF
 cat >"$FIREWALL" <<'EOF'
 #!/bin/sh
+[ "${1:-}" != backend ] || echo iptables
 exit 0
 EOF
 chmod 0755 "$FIREWALL"
@@ -94,4 +96,45 @@ run_init stop >"$TEMP/stop.log" 2>&1 || {
     exit 1
 }
 
+# Model BusyBox variants with and without fractional sleep. Keeping the
+# clock in the test shell also checks that the fallback is detected once.
+sed -n '/^wait_ticks=1$/p; /^wait_tick() {$/,/^}$/p; /^wait_until() {$/,/^}$/p; /^queue_ready() {$/,/^}$/p; /^wait_queue() {$/,/^}$/p' \
+    "$INIT" >"$TEMP/poll.sh"
+(
+    . "$TEMP/poll.sh"
+    elapsed=0
+    fractional_attempts=0
+    sleep() {
+        case "$1" in
+            0.1) fractional_attempts=$((fractional_attempts + 1)); return 1 ;;
+            1) elapsed=$((elapsed + 10)) ;;
+            *) return 2 ;;
+        esac
+    }
+    queue_bound() { return 1; }
+    if wait_queue 2000 "$TEMP/absent.sock"; then
+        echo 'NFQUEUE reported ready with no queue or control socket' >&2
+        exit 1
+    fi
+    [ "$elapsed" -eq 50 ]
+    [ "$fractional_attempts" -eq 1 ]
+    elapsed=0
+    ready() { [ "$elapsed" -eq 20 ]; }
+    wait_until 20 ready
+    [ "$elapsed" -eq 20 ]
+    [ "$fractional_attempts" -eq 1 ]
+)
+(
+    . "$TEMP/poll.sh"
+    elapsed=0
+    sleep() {
+        [ "$1" = 0.1 ] || return 1
+        elapsed=$((elapsed + 1))
+    }
+    ready() { [ "$elapsed" -eq 50 ]; }
+    wait_until 50 ready
+    [ "$elapsed" -eq 50 ]
+)
+
 printf '%s\n' 'R2O process recovery respects explicit stop and retries an enabled failed service: PASS'
+printf '%s\n' 'R2O service and NFQUEUE polling preserve deadlines with integer-only and fractional sleep: PASS'

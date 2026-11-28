@@ -5543,6 +5543,32 @@ fn r2o_discovery_mark_partial_rx_inconclusive(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_settle_direct_http(
+    outcome: &mut DiscoveryOutcome,
+    rx: Option<&r2o_controller::fetch::R2oFetchVolumeRxResult>,
+) {
+    if rx.is_some_and(|rx| rx.direct_complete) {
+        r2o_discovery_meta_set(&outcome.target, true, outcome.target.shape);
+        outcome.detail.push_str("; получен полный HTTP-ответ");
+        return;
+    }
+    if let Some(first) = rx.and_then(|rx| rx.first.as_ref())
+        && r2o_discovery_mark_partial_rx_inconclusive(outcome, &first.r2o_volume_observation, false)
+    {
+        return;
+    }
+    outcome.direct_clear = false;
+    outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+    outcome
+        .detail
+        .push_str("; TLS прошёл, полный HTTP-ответ не подтверждён");
+    if let Some(rx) = rx.filter(|rx| !rx.reason.is_empty()) {
+        outcome.detail.push_str(": ");
+        outcome.detail.push_str(&rx.reason);
+    }
+}
+
+#[cfg(unix)]
 fn r2o_discovery_volume_fingerprint(
     tx: &Result<r2o_controller::fetch::R2oFetchVolumeTxResult, String>,
     rx: &r2o_controller::fetch::R2oFetchVolumeRxResult,
@@ -12994,9 +13020,28 @@ struct R2oDiscoveryVolumeSearch {
 }
 
 #[cfg(unix)]
+struct R2oCarriedRx {
+    endpoint: String,
+    search: R2oDiscoveryVolumeSearch,
+}
+
+#[cfg(unix)]
+impl R2oCarriedRx {
+    fn covers(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        now: std::time::Instant,
+    ) -> bool {
+        self.endpoint == target.endpoint
+            && self.search.rx.evidence.is_some()
+            && now.saturating_duration_since(self.search.measured_at) < R2O_DISCOVERY_TASK_LIFETIME
+    }
+}
+
+#[cfg(unix)]
 #[derive(Default)]
 struct R2oDiscoveryVolumeSearchCache {
-    carried_rx: HashMap<R2oDiscoveryTaskKey, R2oDiscoveryVolumeSearch>,
+    carried_rx: HashMap<R2oDiscoveryTaskKey, R2oCarriedRx>,
     entries: VecDeque<(
         r2o_controller::discovery::DiscoveryTarget,
         R2oDiscoveryVolumeSearch,
@@ -13044,9 +13089,9 @@ impl R2oDiscoveryVolumeSearchCache {
     /// C `remeasure_snapped` его не стирает. Стираются только испытанные
     /// тексты/курсор, чтобы новый поиск не пропустил кандидатов.
     fn reset_carried_cursor(&mut self, task_key: &R2oDiscoveryTaskKey) {
-        if let Some(search) = self.carried_rx.get_mut(task_key) {
-            search.next_candidate = 0;
-            search.tried_plans.clear();
+        if let Some(carried) = self.carried_rx.get_mut(task_key) {
+            carried.search.next_candidate = 0;
+            carried.search.tried_plans.clear();
         }
     }
 
@@ -13062,12 +13107,18 @@ impl R2oDiscoveryVolumeSearchCache {
         else {
             return;
         };
-        let Some((_, mut search)) = self.entries.remove(index) else {
+        let Some((measured_target, mut search)) = self.entries.remove(index) else {
             return;
         };
         if search.rx.evidence.is_some() {
             search.next_candidate = 0;
-            self.carried_rx.insert(task_key.clone(), search);
+            self.carried_rx.insert(
+                task_key.clone(),
+                R2oCarriedRx {
+                    endpoint: measured_target.endpoint,
+                    search,
+                },
+            );
         }
     }
 
@@ -13080,6 +13131,8 @@ impl R2oDiscoveryVolumeSearchCache {
     ) -> Option<R2oDiscoveryVolumeSearch> {
         self.carried_rx
             .remove(task_key)
+            .filter(|carried| carried.covers(target, now))
+            .map(|carried| carried.search)
             .or_else(|| self.get(target, key, now))
     }
 
@@ -13093,7 +13146,7 @@ impl R2oDiscoveryVolumeSearchCache {
         if self
             .carried_rx
             .get(task_key)
-            .is_some_and(|search| r2o_discovery_volume_cut(&search.tx, &search.rx))
+            .is_some_and(|carried| carried.covers(target, now))
         {
             return true;
         }
@@ -13426,22 +13479,31 @@ fn r2o_say_quiet(key: &str, line: String) {
     }
 }
 
-/// C `client_ip_of` по ключу потока: клиент — противоположный серверу конец.
+/// Direction inferred for clean-handshake and legacy events without a side bit.
 #[cfg(unix)]
-fn r2o_clean_handshake_client_ip(key: &[u8; r2k_core::control::KEY_LEN]) -> [u8; 16] {
-    let low_ip: [u8; 16] = key[1..17].try_into().unwrap_or_default();
-    let high_ip: [u8; 16] = key[17..33].try_into().unwrap_or_default();
+fn r2o_clean_handshake_client_is_low(key: &[u8; r2k_core::control::KEY_LEN]) -> bool {
     let low_port = u16::from_be_bytes([key[33], key[34]]);
     let high_port = u16::from_be_bytes([key[35], key[36]]);
-    r2o_controller::discovery::client_ip_of(key[0], low_ip, high_ip, low_port, high_port)
+    !r2o_controller::discovery::server_is_low(low_port, high_port)
 }
 
-/// C `clean_hs_seen`: ключ — имя + транспорт + семейство + IP клиента.
-/// Раньше Rust хранил только имя/семейство и гасил подозрение ЧУЖОГО клиента.
+#[cfg(unix)]
+type R2oHandshakeEndpoints = (std::net::IpAddr, std::net::SocketAddr);
+
+#[cfg(unix)]
+fn r2o_handshake_endpoints(
+    key: &[u8; r2k_core::control::KEY_LEN],
+    client_is_low: bool,
+) -> R2oHandshakeEndpoints {
+    let (client, server) = flow_socket_addresses(key, client_is_low);
+    (client.ip(), server)
+}
+
+/// Evidence is shared by connections to one server endpoint from the same client IP.
 #[cfg(unix)]
 #[derive(Default)]
 struct R2oCleanHandshakeCache {
-    entries: VecDeque<(String, u8, u8, [u8; 16], std::time::Instant)>,
+    entries: VecDeque<(String, u8, u8, R2oHandshakeEndpoints, std::time::Instant)>,
 }
 
 #[cfg(unix)]
@@ -13451,18 +13513,18 @@ impl R2oCleanHandshakeCache {
         name: &str,
         transport: u8,
         family: u8,
-        client_ip: [u8; 16],
+        endpoints: R2oHandshakeEndpoints,
         now: std::time::Instant,
     ) {
         self.entries.retain(|(_, _, _, _, seen)| {
             now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL
         });
         if let Some((_, _, _, _, seen)) = self.entries.iter_mut().find(
-            |(entry_name, entry_transport, entry_family, entry_ip, _)| {
+            |(entry_name, entry_transport, entry_family, entry_endpoints, _)| {
                 entry_name == name
                     && *entry_transport == transport
                     && *entry_family == family
-                    && *entry_ip == client_ip
+                    && *entry_endpoints == endpoints
             },
         ) {
             *seen = now;
@@ -13472,7 +13534,7 @@ impl R2oCleanHandshakeCache {
             self.entries.pop_front();
         }
         self.entries
-            .push_back((name.to_owned(), transport, family, client_ip, now));
+            .push_back((name.to_owned(), transport, family, endpoints, now));
     }
 
     fn r2o_recent(
@@ -13480,68 +13542,33 @@ impl R2oCleanHandshakeCache {
         name: &str,
         transport: u8,
         family: u8,
-        client_ip: [u8; 16],
+        endpoints: R2oHandshakeEndpoints,
         now: std::time::Instant,
     ) -> bool {
         self.entries.iter().any(
-            |(entry_name, entry_transport, entry_family, entry_ip, seen)| {
+            |(entry_name, entry_transport, entry_family, entry_endpoints, seen)| {
                 entry_name == name
                     && *entry_transport == transport
                     && *entry_family == family
-                    && *entry_ip == client_ip
+                    && *entry_endpoints == endpoints
                     && now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL
             },
         )
     }
-
-    fn suppresses_unplanned_tcp_suspicion(
-        &self,
-        name: &str,
-        transport: u8,
-        family: u8,
-        client_ip: [u8; 16],
-        planned: bool,
-        now: std::time::Instant,
-    ) -> bool {
-        !planned && self.r2o_recent(name, transport, family, client_ip, now)
-    }
 }
 
-/// Клиентский адрес R2O-события по ключу потока и признаку `client_is_low`.
-/// Для v48 направление известно из события, а не выводится по портам.
-#[cfg(unix)]
-fn r2o_event_client_ip(key: &[u8; r2k_core::control::KEY_LEN], client_is_low: bool) -> [u8; 16] {
-    let (client, _) = flow_socket_addresses(key, client_is_low);
-    let mut ip = [0_u8; 16];
-    match client.ip() {
-        std::net::IpAddr::V4(address) => ip[..4].copy_from_slice(&address.octets()),
-        std::net::IpAddr::V6(address) => ip.copy_from_slice(&address.octets()),
-    }
-    ip
-}
-
-/// C `on_suspect`: чистое рукопожатие гасит все подозрения уровня
-/// рукопожатия — RST, повтор ClientHello и молчание (коды 1/2/3). Защитно
-/// снятый RST (4) и поздние коды (5/6/8) остаются уликами.
-///
-/// Это ровно условие D2O `sched.c` (`ev->code == RST || REPEAT || SILENT`)
-/// при `ev->planned != PLANNED_YES`. Раньше здесь был только `code == 1`,
-/// поэтому повтор или молчание после чистого рукопожатия запускали полный
-/// перебор по имени, которое уже работало.
 #[cfg(unix)]
 fn r2o_suspect_clean_handshake_suppressed(
     cache: &R2oCleanHandshakeCache,
     name: &str,
     family: u8,
-    client_ip: [u8; 16],
+    endpoints: R2oHandshakeEndpoints,
     planned: bool,
     code: u8,
     now: std::time::Instant,
 ) -> bool {
-    // Чистое TLS-рукопожатие доказывает лишь то, что имя не рвётся
-    // поддельным RST. Молчание и повтор ClientHello оно не опровергает:
-    // коробка может пропустить часть потоков и задержать остальные.
-    code == 1 && cache.suppresses_unplanned_tcp_suspicion(name, 6, family, client_ip, planned, now)
+    // A clean handshake only counters a prior unplanned early reset.
+    code == 1 && !planned && cache.r2o_recent(name, 6, family, endpoints, now)
 }
 
 #[cfg(unix)]
@@ -18035,9 +18062,11 @@ impl DiscoveryWorker {
             } else {
                 None
             };
-            if let Some(catalog) = candidate_catalog.as_deref()
-                && (geneva_midpoint.is_some()
-                    || !r2o_controller::discovery::own_first_plans(
+            let mut first_own_batch = candidate_catalog
+                .as_deref()
+                .filter(|_| geneva_midpoint.is_none())
+                .map(|catalog| {
+                    r2o_controller::discovery::own_first_plans(
                         catalog,
                         &target,
                         ech_replay,
@@ -18045,7 +18074,12 @@ impl DiscoveryWorker {
                         &own_tried,
                         &own_seen,
                     )
-                    .is_empty())
+                });
+            if let Some(catalog) = candidate_catalog.as_deref()
+                && (geneva_midpoint.is_some()
+                    || first_own_batch
+                        .as_ref()
+                        .is_some_and(|batch| !batch.is_empty()))
                 && let Ok(trigger) =
                     r2o_discovery_trigger(&target, client_hello.as_deref(), ech_config.as_ref())
             {
@@ -18116,14 +18150,16 @@ impl DiscoveryWorker {
                         {
                             break;
                         }
-                        let batch = r2o_controller::discovery::own_first_plans(
-                            catalog,
-                            &target,
-                            ech_replay,
-                            own_bound_plan_id.as_deref(),
-                            &own_tried,
-                            &own_seen,
-                        );
+                        let batch = first_own_batch.take().unwrap_or_else(|| {
+                            r2o_controller::discovery::own_first_plans(
+                                catalog,
+                                &target,
+                                ech_replay,
+                                own_bound_plan_id.as_deref(),
+                                &own_tried,
+                                &own_seen,
+                            )
+                        });
                         if batch.is_empty() {
                             break;
                         }
@@ -18624,7 +18660,11 @@ group_block_proven: false,
                     "; ECH-конфигурация имени не подтверждена — веду ClientHello как TLS 1.3 GREASE",
                 );
             }
+            let direct_http_pending = r2o_discovery_volume_recovery_eligible(&outcome);
             if cancel.load(Ordering::Relaxed) {
+                if direct_http_pending {
+                    r2o_discovery_settle_direct_http(&mut outcome, None);
+                }
                 return outcome;
             }
             let suspect_fingerprint = runner_suspect_fingerprints
@@ -18845,6 +18885,11 @@ group_block_proven: false,
                             "выведен из замера",
                         );
                 }
+                return outcome;
+            }
+            if direct_http_pending {
+                // An incomplete HTTP exchange without a proved cut does
+                // not justify a plan search or a direct-clear cooldown.
                 return outcome;
             }
             let mut owned_fallback_queue = None;
@@ -22208,6 +22253,7 @@ group_block_proven: false,
         }
         if let Some((_, _, trigger_planned)) = self.pending_rechecks.get_mut(&task_key) {
             *trigger_planned |= work.trigger_planned;
+            let _ = r2o_discovery_meta_take(&outcome.target);
             if r2o_discovery_volume_challenge_outcome(&outcome) {
                 self.r2o_record_discovery_challenge(&outcome.target, std::time::Instant::now());
             }
@@ -22251,6 +22297,7 @@ group_block_proven: false,
         }
         if self.r2o_recheck_changed_client_shape(&work) {
             self.r2o_carry_proven_rx_for_snapshot(&outcome.target, &task_key);
+            let _ = r2o_discovery_meta_take(&outcome.target);
             if self.active.get(&task_key) == Some(&outcome.target) {
                 self.active.remove(&task_key);
             }
@@ -23287,6 +23334,7 @@ fn r2o_discovery_volume_recovery(
                     outcome
                         .detail
                         .push_str(&format!("; объёмная проба пропущена: {error}"));
+                    r2o_discovery_settle_direct_http(outcome, None);
                     return false;
                 }
             };
@@ -23339,15 +23387,7 @@ fn r2o_discovery_volume_recovery(
     });
 
     if !r2o_discovery_volume_cut(&search.tx, &search.rx) {
-        if search.rx.evidence.is_none()
-            && let Some(first) = search.rx.first.as_ref()
-        {
-            r2o_discovery_mark_partial_rx_inconclusive(
-                outcome,
-                &first.r2o_volume_observation,
-                false,
-            );
-        }
+        r2o_discovery_settle_direct_http(outcome, Some(&search.rx));
         return false;
     }
 
@@ -24335,16 +24375,11 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             | Verdict::Poisonable
             | Verdict::Flaky
     );
-    let rx_direct_complete = result
-        .response
-        .as_ref()
-        .is_some_and(|response| response.verdict == ResponseVerdict::Clear);
     let props_eligible = !timed_out
         && result.verdict == Verdict::Opaque
         && r2o_discovery_transport(&target) == 6
         && !measured_arm
         && !search_owned;
-    r2o_discovery_meta_set(&target, rx_direct_complete, target.shape);
     (
         DiscoveryOutcome {
             target,
@@ -26778,6 +26813,7 @@ impl ControlClient {
                         {
                             let _ = r2o_confirmed_proof_take(&target);
                             let _ = r2o_budget_cut_pending_take(&target);
+                            let _ = r2o_discovery_meta_take(&target);
                             continue;
                         }
                         // Синтетическая проверка относится к конкретному имени и адресу.
@@ -26822,6 +26858,7 @@ impl ControlClient {
                     if active_dns || measured_dns || configured_tcp_dns {
                         let _ = r2o_confirmed_proof_take(&target);
                         let _ = r2o_budget_cut_pending_take(&target);
+                        let _ = r2o_discovery_meta_take(&target);
                         // Итог адресного плана публикует карточка DNS после повторной проверки.
                         let task = r2o_discovery_task_key(&target);
                         worker
@@ -28698,7 +28735,7 @@ impl ControlClient {
                                 &clean_handshakes,
                                 &target.host,
                                 target.family,
-                                r2o_event_client_ip(&event.key, event.client_is_low),
+                                r2o_handshake_endpoints(&event.key, event.client_is_low),
                                 event.planned,
                                 3,
                                 now,
@@ -28845,7 +28882,7 @@ impl ControlClient {
                             &clean_handshakes,
                             &target.host,
                             target.family,
-                            r2o_event_client_ip(&event.key, event.client_is_low),
+                            r2o_handshake_endpoints(&event.key, event.client_is_low),
                             event.planned,
                             1,
                             now,
@@ -28941,7 +28978,7 @@ impl ControlClient {
                             &clean_handshakes,
                             &target.host,
                             target.family,
-                            r2o_event_client_ip(&event.key, event.client_is_low),
+                            r2o_handshake_endpoints(&event.key, event.client_is_low),
                             event.planned,
                             2,
                             now,
@@ -29705,7 +29742,10 @@ impl ControlClient {
                             &name,
                             6,
                             event.key[0],
-                            r2o_clean_handshake_client_ip(&event.key),
+                            r2o_handshake_endpoints(
+                                &event.key,
+                                r2o_clean_handshake_client_is_low(&event.key),
+                            ),
                             now,
                         );
                     }
@@ -31076,7 +31116,7 @@ impl ControlClient {
             clean_handshakes,
             &target.host,
             target.family,
-            r2o_clean_handshake_client_ip(&event.key),
+            r2o_handshake_endpoints(&event.key, r2o_clean_handshake_client_is_low(&event.key)),
             planned,
             event.code,
             now,
@@ -31265,7 +31305,10 @@ impl ControlClient {
                     &name,
                     6,
                     event.key[0],
-                    r2o_clean_handshake_client_ip(&event.key),
+                    r2o_handshake_endpoints(
+                        &event.key,
+                        r2o_clean_handshake_client_is_low(&event.key),
+                    ),
                     now,
                 );
                 println!(
@@ -49962,31 +50005,28 @@ mod tests {
         key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
         key[35..37].copy_from_slice(&443_u16.to_be_bytes());
         key[37] = 6;
+        let server = "198.51.100.80:443".parse().unwrap();
+        let client_a = ("192.0.2.10".parse().unwrap(), server);
+        let client_b = ("192.0.2.11".parse().unwrap(), server);
         assert_eq!(
-            super::r2o_clean_handshake_client_ip(&key),
-            client_a,
-            "C client_ip_of: клиент — противоположный серверу конец"
+            super::r2o_handshake_endpoints(&key, super::r2o_clean_handshake_client_is_low(&key)),
+            client_a
         );
         let mut cache = super::R2oCleanHandshakeCache::default();
         cache.note("clean.example", 6, 4, client_a, now);
 
         assert!(cache.r2o_recent("clean.example", 6, 4, client_a, now));
-        assert!(cache.suppresses_unplanned_tcp_suspicion(
-            "clean.example",
-            6,
-            4,
-            client_a,
-            false,
-            now
-        ));
-        assert!(!cache.suppresses_unplanned_tcp_suspicion(
-            "clean.example",
-            6,
-            4,
-            client_a,
-            true,
-            now
-        ));
+        for endpoint in ["198.51.100.81:443", "198.51.100.80:8443"] {
+            assert!(!super::r2o_suspect_clean_handshake_suppressed(
+                &cache,
+                "clean.example",
+                4,
+                (client_a.0, endpoint.parse().unwrap()),
+                false,
+                1,
+                now,
+            ));
+        }
         // C `clean_handshake_recent`: чужой IP клиента не гасится.
         assert!(!cache.r2o_recent("clean.example", 6, 4, client_b, now));
         assert!(!cache.r2o_recent("other.example", 6, 4, client_a, now));
@@ -51306,14 +51346,13 @@ mod tests {
     #[test]
     fn d2o_clean_handshake_suppression_matches_c() {
         let now = std::time::Instant::now();
-        let mut client_a = [0_u8; 16];
-        client_a[..4].copy_from_slice(&[192, 0, 2, 10]);
-        let mut client_b = [0_u8; 16];
-        client_b[..4].copy_from_slice(&[192, 0, 2, 11]);
-        let mut client6 = [0_u8; 16];
-        client6.copy_from_slice(&[
-            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
-        ]);
+        let server = "198.51.100.80:443".parse().unwrap();
+        let client_a = ("192.0.2.10".parse().unwrap(), server);
+        let client_b = ("192.0.2.11".parse().unwrap(), server);
+        let client6 = (
+            "2001:db8::10".parse().unwrap(),
+            "[2001:db8::80]:443".parse().unwrap(),
+        );
         let mut cache = super::R2oCleanHandshakeCache::default();
         cache.note("clean.example", 6, 4, client_a, now);
 
@@ -51322,7 +51361,7 @@ mod tests {
                             cache: &super::R2oCleanHandshakeCache,
                             name: &str,
                             family: u8,
-                            client_ip: [u8; 16],
+                            client_ip: super::R2oHandshakeEndpoints,
                             planned: bool,
                             code: u8,
                             at: std::time::Instant| {
@@ -51460,12 +51499,16 @@ mod tests {
         key[35..37].copy_from_slice(&443_u16.to_be_bytes());
         key[37] = 6;
 
-        let mut expected_client = [0_u8; 16];
-        expected_client[..4].copy_from_slice(&[192, 0, 2, 10]);
-        let mut expected_server = [0_u8; 16];
-        expected_server[..4].copy_from_slice(&[198, 51, 100, 80]);
-        assert_eq!(super::r2o_event_client_ip(&key, true), expected_client);
-        assert_eq!(super::r2o_event_client_ip(&key, false), expected_server);
+        let client: std::net::SocketAddr = "192.0.2.10:45000".parse().unwrap();
+        let server: std::net::SocketAddr = "198.51.100.80:443".parse().unwrap();
+        assert_eq!(
+            super::r2o_handshake_endpoints(&key, true),
+            (client.ip(), server)
+        );
+        assert_eq!(
+            super::r2o_handshake_endpoints(&key, false),
+            (server.ip(), client)
+        );
     }
 
     #[test]
@@ -55958,9 +56001,13 @@ mod tests {
             cache
                 .entries
                 .push_back((other.clone(), volume_search(5, vec!["other".into()])));
-            cache
-                .carried_rx
-                .insert(task_key.clone(), volume_search(4, vec!["carried".into()]));
+            cache.carried_rx.insert(
+                task_key.clone(),
+                super::R2oCarriedRx {
+                    endpoint: target.endpoint.clone(),
+                    search: volume_search(4, vec!["carried".into()]),
+                },
+            );
         }
         {
             let mut cursor = worker.ech_rx_cursor.lock().unwrap();
@@ -56015,7 +56062,7 @@ mod tests {
                     .iter()
                     .any(|(candidate, _)| candidate == &other)
             );
-            let carried = cache.carried_rx.get(&task_key).unwrap();
+            let carried = &cache.carried_rx.get(&task_key).unwrap().search;
             assert_eq!(carried.next_candidate, 0);
             assert!(carried.tried_plans.is_empty());
         }
@@ -56044,8 +56091,8 @@ mod tests {
                 .entries
                 .iter()
                 .any(|(candidate, _)| candidate == &target)
-                && cache.carried_rx.get(&task_key).is_some_and(|search| {
-                    search.next_candidate == 0 && search.tried_plans.is_empty()
+                && cache.carried_rx.get(&task_key).is_some_and(|carried| {
+                    carried.search.next_candidate == 0 && carried.search.tried_plans.is_empty()
                 });
             drop(cache);
             let cursor_cleared = !worker.ech_rx_cursor.lock().unwrap().contains_key(&target);
@@ -56929,6 +56976,117 @@ group_block_proven: false,
             ..clear
         };
         assert!(!super::r2o_discovery_volume_recovery_eligible(&expired));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_http_proof_requires_a_complete_response_for_the_measured_endpoint() {
+        use r2o_controller::fetch::R2oFetchVolumeRxResult;
+
+        let target = DiscoveryTarget {
+            tcp_profile: 0,
+            host: "direct-http.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut outcome = super::r2o_own_first_exhausted_outcome(target.clone());
+        outcome.direct_clear = true;
+        super::r2o_discovery_settle_direct_http(
+            &mut outcome,
+            Some(&R2oFetchVolumeRxResult {
+                rx_unmeasured: true,
+                ..Default::default()
+            }),
+        );
+        assert!(!outcome.direct_clear);
+        assert_eq!(
+            outcome.retry_after,
+            Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY)
+        );
+        assert!(super::r2o_discovery_meta_take(&target).is_none());
+
+        let mut outcome = super::r2o_own_first_exhausted_outcome(target.clone());
+        outcome.direct_clear = true;
+        super::r2o_discovery_settle_direct_http(
+            &mut outcome,
+            Some(&R2oFetchVolumeRxResult {
+                direct_complete: true,
+                ..Default::default()
+            }),
+        );
+        assert!(outcome.direct_clear);
+        for endpoint in ["192.0.2.32:443", "192.0.2.31:8443"] {
+            let other = DiscoveryTarget {
+                endpoint: endpoint.into(),
+                ..target.clone()
+            };
+            assert!(super::r2o_discovery_meta_take(&other).is_none());
+        }
+        assert!(
+            super::r2o_discovery_meta_take(&target)
+                .unwrap()
+                .rx_direct_complete
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn carried_rx_proof_stays_with_its_server_address_and_port() {
+        use r2o_controller::r2o_volume::{R2oVolumeRxDomain, R2oVolumeRxEvidence};
+
+        let target = DiscoveryTarget {
+            tcp_profile: 0,
+            host: "carried-rx.example".into(),
+            endpoint: "192.0.2.31:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let now = std::time::Instant::now();
+        let task = super::r2o_discovery_task_key(&target);
+        let key = super::R2oDiscoveryVolumeSearchKey {
+            wire_len: None,
+            send_cap: 1492,
+            probe_path: "/".into(),
+            alternate_path: None,
+            network_probe: false,
+            white_name: String::new(),
+        };
+        let mut cache = super::R2oDiscoveryVolumeSearchCache::default();
+        for endpoint in ["192.0.2.32:443", "192.0.2.31:8443"] {
+            cache.carried_rx.insert(
+                task.clone(),
+                super::R2oCarriedRx {
+                    endpoint: target.endpoint.clone(),
+                    search: super::R2oDiscoveryVolumeSearch {
+                        key: key.clone(),
+                        measured_at: now,
+                        tx: Err("TX probe unavailable".into()),
+                        rx: r2o_controller::fetch::R2oFetchVolumeRxResult {
+                            evidence: Some(R2oVolumeRxEvidence {
+                                domain: R2oVolumeRxDomain::HttpBody,
+                                cut_kb: 20,
+                                expected_kb: 80,
+                                cut_packets: 16,
+                                compressed_complete: false,
+                                reason: String::new(),
+                            }),
+                            ..Default::default()
+                        },
+                        next_candidate: 0,
+                        tried_plans: Vec::new(),
+                    },
+                },
+            );
+            assert!(cache.has_volume_cut_for_run(&target, &task, &key, now));
+            let other = DiscoveryTarget {
+                endpoint: endpoint.into(),
+                ..target.clone()
+            };
+            assert_eq!(super::r2o_discovery_task_key(&other), task);
+            assert!(!cache.has_volume_cut_for_run(&other, &task, &key, now));
+            assert!(cache.get_for_run(&other, &task, &key, now).is_none());
+        }
     }
 
     #[cfg(unix)]
@@ -62677,7 +62835,7 @@ group_block_proven: false,
             let carried = volume_searches
                 .carried_rx
                 .get(&key)
-                .is_some_and(|search| search.rx.evidence.is_some());
+                .is_some_and(|carried| carried.search.rx.evidence.is_some());
             let resumed = volume_searches.get_for_run(
                 &target,
                 &key,

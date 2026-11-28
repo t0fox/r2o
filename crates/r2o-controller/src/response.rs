@@ -2147,11 +2147,12 @@ mod nap_tests {
         // тестовый harness многопоточен: signal может уйти не спящему
         // потоку. Шлём его адресно в текущий поток, как это делает
         // однопоточный C-стенд.
-        let thread = unsafe { libc::pthread_self() };
+        // musl represents pthread_t as an opaque pointer.
+        let thread = unsafe { libc::pthread_self() } as usize;
         let kick = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(20));
             unsafe {
-                libc::pthread_kill(thread, libc::SIGALRM);
+                libc::pthread_kill(thread as libc::pthread_t, libc::SIGALRM);
             }
         });
         let started = Instant::now();

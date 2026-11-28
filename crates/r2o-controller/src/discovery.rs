@@ -6,7 +6,7 @@ use r2k_core::control::{
     r2k_link_shape_tcp_profile,
 };
 use r2k_core::plan::Plan as RuntimePlan;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::catalog::{
@@ -151,13 +151,48 @@ fn newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
     })
 }
 
-#[derive(Clone)]
-struct RankedOwnPlan {
-    candidate: OwnPlanCandidate,
+struct RankedOwnPlan<'a> {
+    box_id: &'a str,
+    plan: &'a Plan,
     lead: bool,
     tier: u8,
-    successes: i32,
+    compatible_successes: i32,
     confirmed: i64,
+}
+
+#[derive(Default)]
+struct SavedPlanPrograms<'a> {
+    texts: HashSet<&'a str>,
+    fixed_splits: HashSet<Vec<u8>>,
+}
+
+impl<'a> SavedPlanPrograms<'a> {
+    fn insert(&mut self, text: &'a str) -> bool {
+        self.texts.insert(text)
+            && fixed_split_program(text).is_none_or(|wire| self.fixed_splits.insert(wire))
+    }
+}
+
+fn fixed_split_program(text: &str) -> Option<Vec<u8>> {
+    let mut has_split = false;
+    for line in text
+        .lines()
+        .map(|line| line.trim_matches([' ', '\t', '\r']))
+    {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match line.split([' ', '\t']).next()? {
+            "split" => has_split = true,
+            "r2o-plan" | "d2k-plan" | "id" | "proto" | "order" => {}
+            _ => return None,
+        }
+    }
+    // Reuse the compiler's parsing, validation and encoding. A failed
+    // compile or a program with other actions only deduplicates by text.
+    has_split
+        .then(|| crate::plan_text::compile_text(text).ok())
+        .flatten()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,7 +268,7 @@ pub fn own_first_plans(
     let mut ranked = Vec::<RankedOwnPlan>::new();
     let mut ranked_by_text = HashMap::new();
     for box_record in &catalog.boxes {
-        let mut best_by_plan = HashMap::<&str, (u8, i64)>::new();
+        let mut best_by_plan = HashMap::<&str, (u8, i32, i64)>::new();
         for binding in &box_record.bindings {
             let transport = if binding.transport == 0 {
                 6
@@ -271,33 +306,33 @@ pub fn own_first_plans(
                 continue;
             }
             let tier = u8::from(binding.shape != want);
-            let best = best_by_plan
-                .entry(binding.plan_id.as_str())
-                .or_insert((tier, binding.confirmed));
-            if tier < best.0 || tier == best.0 && binding.confirmed > best.1 {
-                *best = (tier, binding.confirmed);
+            let best = best_by_plan.entry(binding.plan_id.as_str()).or_insert((
+                tier,
+                0,
+                binding.confirmed,
+            ));
+            if tier < best.0 {
+                *best = (tier, 0, binding.confirmed);
+            }
+            if tier == best.0 {
+                best.1 = best.1.saturating_add(binding.successes.max(1));
+                best.2 = best.2.max(binding.confirmed);
             }
         }
         for plan in &box_record.plans {
             if !plan.enabled || plan.proto != plan_proto || plan.text.len() >= 4096 {
                 continue;
             }
-            let Some(&(tier, confirmed)) = best_by_plan.get(plan.id.as_str()) else {
+            let Some(&(tier, compatible_successes, confirmed)) = best_by_plan.get(plan.id.as_str())
+            else {
                 continue;
             };
-            let hash = crate::r2o_fallback::tried_key(&plan.text);
-            if tried.contains(&hash) || seen.contains(&hash) {
-                continue;
-            }
             let candidate = RankedOwnPlan {
-                candidate: OwnPlanCandidate {
-                    box_id: box_record.id.clone(),
-                    plan_id: plan.id.clone(),
-                    text: plan.text.clone(),
-                },
+                box_id: &box_record.id,
+                plan,
                 lead: bound_plan_id == Some(plan.id.as_str()),
                 tier,
-                successes: plan.successes,
+                compatible_successes,
                 confirmed,
             };
             if let Some(&index) = ranked_by_text.get(plan.text.as_str()) {
@@ -311,19 +346,39 @@ pub fn own_first_plans(
             }
         }
     }
-    ranked.sort_by(|left, right| {
-        right
-            .lead
-            .cmp(&left.lead)
-            .then_with(|| left.tier.cmp(&right.tier))
-            .then_with(|| right.successes.cmp(&left.successes))
-            .then_with(|| right.confirmed.cmp(&left.confirmed))
-    });
+    ranked.sort_by(|left, right| left.rank().cmp(&right.rank()));
+    let mut programs = previously_offered_programs(
+        ranked.iter().map(|entry| entry.plan.text.as_str()),
+        tried,
+        seen,
+    );
     ranked
         .into_iter()
+        .filter(|entry| programs.insert(&entry.plan.text))
         .take(BATCH.min(SEEN_CAP - seen.len()))
-        .map(|ranked| ranked.candidate)
+        .map(|entry| OwnPlanCandidate {
+            box_id: entry.box_id.to_owned(),
+            plan_id: entry.plan.id.clone(),
+            text: entry.plan.text.clone(),
+        })
         .collect()
+}
+
+fn previously_offered_programs<'a>(
+    texts: impl Iterator<Item = &'a str>,
+    tried: &[u64],
+    seen: &[u64],
+) -> SavedPlanPrograms<'a> {
+    let mut programs = SavedPlanPrograms::default();
+    if !tried.is_empty() || !seen.is_empty() {
+        for text in texts {
+            let key = crate::r2o_fallback::tried_key(text);
+            if tried.contains(&key) || seen.contains(&key) {
+                programs.insert(text);
+            }
+        }
+    }
+    programs
 }
 
 /// C `binding_for` (`core/sched.c:4931-4946`): первая name-привязка с
@@ -394,37 +449,28 @@ pub fn known_plans(
                 })
         });
         for plan in &box_record.plans {
-            if !plan.enabled
-                || plan.proto != proto
-                || plan.text.len() >= 4096
-                || tried.contains(&crate::r2o_fallback::tried_key(&plan.text))
-            {
+            if !plan.enabled || plan.proto != proto || plan.text.len() >= 4096 {
                 continue;
             }
             ranked.push((
                 same_volume_bucket,
                 plan.successes,
-                KnownPlanCandidate {
-                    box_id: box_record.id.clone(),
-                    text: plan.text.clone(),
-                },
+                box_record.id.as_str(),
+                plan.text.as_str(),
             ));
         }
     }
     ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
-    let mut plans = Vec::new();
-    for (_, _, candidate) in ranked {
-        if !plans
-            .iter()
-            .any(|saved: &KnownPlanCandidate| saved.text == candidate.text)
-        {
-            plans.push(candidate);
-            if plans.len() == 8 {
-                break;
-            }
-        }
-    }
-    plans
+    let mut programs = previously_offered_programs(ranked.iter().map(|entry| entry.3), tried, &[]);
+    ranked
+        .into_iter()
+        .filter(|entry| programs.insert(entry.3))
+        .take(8)
+        .map(|(_, _, box_id, text)| KnownPlanCandidate {
+            box_id: box_id.to_owned(),
+            text: text.to_owned(),
+        })
+        .collect()
 }
 
 fn volume_bucket(volume: i32) -> i32 {
@@ -508,13 +554,21 @@ pub(crate) fn r2o_box_id_for(
     box_id
 }
 
-fn own_rank_before(left: &RankedOwnPlan, right: &RankedOwnPlan) -> bool {
-    left.lead > right.lead
-        || left.lead == right.lead
-            && (left.tier < right.tier
-                || left.tier == right.tier
-                    && (left.successes > right.successes
-                        || left.successes == right.successes && left.confirmed > right.confirmed))
+impl RankedOwnPlan<'_> {
+    fn rank(&self) -> impl Ord + use<> {
+        use std::cmp::Reverse;
+        (
+            Reverse(self.lead),
+            self.tier,
+            Reverse(self.compatible_successes),
+            Reverse(self.plan.successes),
+            Reverse(self.confirmed),
+        )
+    }
+}
+
+fn own_rank_before(left: &RankedOwnPlan<'_>, right: &RankedOwnPlan<'_>) -> bool {
+    left.rank() < right.rank()
 }
 
 /// C `EPHEMERAL_FROM` (`core/sched.c:1778`): с этого порта начинается
@@ -4920,17 +4974,18 @@ mod tests {
 
     #[test]
     fn own_rank_before_matches_c() {
-        let ranked = |lead: bool, tier: u8, successes: i32, confirmed: i64| super::RankedOwnPlan {
-            candidate: super::OwnPlanCandidate {
-                box_id: "box".into(),
-                plan_id: "plan".into(),
-                text: "plan".into(),
-            },
-            lead,
-            tier,
-            successes,
-            confirmed,
-        };
+        use crate::catalog::Plan;
+
+        fn ranked(plan: &Plan, lead: bool, tier: u8, confirmed: i64) -> super::RankedOwnPlan<'_> {
+            super::RankedOwnPlan {
+                box_id: "box",
+                plan,
+                lead,
+                tier,
+                compatible_successes: 0,
+                confirmed,
+            }
+        }
         let mut output = String::new();
         let mut emit = |label: &str,
                         lead_a: bool,
@@ -4941,8 +4996,16 @@ mod tests {
                         tier_b: u8,
                         successes_b: i32,
                         fresh_b: i64| {
-            let left = ranked(lead_a, tier_a, successes_a, fresh_a);
-            let right = ranked(lead_b, tier_b, successes_b, fresh_b);
+            let plan_a = Plan {
+                successes: successes_a,
+                ..Plan::default()
+            };
+            let plan_b = Plan {
+                successes: successes_b,
+                ..Plan::default()
+            };
+            let left = ranked(&plan_a, lead_a, tier_a, fresh_a);
+            let right = ranked(&plan_b, lead_b, tier_b, fresh_b);
             output.push_str(&format!(
                 "{label}={}\n",
                 u8::from(super::own_rank_before(&left, &right))
@@ -4959,6 +5022,116 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_OWN_RANK_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn saved_plans_rank_compatible_successes_and_skip_fixed_split_aliases() {
+        use crate::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Plan, Signal};
+        use crate::r2o_fallback::tried_key;
+        use r2k_core::control::SHAPE_LEGACY;
+
+        let target = DiscoveryTarget {
+            tcp_profile: 2,
+            host: "target.example".into(),
+            endpoint: "192.0.2.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let observed = Fingerprint {
+            signals: vec![Signal {
+                kind: "rst".into(),
+                ..Signal::default()
+            }],
+            ..Fingerprint::default()
+        };
+        let plain = "r2o-plan 1 10\nproto tcp tls\nsplit payload_start 3\n";
+        let alias = "# same split\nd2k-plan 1 10\nproto\ttcp tls\nsplit payload_start +3\n";
+        let distinct = "r2o-plan 1 10\nproto tcp tls\nsplit payload_start 7\n";
+        let make_box =
+            |id: &str, text: &str, successes: i32, bindings: &[(u8, u8, i32)]| BoxRecord {
+                id: id.into(),
+                fingerprint: observed.clone(),
+                plans: vec![Plan {
+                    id: id.into(),
+                    text: text.into(),
+                    proto: "tls".into(),
+                    enabled: true,
+                    successes,
+                    ..Plan::default()
+                }],
+                bindings: bindings
+                    .iter()
+                    .map(|&(shape, tcp_profile, successes)| Binding {
+                        kind: "name".into(),
+                        target: "other.example".into(),
+                        plan_id: id.into(),
+                        shape,
+                        tcp_profile,
+                        successes,
+                        level: 3,
+                        enabled: true,
+                        ..Binding::default()
+                    })
+                    .collect(),
+                ..BoxRecord::default()
+            };
+        let catalog = Catalog {
+            boxes: vec![
+                make_box("alias", alias, 200, &[(SHAPE_MODERN, 2, 2)]),
+                make_box(
+                    "popular",
+                    distinct,
+                    300,
+                    &[
+                        (SHAPE_LEGACY, 2, 100),
+                        (SHAPE_MODERN, 1, 100),
+                        (SHAPE_MODERN, 2, 3),
+                    ],
+                ),
+                make_box(
+                    "compatible",
+                    plain,
+                    5,
+                    &[(SHAPE_MODERN, 2, 2), (SHAPE_MODERN, 2, 2)],
+                ),
+            ],
+            ..Catalog::default()
+        };
+
+        let own = own_first_plans(&catalog, &target, false, None, &[], &[]);
+        assert_eq!(
+            own.iter()
+                .map(|entry| entry.box_id.as_str())
+                .collect::<Vec<_>>(),
+            ["compatible", "popular"]
+        );
+        let seen = [tried_key(plain)];
+        let next = own_first_plans(&catalog, &target, false, None, &[], &seen);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].text, distinct);
+
+        let known = known_plans(&catalog, &target, &observed, &[]);
+        assert_eq!(
+            known
+                .iter()
+                .map(|entry| entry.box_id.as_str())
+                .collect::<Vec<_>>(),
+            ["popular", "alias"]
+        );
+        let known = known_plans(&catalog, &target, &observed, &seen);
+        assert_eq!(known.len(), 1);
+        assert_eq!(known[0].text, distinct);
+
+        assert!(
+            super::fixed_split_program(
+                "r2o-plan 1 10\nproto tcp tls\nsplit payload_start 3\nfake 1 1 1 0 0 0\n"
+            )
+            .is_none()
+        );
+        assert!(
+            super::fixed_split_program("r2o-plan 1 10\nproto tcp tls\nsplit payload_start bogus\n")
+                .is_none()
+        );
     }
 
     #[test]

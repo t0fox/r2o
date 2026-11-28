@@ -86,6 +86,7 @@ STOP_FAILED=0
 emergency_stop() {
     # D2O uninstall продолжает удаление, даже если init уже снят. Останавливаем
     # только собственные PID-файлы, не трогая чужие процессы.
+    wait_ticks=1
     for pidfile in "$ROOT"/run/*.pid; do
         [ -f "$pidfile" ] || continue
         pid=$(cat "$pidfile" 2>/dev/null) || continue
@@ -94,8 +95,13 @@ emergency_stop() {
         kill -TERM "$pid" 2>/dev/null || true
         attempt=0
         while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
-            attempt=$((attempt + 1))
-            sleep 0.1 2>/dev/null || sleep 1
+            if [ "$wait_ticks" -eq 1 ] && sleep 0.1 2>/dev/null; then
+                attempt=$((attempt + 1))
+            else
+                wait_ticks=10
+                sleep 1 || break
+                attempt=$((attempt + wait_ticks))
+            fi
         done
         kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
     done

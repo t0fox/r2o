@@ -369,6 +369,28 @@ telegram_auxiliary_process() {
     esac
 }
 
+# Entware BusyBox may only accept whole seconds. Count the actual sleep in
+# tenths of a second so the service deadlines are the same on both shells.
+wait_ticks=1
+wait_tick() {
+    if [ "$wait_ticks" -eq 1 ]; then
+        if sleep 0.1 2>/dev/null; then return 0; fi
+        wait_ticks=10
+    fi
+    sleep 1
+}
+
+wait_until() {
+    poll_limit=$1
+    shift
+    poll_elapsed=0
+    while ! "$@"; do
+        [ "$poll_elapsed" -lt "$poll_limit" ] || return 1
+        wait_tick || return 1
+        poll_elapsed=$((poll_elapsed + wait_ticks))
+    done
+}
+
 # Погасить все процессы компонента, даже если pid-файл потерян или
 # перезаписан неудачным запуском. Иначе старый datapath держит NFQUEUE и
 # удалённые control-сокеты, а новый controller не может к ним подключиться.
@@ -407,8 +429,8 @@ stop_component_processes() {
                 kill -KILL "$pid" 2>/dev/null || true
             done
         fi
-        attempt=$((attempt + 1))
-        sleep 0.1 2>/dev/null || sleep 1
+        wait_tick || break
+        attempt=$((attempt + wait_ticks))
     done
     return 0
 }
@@ -421,8 +443,8 @@ stop_component() {
         kill -TERM "$pid" 2>/dev/null || true
         attempt=0
         while service_pid_alive "$pid" && [ "$attempt" -lt 50 ]; do
-            attempt=$((attempt + 1))
-            sleep 0.1 2>/dev/null || sleep 1
+            wait_tick || break
+            attempt=$((attempt + wait_ticks))
         done
         if service_pid_alive "$pid"; then
             exe=$(readlink "$PROC/$pid/exe" 2>/dev/null || true)
@@ -456,12 +478,7 @@ spawn_component() {
             printf 'r2o: %s: start-stop-daemon завершился с кодом %s\n' "$component" "$?" >&2
             return 1
         }
-    attempt=0
-    while [ "$attempt" -lt 50 ]; do
-        component_running "$component" "$pidfile" && return 0
-        attempt=$((attempt + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-    done
+    wait_until 50 component_running "$component" "$pidfile" && return 0
     if IFS= read -r start_pid 2>/dev/null < "$pidfile"; then
         start_exe=$(process_path "$pidfile" || true)
         if [ -n "$start_exe" ]; then
@@ -584,15 +601,12 @@ ipv6_components_running() {
     fi
 }
 
+queue_ready() {
+    queue_bound "$1" && [ -S "$2" ]
+}
+
 wait_queue() {
-    queue=$1
-    attempt=0
-    while [ "$attempt" -lt 50 ]; do
-        queue_bound "$queue" && [ -S "$2" ] && return 0
-        attempt=$((attempt + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-    done
-    return 1
+    wait_until 50 queue_ready "$1" "$2"
 }
 
 engine_stop() {
@@ -695,13 +709,7 @@ update_scheduler_start() {
     update_scheduler_running && return 0
     rm -f "$UPD_PID"
     start-stop-daemon -S -b -m -p "$UPD_PID" -x "$UPDATER" -- "$AUTOUPDATE" || return 1
-    attempt=0
-    while [ "$attempt" -lt 20 ]; do
-        update_scheduler_running && return 0
-        attempt=$((attempt + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-    done
-    return 1
+    wait_until 20 update_scheduler_running
 }
 
 update_scheduler_stop() {
@@ -710,8 +718,8 @@ update_scheduler_stop() {
         kill -TERM "$update_pid" 2>/dev/null || true
         attempt=0
         while service_pid_alive "$update_pid" && [ "$attempt" -lt 50 ]; do
-            attempt=$((attempt + 1))
-            sleep 0.1 2>/dev/null || sleep 1
+            wait_tick || break
+            attempt=$((attempt + wait_ticks))
         done
         # shellcheck disable=SC2015 # killing an already exited updater is harmless
         service_pid_alive "$update_pid" && kill -KILL "$update_pid" 2>/dev/null || true
@@ -783,13 +791,7 @@ meta_dns_scheduler_start() {
     spawn_logged "$META_DNS_PID" "$LOG/instagram-dns-scheduler.log" \
         "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --meta-dns-scheduler ||
         return 1
-    attempt=0
-    while [ "$attempt" -lt 50 ]; do
-        meta_dns_scheduler_running && return 0
-        attempt=$((attempt + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-    done
-    return 1
+    wait_until 50 meta_dns_scheduler_running
 }
 
 meta_dns_scheduler_stop() {
@@ -803,8 +805,8 @@ meta_dns_scheduler_stop() {
                 service_pid_alive "$pid" && alive=1
             done
             [ "$alive" -eq 0 ] && break
-            attempt=$((attempt + 1))
-            sleep 0.1 2>/dev/null || sleep 1
+            wait_tick || break
+            attempt=$((attempt + wait_ticks))
         done
         for pid in $pids; do
             service_pid_alive "$pid" && kill -KILL "$pid" 2>/dev/null || true
@@ -871,13 +873,7 @@ log_maintenance_start() {
     command -v start-stop-daemon >/dev/null 2>&1 || return 1
     rm -f "$LM_PID"
     start-stop-daemon -S -b -m -p "$LM_PID" -x "$LOG_WORKER" -- run || return 1
-    attempt=0
-    while [ "$attempt" -lt 20 ]; do
-        log_maintenance_running && return 0
-        attempt=$((attempt + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-    done
-    return 1
+    wait_until 20 log_maintenance_running
 }
 
 log_maintenance_stop() {
@@ -886,8 +882,8 @@ log_maintenance_stop() {
         kill -TERM "$log_pid" 2>/dev/null || true
         attempt=0
         while service_pid_alive "$log_pid" && [ "$attempt" -lt 50 ]; do
-            attempt=$((attempt + 1))
-            sleep 0.1 2>/dev/null || sleep 1
+            wait_tick || break
+            attempt=$((attempt + wait_ticks))
         done
         if service_pid_alive "$log_pid"; then kill -KILL "$log_pid" 2>/dev/null || true; fi
     fi
@@ -909,8 +905,8 @@ firewall_watchdog_stop() {
         kill -TERM "$fw_wd_pid" 2>/dev/null || true
         attempt=0
         while service_pid_alive "$fw_wd_pid" && [ "$attempt" -lt 50 ]; do
-            attempt=$((attempt + 1))
-            sleep 0.1 2>/dev/null || sleep 1
+            wait_tick || break
+            attempt=$((attempt + wait_ticks))
         done
         if service_pid_alive "$fw_wd_pid"; then kill -KILL "$fw_wd_pid" 2>/dev/null || true; fi
     fi
@@ -951,13 +947,7 @@ telegram_watchdog_start() {
     command -v start-stop-daemon >/dev/null 2>&1 || return 1
     rm -f "$TG_WD_PID"
     start-stop-daemon -S -b -m -p "$TG_WD_PID" -x "$TG_WATCHDOG" -- run || return 1
-    attempt=0
-    while [ "$attempt" -lt 50 ]; do
-        telegram_watchdog_current_running && return 0
-        attempt=$((attempt + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-    done
-    return 1
+    wait_until 50 telegram_watchdog_current_running
 }
 
 telegram_watchdog_stop() {
@@ -971,8 +961,8 @@ telegram_watchdog_stop() {
                 service_pid_alive "$pid" && alive=1
             done
             [ "$alive" -eq 0 ] && break
-            attempt=$((attempt + 1))
-            sleep 0.1 2>/dev/null || sleep 1
+            wait_tick || break
+            attempt=$((attempt + wait_ticks))
         done
         for pid in $pids; do
             service_pid_alive "$pid" && kill -KILL "$pid" 2>/dev/null || true
@@ -1064,9 +1054,9 @@ telegram_lock() {
             rmdir "$lock" 2>/dev/null || true
             continue
         fi
-        attempt=$((attempt + 1))
         [ "$attempt" -lt 600 ] || return 1
-        sleep 0.1 2>/dev/null || sleep 1
+        wait_tick || return 1
+        attempt=$((attempt + wait_ticks))
     done
     (umask 077; printf '%s\n' "$$" > "$lock/pid") 2>/dev/null || true
     return 0
@@ -1127,13 +1117,7 @@ telegram_start_locked() {
         write_telegram_status error
         return 1
     }
-    attempt=0
-    while [ "$attempt" -lt 300 ]; do
-        if telegram_ready; then break; fi
-        attempt=$((attempt + 1))
-        sleep 0.1 2>/dev/null || sleep 1
-    done
-    if ! telegram_ready; then
+    if ! wait_until 300 telegram_ready; then
         stop_component r2o-telegram "$TG_PID"
         rm -f "$TG_STATS_SOCKET"
         write_telegram_status error

@@ -2095,7 +2095,7 @@ mod tests {
             unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) },
             0
         );
-        let direct = time.tv_sec * 1000 + time.tv_nsec / 1_000_000;
+        let direct = i64::from(time.tv_sec) * 1000 + i64::from(time.tv_nsec) / 1_000_000;
         assert!(
             (direct - before).abs() < 1_000,
             "udp_now_ms={before}, clock_gettime={direct}"
