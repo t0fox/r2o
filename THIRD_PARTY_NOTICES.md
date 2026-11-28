@@ -159,6 +159,11 @@ Rust-алгоритмы прокси и его тестовые сценарии
 - `gsap.js` — неизменённый GSAP 3.15.0; уведомление GreenSock о бесплатной
   стандартной лицензии сохранено в заголовке файла:
   https://gsap.com/standard-license.
+- `marked.js` — UMD-сборка [Marked 18.3.0](https://github.com/markedjs/marked/tree/v18.3.0)
+  из npm-пакета `marked@18.3.0`. Используется для разбора Markdown описаний
+  выпусков на токены; DOM создаёт собственный адаптер панели.
+  Логика исходной сборки сохранена, полный [текст лицензии](docs/licenses/marked.txt)
+  дополнительно включён в заголовок поставляемого JS-файла.
 - Шрифты Onest, Manrope, Unbounded, IBM Plex Mono и JetBrains Mono
   сопровождаются текстами лицензий OFL в `crates/r2o-panel/assets/fonts/`.
 

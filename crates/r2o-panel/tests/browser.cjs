@@ -337,7 +337,8 @@ esac
     sources: [{ id: "geosite-meta", synced_at: metaTime, entries: 43, sha256: "82fe2d56672eabc3" }],
   }));
   const updateFile = path.join(managerRoot, "state/update.json");
-  const updateState = { current: "test-1", latest: { release_id: "test-2", version: "R2O 2" }, check_ok: true };
+  const updateState = { current: "test-1", latest: { release_id: "test-2", version: "R2O 2",
+    notes: "### Новый выпуск\n\n- **Обновлена** проверка `R2O_META=1`." }, check_ok: true };
   fs.mkdirSync(path.dirname(updateFile), { recursive: true });
   const writeUpdate = (state) => fs.writeFileSync(updateFile, JSON.stringify({
     ...updateState, checked_utc: Math.floor(Date.now() / 1000), ...state,
@@ -1224,6 +1225,10 @@ esac
   await evaluate("document.querySelector('#command').close()");
   await evaluate("location.hash = '#updates'");
   await waitFor(() => evaluate("!document.querySelector('#update-install').hidden"), "доступный выпуск в панели");
+  assert.equal(await evaluate("document.querySelector('#update-notes-text h3')?.textContent"), "Новый выпуск",
+    "описание latest без каталога выпусков разбирается как Markdown");
+  assert.equal(await evaluate("document.querySelector('#update-notes-text li strong')?.textContent"), "Обновлена");
+  assert.equal(await evaluate("document.querySelector('#update-notes-text li code')?.textContent"), "R2O_META=1");
   await evaluate("document.querySelector('#update-install').click()");
   assert.equal(await evaluate("document.querySelector('#ask').open"), true);
   await evaluate("document.querySelector('[data-ask=no]').click()");
@@ -1264,16 +1269,77 @@ esac
   assert.equal(await evaluate("document.querySelector('#update-install').disabled"), false);
   assert.match(await evaluate("document.querySelector('#update-reason').textContent"), /рабочая версия восстановлена/);
 
+  const unsafeNotes = [
+    "### Проверка безопасного Markdown", "",
+    "[Обычная ссылка](https://example.invalid/notes) и [Почта](mailto:release@example.invalid).", "",
+    "[JavaScript](javascript:alert%281%29)",
+    "[Entity](jav&#x61;script:alert%281%29)",
+    "[Control](java&#x0a;script:alert%281%29)",
+    "[Data](data:text/html,unsafe)",
+    "[Команда роутера](/api/control/update-install)",
+    "[Относительный путь](./api/control/stop)", "",
+    "![Внешняя картинка](https://example.invalid/pixel.png)", "",
+    "<script>window.__r2oNotesXss = true</script>", "",
+    "<img src=x onerror=\"window.__r2oNotesXss = true\">", "",
+    "<iframe srcdoc=\"unsafe\"></iframe>", "",
+    "<form action=\"/api/control/stop\"><input name=\"danger\"></form>", "",
+    "<a href=\"javascript:alert(1)\" onclick=\"window.__r2oNotesXss = true\">HTML-ссылка</a>", "",
+    "Текстовая сущность: &lt;button onclick=\"bad()\"&gt; &amp;.", "",
+    "```sh\" onclick=\"bad()", "<tag> &amp; **literal**", "```",
+  ].join("\n");
+  const codeLine = "printf '%s\\n' '<tag> & **literal**' # " + "long_argument_".repeat(30);
+  const releaseNotes = [
+    "### Изменения базы", "",
+    "Описание с **жирным текстом**, *курсивом* и ~~устаревшей пометкой~~.", "",
+    "- Сохранены `R2O_META=1` и `&amp;`.",
+    "  - Вложенный пункт для выбранной версии.",
+    "- Второй пункт списка.", "",
+    "1. Проверить выпуск.", "2. Выбрать версию.", "",
+    "- [x] Сохранена предыдущая версия.", "- [ ] Проверить после обновления.", "",
+    "> Привязки сохраняются до проверенной замены.", "",
+    "```sh", codeLine, "```", "",
+    "| Платформа | Результат | Примечание |", "| --- | :---: | ---: |",
+    "| OpenWrt | Проверено | DNS работает |", "| Keenetic | Проверено | Предыдущая версия сохранена |", "",
+    "[Подробнее о выпуске](https://example.invalid/release) и [почта](mailto:release@example.invalid).", "",
+    "https://example.invalid/" + "длинный-путь-".repeat(24),
+  ].join("\n");
   const latest = { release_id: "r2o-test-2", version: "R2O 2", title: "Последний выпуск", created_utc: failedAt,
-    sequence: 2, notes: "Новый выпуск", commit: "2".repeat(40), architecture: "mipsel", size: 8192,
+    sequence: 2, notes: unsafeNotes, commit: "2".repeat(40), architecture: "mipsel", size: 8192,
     sources: ["github", "gh-proxy", "ghproxy", "ghfast"] };
   const older = { ...latest, release_id: "r2o-test-1", version: "R2O 1", title: "Базовый выпуск",
-    sequence: 1, notes: "Изменения базы", commit: "1".repeat(40) };
+    sequence: 1, notes: releaseNotes, commit: "1".repeat(40) };
   fs.writeFileSync(path.join(managerRoot, "state/update-catalog.json"), JSON.stringify({ releases: [latest, older] }));
   writeUpdate({ latest, current: "r2o-test-2", previous: "r2o-test-1",
     history: [{ utc: failedAt, message: "Проверка пройдена", release_id: "r2o-test-2" }] });
   await call("Page.reload");
   await waitFor(() => evaluate("document.querySelector('#update-target')?.options.length === 2"), "каталог подписанных выпусков");
+  const markdownSafety = await evaluate(`(() => {
+    const notes = document.querySelector('#update-notes-text');
+    const links = [...notes.querySelectorAll('a[href]')];
+    return {
+      heading: notes.querySelector('h3')?.textContent,
+      dangerous: notes.querySelectorAll('script, style, iframe, object, embed, form, img, button, input').length,
+      events: [...notes.querySelectorAll('*')].flatMap(node => [...node.attributes]).filter(attr => /^on/i.test(attr.name)).length,
+      protocols: links.map(link => new URL(link.href).protocol),
+      unsafeLinks: links.filter(link => /JavaScript|Entity|Control|Data|Команда роутера|Относительный путь|HTML-ссылка/.test(link.textContent)).length,
+      webLinks: links.filter(link => /^https?:$/.test(new URL(link.href).protocol)).map(link => ({ target: link.target, rel: link.rel })),
+      imageLabel: notes.textContent.includes('Внешняя картинка'),
+      literalCode: notes.querySelector('pre code')?.textContent.trimEnd(),
+      externalImageRequests: performance.getEntriesByType('resource').filter(entry => entry.name.includes('example.invalid/pixel.png')).length,
+      executed: window.__r2oNotesXss === true,
+    };
+  })()`);
+  assert.equal(markdownSafety.heading, "Проверка безопасного Markdown");
+  assert.equal(markdownSafety.dangerous, 0, "сырой HTML заметок не создаёт исполняемые элементы или формы");
+  assert.equal(markdownSafety.events, 0, "Markdown не добавляет обработчики событий из текста");
+  assert.equal(markdownSafety.unsafeLinks, 0, "опасные схемы и команды роутера остаются обычным текстом");
+  assert.equal(markdownSafety.protocols.every(protocol => ["http:", "https:", "mailto:"].includes(protocol)), true);
+  assert.ok(markdownSafety.protocols.includes("https:") && markdownSafety.protocols.includes("mailto:"));
+  assert.equal(markdownSafety.webLinks.every(link => link.target === "_blank" && /\bnoopener\b/.test(link.rel) && /\bnoreferrer\b/.test(link.rel)), true);
+  assert.equal(markdownSafety.imageLabel, true, "описание внешнего изображения сохраняется");
+  assert.equal(markdownSafety.literalCode, "<tag> &amp; **literal**", "в fenced code сущности и Markdown остаются дословными");
+  assert.equal(markdownSafety.externalImageRequests, 0, "внешние изображения не загружаются автоматически");
+  assert.equal(markdownSafety.executed, false);
   await evaluate("document.querySelector('#update-target-trigger').scrollIntoView({block:'center', behavior:'instant'})");
   await evaluate("document.querySelector('#update-target-trigger').focus()");
   await press("ArrowDown", 40);
@@ -1281,11 +1347,84 @@ esac
   await press("End", 35);
   await press("Enter", 13);
   assert.equal(await evaluate("document.querySelector('#update-target').value"), "r2o-test-1");
-  assert.equal(await evaluate("document.querySelector('#update-notes-text').textContent"), "Изменения базы");
+  const markdownContent = await evaluate(`(() => {
+    const notes = document.querySelector('#update-notes-text');
+    return {
+      heading: notes.querySelector('h3')?.textContent,
+      strong: notes.querySelector('strong')?.textContent,
+      emphasis: notes.querySelector('em')?.textContent,
+      deleted: notes.querySelector('del')?.textContent,
+      nested: notes.querySelector('ul ul li')?.textContent.trim(),
+      ordered: [...notes.querySelectorAll('ol > li')].map(node => node.textContent.trim()),
+      checkboxes: [...notes.querySelectorAll('input[type=checkbox]')].map(node => ({ disabled: node.disabled, checked: node.checked })),
+      quote: notes.querySelector('blockquote')?.textContent.trim(),
+      inlineEntities: [...notes.querySelectorAll('code')].some(node => node.textContent === '&amp;'),
+      code: notes.querySelector('pre code')?.textContent.trimEnd(),
+      language: notes.querySelector('pre code')?.className,
+      headers: [...notes.querySelectorAll('th')].map(node => node.textContent),
+      tableRows: notes.querySelectorAll('tbody tr').length,
+    };
+  })()`);
+  assert.equal(markdownContent.heading, "Изменения базы", "выбранный выпуск использует тот же Markdown renderer");
+  assert.equal(markdownContent.strong, "жирным текстом");
+  assert.equal(markdownContent.emphasis, "курсивом");
+  assert.equal(markdownContent.deleted, "устаревшей пометкой");
+  assert.equal(markdownContent.nested, "Вложенный пункт для выбранной версии.");
+  assert.deepEqual(markdownContent.ordered, ["Проверить выпуск.", "Выбрать версию."]);
+  assert.deepEqual(markdownContent.checkboxes, [{ disabled: true, checked: true }, { disabled: true, checked: false }]);
+  assert.equal(markdownContent.quote, "Привязки сохраняются до проверенной замены.");
+  assert.equal(markdownContent.inlineEntities, true, "inline code не декодирует HTML-сущности");
+  assert.equal(markdownContent.code, codeLine);
+  assert.match(markdownContent.language, /\blanguage-sh\b/);
+  assert.deepEqual(markdownContent.headers, ["Платформа", "Результат", "Примечание"]);
+  assert.equal(markdownContent.tableRows, 2);
+  await evaluate(`(() => {
+    const details = document.querySelector('#update-notes');
+    details.open = true;
+    details.scrollIntoView({ block: 'start', behavior: 'instant' });
+    return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  })()`);
+  await evaluate(`(() => {
+    const notes = document.querySelector('#update-notes-text');
+    window.markdownFirstHeading = notes.querySelector('h3');
+    window.markdownFocusedLink = notes.querySelector('a[href="https://example.invalid/release"]');
+    markdownFocusedLink.focus({ preventScroll: true });
+    window.markdownScroll = scrollY;
+    document.querySelector('#update-target').dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  assert.equal(await evaluate("document.querySelector('#update-notes-text h3') === markdownFirstHeading && document.activeElement === markdownFocusedLink && scrollY === markdownScroll"), true,
+    "повторный render выбранного выпуска сохраняет DOM, фокус ссылки и прокрутку");
+  const checkedBeforeNotesPoll = await evaluate("document.querySelector('#update-checked').textContent");
+  writeUpdate({ latest, current: "r2o-test-2", previous: "r2o-test-1", checked_utc: failedAt + 120,
+    history: [{ utc: failedAt, message: "Проверка пройдена", release_id: "r2o-test-2" }] });
+  await evaluate("document.dispatchEvent(new Event('visibilitychange'))");
+  await waitFor(() => evaluate(`document.querySelector('#update-checked').textContent !== ${JSON.stringify(checkedBeforeNotesPoll)}`), "повторный HTTP-опрос состояния обновлений");
+  assert.equal(await evaluate("document.querySelector('#update-target').value === 'r2o-test-1' && document.querySelector('#update-notes-text h3') === markdownFirstHeading && document.activeElement === markdownFocusedLink && scrollY === markdownScroll"), true,
+    "опрос обновлятора сохраняет выбранную версию, готовую разметку и место чтения");
   assert.equal(await evaluate("document.querySelector('#update-rollback').hidden"), false);
   assert.match(await evaluate("document.querySelector('#update-history-list').textContent"), /Проверка пройдена/);
   for (const [width, height] of [[1280, 900], [390, 844]]) {
     await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 600 });
+    await evaluate("document.querySelector('#update-notes').scrollIntoView({block:'start', behavior:'instant'})");
+    const notesLayout = await evaluate(`(() => {
+      const notes = document.querySelector('#update-notes-text');
+      const rect = notes.getBoundingClientRect();
+      const pre = notes.querySelector('pre');
+      return {
+        fits: document.documentElement.scrollWidth <= innerWidth + 1 && rect.left >= 0 && rect.right <= innerWidth + 1,
+        codeScrolls: pre.scrollWidth > pre.clientWidth && ['auto', 'scroll'].includes(getComputedStyle(pre).overflowX),
+      };
+    })()`);
+    assert.equal(notesLayout.fits, true, "Markdown не расширяет страницу на " + width + " пикселях");
+    assert.equal(notesLayout.codeScrolls, true, "длинный код прокручивается внутри своего блока на " + width + " пикселях");
+    if (captureDir) {
+      const clip = await evaluate(`(() => {
+        const rect = document.querySelector('#update-notes').getBoundingClientRect();
+        return { x: rect.left + scrollX, y: rect.top + scrollY, width: rect.width, height: rect.height, scale: 1 };
+      })()`);
+      const screenshot = await call("Page.captureScreenshot", { format: "png", clip, captureBeyondViewport: true });
+      fs.writeFileSync(path.join(captureDir, `update-notes-${width}.png`), Buffer.from(screenshot.data, "base64"));
+    }
     await evaluate("document.querySelector('#update-source-trigger').scrollIntoView({block:'center', behavior:'instant'})");
     await evaluate("document.querySelector('#update-source-trigger').click()");
     await waitFor(() => evaluate("document.querySelector('#update-source-options').matches(':popover-open')"), "фирменное меню источника " + width);
