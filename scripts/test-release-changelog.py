@@ -52,11 +52,33 @@ class ChangelogTests(unittest.TestCase):
             patch.object(changelog, "install", return_value=Path("llama-completion")) as install,
             patch.object(changelog, "download"),
             patch.object(changelog.subprocess, "check_output",
-                         return_value=json.dumps({"r2o": EXAMPLE[2:-1]}, ensure_ascii=False) + " [end of text]\n\n"),
+                         return_value=json.dumps({"r2o": {"action": "Исправили", "detail": "подключение к Telegram"}},
+                                                 ensure_ascii=False) + " [end of text]\n\n"),
         ):
             self.assertEqual(changelog.generate("", "r2o-old", "0" * 40, Path("/unused")),
                              (EXAMPLE, "qwen3", True))
             install.assert_called_once()
+
+    def test_published_wording_is_rejected(self):
+        for detail in ("Сгенерировал русские заметки выпуска локально", "повторил совместимые планы",
+                       "отчет о CPU отдельно от резервного CPU"):
+            with self.subTest(detail=detail), self.assertRaises(ValueError):
+                changelog.model_notes(json.dumps({"r2o": {"action": "Обновили", "detail": detail}}), ("r2o",))
+
+    def test_release_automation_does_not_become_a_user_facing_topic(self):
+        with patch.object(changelog, "git", side_effect=(
+            "feat(release): generate Russian changelogs locally\nfix(panel): show CPU\n", "", ""
+        )):
+            context, topics = changelog.diff_context("old..new")
+        self.assertEqual(topics, ("panel",))
+        self.assertNotIn("generate Russian changelogs", context)
+
+    def test_internal_only_release_does_not_load_model(self):
+        with (patch.object(changelog, "release_range", return_value="old..new"),
+              patch.object(changelog, "git", side_effect=("release.yml", "fix(changelog): validate notes")),
+              patch.object(changelog, "install", side_effect=AssertionError("бинарник не нужен"))):
+            self.assertEqual(changelog.generate("", "r2o-old", "0" * 40, Path("/unused")),
+                             (changelog.INTERNAL_ONLY, "internal-only", False))
 
     def test_empty_diff_needs_no_model_or_fallback(self):
         with (

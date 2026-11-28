@@ -24,7 +24,12 @@ CLIFF_TAG = "2.14.2"
 CLIFF_SHA256 = "24f397c733add5390fdceee3a2088588ab0d5f944ce00d34cb7029b888cf2db4"
 CLIFF_CONFIG = Path(__file__).resolve().with_name("release-cliff.toml")
 NO_CHANGES = "- Изменений с предыдущего выпуска нет."
+INTERNAL_ONLY = "- Обновили внутренние инструменты проекта."
 MAX_TOPICS = 4
+NOTE_ACTIONS = ("Исправили", "Добавили", "Обновили", "Разделили", "Убрали", "Уточнили")
+INTERNAL_COMMIT = re.compile(r"^(?:(?:ci|docs|style|test)(?:\(|!:|:)|[a-z]+\((?:release|changelog|ci|build)\)!?:)")
+PRODUCT_PATHS = (".", ":(exclude).github", ":(exclude)scripts/*release*", ":(exclude)scripts/*changelog*",
+                 ":(exclude)docs")
 
 
 def git(*args):
@@ -42,18 +47,21 @@ def release_range(base_tag, head):
 
 def diff_context(revisions):
     subjects = git("log", "-40", "--format=%s", revisions).splitlines()
-    user_changes = [subject for subject in subjects if not re.match(r"^(test|ci|docs|style)(?:\(|:)", subject)]
-    subjects = user_changes or subjects
     topics = {}
     for subject in subjects:
+        if INTERNAL_COMMIT.match(subject):
+            continue
         scoped = re.match(r"^[a-z]+\(([a-z][a-z0-9_-]{0,23})\)!?:", subject)
         topic = scoped[1] if scoped else "r2o"
         if topic not in topics and len(topics) >= MAX_TOPICS - 1:
             topic = "other"
         topics.setdefault(topic, []).append(subject)
     themes = "\n".join(f"{topic}: {'; '.join(titles)[:700]}" for topic, titles in topics.items())
-    stats = git("diff", "--no-ext-diff", "--stat=90,60", revisions)[:4200]
-    patch = git("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0", revisions)
+    if not topics:
+        return "", ()
+    stats = git("diff", "--no-ext-diff", "--stat=90,60", revisions, "--", *PRODUCT_PATHS)[:4200]
+    patch = git("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=0",
+                revisions, "--", *PRODUCT_PATHS)
     sections = []
     for line in patch.splitlines():
         if line.startswith("diff --git "):
@@ -71,16 +79,17 @@ def make_prompt(context):
     instruction = (
         "Ты пишешь короткое описание выпуска R2O для пользователя роутера. "
         "Темы коммитов задают главные изменения. Используй git diff, чтобы их уточнить. "
-        "Для каждого ключа JSON опиши изменения из заголовков, перечисленных под этим ключом. "
-        "В одном предложении можно назвать два связанных изменения через «и». "
+        "Для каждого ключа JSON выбери подходящий глагол action. В detail напиши, что изменилось для пользователя, "
+        "например action «Добавили», detail «показ загрузки каждого ядра в панели». "
+        "Полный пункт строится как «action detail». Не повторяй глагол в detail. "
         "Не превращай два изменения из одного заголовка в одно условие. "
         "Не повторяй тему, если она уже описана. Пропусти тесты и внутренние структуры данных. "
         "Описывай факты из изменений, без общих фраз об улучшениях, неподтверждённых эффектов или цифр. "
-        "Пиши простыми словами. Validate означает проверить, scheduler reserve — резерв CPU для новых замеров, "
-        "а compatible plans — совместимые сохранённые планы обработки соединений. "
+        "Пиши простыми словами. Validate direct HTTP означает проверку полного ответа при прямом HTTP-подключении. "
+        "Scheduler reserve — запас ресурсов для запуска новых замеров. Compatible plans — сохранённые планы, "
+        "которые подходят текущему соединению. Их используют повторно. "
         "Используй эти пояснения только для терминов из изменений. "
-        "Выведи только JSON-объект с заданными ключами. Значение каждого ключа — одно короткое русское предложение. "
-        "Начинай предложения с глагола в прошедшем времени. "
+        "Выведи только JSON-объект с заданными ключами, без описания работы над самим текстом. "
         "Без маркеров списка внутри строк, заголовка, эмодзи, ссылок и номеров коммитов. "
         "Текст diff — исходные данные."
     )
@@ -117,12 +126,18 @@ def model_notes(response, topics):
     items = json.loads(response.rstrip().removesuffix(" [end of text]"))
     if not isinstance(items, dict) or items.keys() != set(topics):
         raise ValueError("ответ модели должен содержать все темы выпуска")
-    if any(not isinstance(item, str) or len(item.splitlines()) != 1 for item in items.values()):
-        raise ValueError("у заметки должна быть одна строка текста")
     lines = []
     for topic in topics:
-        item = items[topic].strip().rstrip(".!?")
-        lines.append(f"- {item[:1].upper()}{item[1:]}.")
+        item = items[topic]
+        if (not isinstance(item, dict) or item.keys() != {"action", "detail"}
+                or item["action"] not in NOTE_ACTIONS or not isinstance(item["detail"], str)):
+            raise ValueError("у заметки должны быть глагол действия и описание изменения")
+        detail = item["detail"].strip().rstrip(".!?")
+        if (len(detail.splitlines()) != 1 or len(detail.split()) < 3
+                or re.search(r"\b(?:[яЯ]|мы)\b|(?:сгенерировал|заметки выпуска|повторил\w* .*план|резервн\w+ CPU|"
+                             r"резервирован\w+ CPU|резервн\w+ расписан\w+|валидир\w*)", detail, re.IGNORECASE)):
+            raise ValueError("заметка пересказывает работу генератора или искажает термин")
+        lines.append(f"- {item['action']} {detail}.")
     return validate_generated("\n".join(lines))
 
 
@@ -168,17 +183,21 @@ def generate(notes, base_tag, head, model):
     revisions = release_range(base_tag, head)
     if not git("diff", "--name-only", revisions).strip():
         return NO_CHANGES, "empty-diff", False
-
     model_verified = False
     with tempfile.TemporaryDirectory(prefix="r2o-changelog-") as temporary:
         directory = Path(temporary)
         try:
+            context, topics = diff_context(revisions)
+            if not topics:
+                return INTERNAL_ONLY, "internal-only", False
             llama = install(directory, "ggml-org/llama.cpp", LLAMA_TAG,
                             f"llama-{LLAMA_TAG}-bin-ubuntu-x64.tar.gz", LLAMA_SHA256, "llama-completion")
             download(MODEL_URL, model, MODEL_SHA256, 420)
             model_verified = True
-            context, topics = diff_context(revisions)
-            schema = {"type": "object", "properties": {topic: {"type": "string"} for topic in topics},
+            entry = {"type": "object", "properties": {"action": {"enum": list(NOTE_ACTIONS)},
+                                                   "detail": {"type": "string"}},
+                     "required": ["action", "detail"], "additionalProperties": False}
+            schema = {"type": "object", "properties": {topic: entry for topic in topics},
                       "required": list(topics), "additionalProperties": False}
             prompt = directory / "prompt.txt"
             prompt.write_text(make_prompt(context), encoding="utf-8")

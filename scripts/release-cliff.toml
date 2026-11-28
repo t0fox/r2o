@@ -12,9 +12,10 @@ filter_unconventional = false
 # Диапазон задаёт workflow. Теги внутри него не делят описание на выпуски.
 tag_pattern = "^$"
 commit_parsers = [
+  { message = '^(?:(?:ci|docs|style|test)(?:\(|!:|:)|[a-z]+\((?:release|changelog|ci|build)\)!?:)', skip = true },
   { message = '^[a-z]+\((telegram|tg)[^)]*\)', group = "Обновили прокси Telegram" },
   { message = '^[a-z]+\((panel|ui)[^)]*\)', group = "Доработали веб-панель" },
   { message = '^[a-z]+\((discovery|keenetic|openwrt|firewall|route|datapath|controller|dns|nfqueue|meta)[^)]*\)', group = "Доработали сетевые функции и совместимость с роутерами" },
-  { message = '^[a-z]+\((ci|release|installer|install|update|changelog|build)[^)]*\)', group = "Обновили сборку, установку или выпуск версий" },
+  { message = '^[a-z]+\((installer|install|update)[^)]*\)', group = "Обновили установку и обновление R2O" },
   { message = ".*", group = "Внесли прочие изменения в проект" },
 ]
