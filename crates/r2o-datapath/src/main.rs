@@ -35,10 +35,11 @@ mod app {
     use r2o_datapath::r2o_icmp_guard::R2oIcmpGuard;
     use r2o_datapath::r2o_quic::R2oQuicSessions;
     use r2o_datapath::r2o_route::{
-        R2O_ROUTE_REFRESH_INTERVAL, R2O_ROUTE_SETTLE_INTERVAL, R2oEffectiveRoute, R2oPolicyCheck,
-        R2oRouteCheck, R2oRouteFamily, R2oRouteGate, R2oRouteMonitor, R2oRoutePacket,
-        R2oRoutePolicy, R2oRouteRefreshStatus, R2oRoutedFlows, R2oRoutesChange,
-        R2oRoutesRefreshLog, r2o_routes_change_line, r2o_routes_quiet_line,
+        R2O_ROUTE_OTHER_DEV, R2O_ROUTE_OUTSIDE, R2O_ROUTE_REFRESH_INTERVAL,
+        R2O_ROUTE_SETTLE_INTERVAL, R2oEffectiveRoute, R2oPolicyCheck, R2oRouteCheck,
+        R2oRouteFamily, R2oRouteGate, R2oRouteMonitor, R2oRoutePacket, R2oRoutePolicy,
+        R2oRouteRefreshStatus, R2oRoutedFlows, R2oRoutesChange, R2oRoutesRefreshLog,
+        r2o_routes_change_line, r2o_routes_quiet_line,
     };
     use r2o_datapath::r2o_udp_hold::{
         R2oUdpDeferredEnqueueError, R2oUdpDeferredResends, R2oUdpDeferredVerdicts,
@@ -1669,6 +1670,8 @@ mod app {
             }
         }
         let router_runtime = std::env::var("R2O_PLATFORM_RUNTIME").as_deref() == Ok("1");
+        let keenetic_runtime = router_runtime && r2o_datapath::platform::is_keenetic();
+        let raw_mark = options.mark;
         let check_effective_routes =
             router_runtime && r2o_datapath::platform::checks_effective_routes();
         let route_family = if options.protocol_family == libc::AF_INET6 as u16 {
@@ -1681,7 +1684,14 @@ mod app {
             .and_then(|mark| parse_mark(&mark))
             .unwrap_or(0);
         let mut route_context_reported = false;
-        let mut route_monitor = R2oRouteMonitor::default();
+        let new_route_monitor = move || {
+            if keenetic_runtime {
+                R2oRouteMonitor::for_keenetic_egress(raw_mark)
+            } else {
+                R2oRouteMonitor::default()
+            }
+        };
+        let mut route_monitor = new_route_monitor();
         let mut route_watch_notifications = 0_u64;
         let mut routes_log = R2oRoutesRefreshLog::default();
         if let Err(error) = route_monitor.r2o_open_watch() {
@@ -1707,7 +1717,7 @@ mod app {
         std::thread::Builder::new()
             .name("r2o-rtnetlink".into())
             .spawn(move || {
-                let mut monitor = R2oRouteMonitor::default();
+                let mut monitor = new_route_monitor();
                 while let Ok(request) = route_request_rx.recv() {
                     match request {
                         RouteRequest::Refresh(generation) => {
@@ -1870,7 +1880,7 @@ mod app {
         let mut effective_routes =
             HashMap::<R2oRouteCheck, (Instant, Option<R2oEffectiveRoute>)>::new();
         let mut rpdb_observe_only_flows: Option<R2oRoutedFlows> = None;
-        let mut route_scope_packets_skipped = 0u64;
+        let mut route_scope = RouteScopeStats::default();
         let nfq_health_enabled =
             control.is_some() && options.control_wire == r2k_core::control::WireProfile::V48;
         let nfq_owner = if nfq_health_enabled {
@@ -2028,7 +2038,7 @@ mod app {
                         &output.with_extension("memory"),
                         start_ticks,
                     );
-                    let health = serde_json::json!({
+                    let mut health = serde_json::json!({
                         "pid": std::process::id(),
                         "start_ticks": start_ticks,
                         "queue": queue,
@@ -2074,9 +2084,47 @@ mod app {
                             "observe_only_flow_keys": rpdb_observe_only_flows.as_ref().map_or(0, R2oRoutedFlows::len),
                             "observe_only_capacity": rpdb_observe_only_flows.as_ref().map_or(0, R2oRoutedFlows::capacity),
                         },
-                        "route_scope_packets_skipped": route_scope_packets_skipped,
+                        "route_scope_packets_skipped": route_scope.total,
                         "process_packet_skip_reasons": r2o_datapath::reason_stats::reason_snapshot(),
                     });
+                    if keenetic_runtime {
+                        use r2o_datapath::flow_journal::R2oFlowJournalKind;
+
+                        let (tracked, missing, table_missing, retried) = conntrack_gate.nat_stats();
+                        let mut journal_counts = [0_u32; 5];
+                        for entry in flow_journal.iter() {
+                            let index = match entry.kind {
+                                R2oFlowJournalKind::PlanApplied => 0,
+                                R2oFlowJournalKind::PlanDone => 1,
+                                R2oFlowJournalKind::PlanRefused => 2,
+                                R2oFlowJournalKind::PlanUnsent => 3,
+                                R2oFlowJournalKind::PlanDamaged => 4,
+                                _ => continue,
+                            };
+                            journal_counts[index] += 1;
+                        }
+                        let [prepared, done, refused, unsent, damaged] = journal_counts;
+                        health["keenetic"] = serde_json::json!({
+                            "route_scope": route_scope.diagnostics(&route_gate, route_family),
+                            "socket_marks": {
+                                "raw": raw_mark, "probe": options.probe_mark, "measure": measure_mark,
+                            },
+                            "conntrack_plan_checks": {
+                                "tracked": tracked, "missing": missing,
+                                "table_missing": table_missing, "retried": retried,
+                            },
+                            "recent_plan_journal": {
+                                "prepared": prepared, "done": done, "refused": refused,
+                                "unsent": unsent, "damaged": damaged,
+                            },
+                            "raw_send": raw.as_ref().map(|raw| {
+                                let stats = raw.send_stats();
+                                serde_json::json!({
+                                    "sent": stats.sent, "errors": stats.errors, "busy": stats.busy,
+                                })
+                            }),
+                        });
+                    }
                     let result = r2o_datapath::platform::write_health(output, &health);
                     if let Err(error) = &result
                         && !diagnostic_write_failed
@@ -2682,8 +2730,8 @@ mod app {
                         )
                     );
                     // Сначала границы D2K: чужие потоки не занимают очередь RPDB.
-                    if r2o_packet_route_skip(
-                        &mut route_gate,
+                    if let Some(reason) = r2o_packet_route_skip(
+                        &route_gate,
                         &mut routed_flows,
                         &packet,
                         queue_hook,
@@ -2692,7 +2740,10 @@ mod app {
                         options.mark,
                         now,
                     ) {
-                        route_scope_packets_skipped = route_scope_packets_skipped.saturating_add(1);
+                        route_scope.total = route_scope.total.saturating_add(1);
+                        if keenetic_runtime {
+                            route_scope.record(reason, packet.output_device);
+                        }
                         send_verdicts(
                             &mut socket,
                             std::slice::from_ref(&packet_id),
@@ -6019,8 +6070,68 @@ mod app {
         mode == RuntimeMode::Apply && (!controller_probe || installed_probe)
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RouteScopeSkip {
+        Policy,
+        Egress,
+        Mark(u32),
+        KnownFlow,
+    }
+
+    #[derive(Default)]
+    struct RouteScopeStats {
+        total: u64,
+        policy: u64,
+        egress: u64,
+        marked: u64,
+        known_flow: u64,
+        by_mark: HashMap<u32, u64>,
+        by_ifindex: HashMap<u32, u64>,
+    }
+
+    impl RouteScopeStats {
+        fn record(&mut self, reason: RouteScopeSkip, output_device: Option<u32>) {
+            let counter = match reason {
+                RouteScopeSkip::Policy => &mut self.policy,
+                RouteScopeSkip::Egress => {
+                    if let Some(ifindex) = output_device {
+                        Self::record_key(&mut self.by_ifindex, ifindex);
+                    }
+                    &mut self.egress
+                }
+                RouteScopeSkip::Mark(mark) => {
+                    Self::record_key(&mut self.by_mark, mark);
+                    &mut self.marked
+                }
+                RouteScopeSkip::KnownFlow => &mut self.known_flow,
+            };
+            *counter = counter.saturating_add(1);
+        }
+
+        fn record_key(counts: &mut HashMap<u32, u64>, key: u32) {
+            const LIMIT: usize = 16;
+            if counts.len() < LIMIT || counts.contains_key(&key) {
+                let count = counts.entry(key).or_default();
+                *count = count.saturating_add(1);
+            }
+        }
+
+        fn diagnostics(&self, gate: &R2oRouteGate, family: R2oRouteFamily) -> serde_json::Value {
+            serde_json::json!({
+                "outside_policy_packets": self.policy,
+                "other_egress_packets": self.egress,
+                "routing_mark_packets": self.marked,
+                "known_flow_packets": self.known_flow,
+                "by_mark": self.by_mark,
+                "by_egress_ifindex": self.by_ifindex,
+                "default_egress": gate.r2o_describe_default_ifindices(family, 128),
+                "rule_selectors": gate.r2o_describe_rules(512),
+            })
+        }
+    }
+
     fn r2o_packet_route_skip(
-        gate: &mut R2oRouteGate,
+        gate: &R2oRouteGate,
         flows: &mut R2oRoutedFlows,
         packet: &QueuePacket<'_>,
         hook: Option<u8>,
@@ -6028,7 +6139,7 @@ mod app {
         probe_mark: u32,
         datapath_mark: u32,
         now: Instant,
-    ) -> bool {
+    ) -> Option<RouteScopeSkip> {
         let family = packet
             .payload
             .and_then(|bytes| bytes.first())
@@ -6056,8 +6167,14 @@ mod app {
             datapath_mark,
             output_ifindex: packet.output_device,
         });
-        packet.payload.map_or(route_mark != 0, |bytes| {
+        let skipped = packet.payload.map_or(route_mark != 0, |bytes| {
             flows.r2o_skip_packet(bytes, route_mark, now)
+        });
+        skipped.then_some(match route_mark {
+            R2O_ROUTE_OUTSIDE => RouteScopeSkip::Policy,
+            R2O_ROUTE_OTHER_DEV => RouteScopeSkip::Egress,
+            0 => RouteScopeSkip::KnownFlow,
+            mark => RouteScopeSkip::Mark(mark),
         })
     }
 
@@ -8724,16 +8841,19 @@ mod app {
                 output_device: Some(9),
                 ..Default::default()
             };
-            assert!(r2o_packet_route_skip(
-                &mut gate,
-                &mut flows,
-                &outbound,
-                outbound.hook,
-                libc::AF_INET as u16,
-                0x2e,
-                0x2d,
-                now,
-            ));
+            assert_eq!(
+                r2o_packet_route_skip(
+                    &gate,
+                    &mut flows,
+                    &outbound,
+                    outbound.hook,
+                    libc::AF_INET as u16,
+                    0x2e,
+                    0x2d,
+                    now,
+                ),
+                Some(super::RouteScopeSkip::Egress)
+            );
 
             let inbound = QueuePacket {
                 payload: Some(&reply),
@@ -8741,16 +8861,19 @@ mod app {
                 output_device: Some(2),
                 ..Default::default()
             };
-            assert!(r2o_packet_route_skip(
-                &mut gate,
-                &mut flows,
-                &inbound,
-                inbound.hook,
-                libc::AF_INET as u16,
-                0x2e,
-                0x2d,
-                now + Duration::from_millis(1),
-            ));
+            assert_eq!(
+                r2o_packet_route_skip(
+                    &gate,
+                    &mut flows,
+                    &inbound,
+                    inbound.hook,
+                    libc::AF_INET as u16,
+                    0x2e,
+                    0x2d,
+                    now + Duration::from_millis(1),
+                ),
+                Some(super::RouteScopeSkip::KnownFlow)
+            );
             assert_eq!(
                 gate.r2o_route_mark(super::R2oRoutePacket {
                     family: R2oRouteFamily::Ipv4,
@@ -8777,16 +8900,19 @@ mod app {
                 output_device: Some(9),
                 ..Default::default()
             };
-            assert!(r2o_packet_route_skip(
-                &mut gate,
-                &mut flows,
-                &outbound6,
-                outbound6.hook,
-                libc::AF_INET6 as u16,
-                0x2e,
-                0x2d,
-                now + Duration::from_millis(2),
-            ));
+            assert_eq!(
+                r2o_packet_route_skip(
+                    &gate,
+                    &mut flows,
+                    &outbound6,
+                    outbound6.hook,
+                    libc::AF_INET6 as u16,
+                    0x2e,
+                    0x2d,
+                    now + Duration::from_millis(2),
+                ),
+                Some(super::RouteScopeSkip::Egress)
+            );
 
             let inbound6 = QueuePacket {
                 payload: Some(&reply6),
@@ -8794,16 +8920,19 @@ mod app {
                 output_device: Some(2),
                 ..Default::default()
             };
-            assert!(r2o_packet_route_skip(
-                &mut gate,
-                &mut flows,
-                &inbound6,
-                inbound6.hook,
-                libc::AF_INET6 as u16,
-                0x2e,
-                0x2d,
-                now + Duration::from_millis(3),
-            ));
+            assert_eq!(
+                r2o_packet_route_skip(
+                    &gate,
+                    &mut flows,
+                    &inbound6,
+                    inbound6.hook,
+                    libc::AF_INET6 as u16,
+                    0x2e,
+                    0x2d,
+                    now + Duration::from_millis(3),
+                ),
+                Some(super::RouteScopeSkip::KnownFlow)
+            );
 
             let unrelated6 = QueuePacket {
                 payload: Some(&unrelated_reply6),
@@ -8811,16 +8940,19 @@ mod app {
                 output_device: Some(2),
                 ..Default::default()
             };
-            assert!(!r2o_packet_route_skip(
-                &mut gate,
-                &mut flows,
-                &unrelated6,
-                unrelated6.hook,
-                libc::AF_INET6 as u16,
-                0x2e,
-                0x2d,
-                now + Duration::from_millis(4),
-            ));
+            assert_eq!(
+                r2o_packet_route_skip(
+                    &gate,
+                    &mut flows,
+                    &unrelated6,
+                    unrelated6.hook,
+                    libc::AF_INET6 as u16,
+                    0x2e,
+                    0x2d,
+                    now + Duration::from_millis(4),
+                ),
+                None
+            );
         }
 
         fn udp_packet(

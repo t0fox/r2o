@@ -136,8 +136,27 @@ fn owned(platform: &Platform, table: &str, rule: &str) -> bool {
     tag == Some(NAT_TAG)
         || (target == Some("MASQUERADE")
             && fields.starts_with(&["-p", "udp", "-m", "mark", "--mark"])
-            && fields.get(5).and_then(|v| mark(v).ok()) == Some(platform.raw)
+            && fields.get(5).is_some_and(|selector| {
+                if platform.kind == Kind::Keenetic {
+                    exact_mark(selector, platform.raw)
+                } else {
+                    mark(selector).ok() == Some(platform.raw)
+                }
+            })
             && fields.len() == 8)
+}
+
+fn exact_mark(selector: &str, expected: u32) -> bool {
+    let (value, mask) = selector.split_once('/').unwrap_or((selector, "0xffffffff"));
+    mark(value).ok() == Some(expected) && mark(mask).ok() == Some(u32::MAX)
+}
+
+fn ppe_rule(rule: &str) -> bool {
+    let mut fields = rule.split_whitespace();
+    fields
+        .find(|field| *field == "--comment")
+        .and_then(|_| fields.next())
+        .is_some_and(|tag| tag.trim_matches('"') == PPE_TAG)
 }
 
 fn split_state(platform: &Platform, table: &str, listing: &str) -> Rules {
@@ -791,30 +810,91 @@ fn verify_keenetic_rules(
     table: &str,
     state: &Rules,
 ) -> Result<()> {
-    let attached = |hook: &str, jump: &str| {
-        state
-            .hooks
-            .get(hook)
-            .is_some_and(|rules| rules.iter().any(|(_, rule)| rule == jump))
-    };
     if table == "nat" {
-        if state.hooks.get("POSTROUTING").is_some_and(|rules| {
-            rules
-                .iter()
-                .any(|(_, rule)| rule.starts_with("-p udp ") && rule.ends_with(" -j MASQUERADE"))
-        }) {
+        let matches_raw = |rule: &str| {
+            let fields: Vec<_> = rule.split_whitespace().collect();
+            let selector = match fields.as_slice() {
+                [
+                    "-p",
+                    "udp",
+                    "-m",
+                    "mark",
+                    "--mark",
+                    selector,
+                    "-j",
+                    "MASQUERADE",
+                ] => selector,
+                [
+                    "-p",
+                    "udp",
+                    "-m",
+                    "mark",
+                    "--mark",
+                    selector,
+                    "-m",
+                    "comment",
+                    "--comment",
+                    tag,
+                    "-j",
+                    "MASQUERADE",
+                ] if tag.trim_matches('"') == NAT_TAG => selector,
+                _ => return false,
+            };
+            exact_mark(selector, platform.raw)
+        };
+        let mut rules = state.hooks.get("POSTROUTING").into_iter().flatten();
+        if rules.next().is_some_and(|(_, rule)| matches_raw(rule)) && rules.next().is_none() {
             return Ok(());
         }
-        return Err(error("IPv4 nat: отсутствует MASQUERADE для raw UDP"));
+        return Err(error(
+            "IPv4 nat: ожидается один MASQUERADE с точной меткой raw UDP",
+        ));
     }
-    for (hook, jump) in [
-        ("POSTROUTING", "-j R2O_OUT"),
-        ("FORWARD", "-j R2O_IN"),
-        ("INPUT", "-j R2O_INPUT"),
-    ] {
-        if !attached(hook, jump) {
+    // PPE должен пройти перед захватом, а оба — перед правилами NDM.
+    let forward = state
+        .hooks
+        .get("FORWARD")
+        .into_iter()
+        .flatten()
+        .filter(|(_, rule)| ppe_rule(rule));
+    let mut forward_position = 1;
+    for (index, _) in forward {
+        if *index != forward_position {
             return Err(error(format!(
-                "IPv{version} mangle: отсутствует переход {hook} {jump}"
+                "IPv{version} mangle: правила PPE должны идти в начале FORWARD"
+            )));
+        }
+        forward_position += 1;
+    }
+    let dns_input = state
+        .hooks
+        .get("INPUT")
+        .into_iter()
+        .flatten()
+        .find(|(_, rule)| rule == "-j R2O_DNS_IN");
+    if dns_input.is_some_and(|(index, _)| *index != 1) {
+        return Err(error(format!(
+            "IPv{version} mangle: переход INPUT -j R2O_DNS_IN не первый"
+        )));
+    }
+    for (hook, jump, position) in [
+        ("POSTROUTING", "-j R2O_OUT", 1),
+        ("FORWARD", "-j R2O_IN", forward_position),
+        (
+            "INPUT",
+            "-j R2O_INPUT",
+            if dns_input.is_some() { 2 } else { 1 },
+        ),
+    ] {
+        let mut jumps = state
+            .hooks
+            .get(hook)
+            .into_iter()
+            .flatten()
+            .filter(|(_, rule)| rule == jump);
+        if !jumps.next().is_some_and(|(index, _)| *index == position) || jumps.next().is_some() {
+            return Err(error(format!(
+                "IPv{version} mangle: ожидается один переход {hook} {jump} в позиции {position}"
             )));
         }
     }

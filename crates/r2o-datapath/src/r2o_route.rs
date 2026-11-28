@@ -36,6 +36,7 @@ const R2O_FIB_RULE_INVERT: u32 = 0x2;
 const R2O_RTA_DST: u16 = 1;
 const R2O_RTA_OIF: u16 = 4;
 const R2O_RTA_MULTIPATH: u16 = 9;
+const R2O_RTA_MARK: u16 = 16;
 const R2O_RTN_UNICAST: u8 = 1;
 const R2O_ROUTE_FLOW_CAPACITY: usize = 4096;
 const R2O_ROUTE_FLOW_IDLE: Duration = Duration::from_secs(120);
@@ -753,6 +754,7 @@ pub struct R2oRouteMonitor {
     watch: Option<std::os::fd::OwnedFd>,
     request_socket: Option<std::os::fd::OwnedFd>,
     sequence: u32,
+    egress_mark: u32,
 }
 
 #[cfg(target_os = "linux")]
@@ -762,12 +764,21 @@ impl Default for R2oRouteMonitor {
             watch: None,
             request_socket: None,
             sequence: 1,
+            egress_mark: 0,
         }
     }
 }
 
 #[cfg(target_os = "linux")]
 impl R2oRouteMonitor {
+    /// Keenetic can route the marked raw socket through a different uplink.
+    pub fn for_keenetic_egress(mark: u32) -> Self {
+        Self {
+            egress_mark: mark,
+            ..Self::default()
+        }
+    }
+
     /// Подписывается на группы IPv4/IPv6; при недоступности подписки остаётся опрос.
     pub fn r2o_open_watch(&mut self) -> std::io::Result<()> {
         let fd = Self::r2o_open_watch_with(Self::r2o_add_membership);
@@ -1032,9 +1043,27 @@ impl R2oRouteMonitor {
     }
 
     fn r2o_lookup_default(&mut self, family: R2oRouteFamily) -> std::io::Result<R2oRouteLookup> {
+        match self.r2o_lookup_egress(family, self.egress_mark) {
+            Err(error)
+                if self.egress_mark != 0
+                    && [libc::EINVAL, libc::EOPNOTSUPP]
+                        .contains(&error.raw_os_error().unwrap_or(0)) =>
+            {
+                // Legacy vendor kernels can reject RTA_MARK on route queries.
+                self.r2o_lookup_egress(family, 0)
+            }
+            result => result,
+        }
+    }
+
+    fn r2o_lookup_egress(
+        &mut self,
+        family: R2oRouteFamily,
+        mark: u32,
+    ) -> std::io::Result<R2oRouteLookup> {
         let mut result = R2oRouteLookup::Pending;
         let sequence = self.r2o_next_sequence();
-        let request = r2o_route_lookup_request(family, sequence);
+        let request = r2o_marked_route_lookup_request(family, sequence, mark);
         self.r2o_receive_request(request, R2O_LOOKUP_BUFFER, R2O_LOOKUP_ROUNDS, |bytes| {
             result = match r2o_route_parse_lookup(bytes) {
                 Ok(result) => result,
@@ -1438,9 +1467,17 @@ pub fn r2o_route_rule_request(family: R2oRouteFamily, sequence: u32) -> Vec<u8> 
 
 /// Формирует один поиск маршрута без метки и адреса источника.
 pub fn r2o_route_lookup_request(family: R2oRouteFamily, sequence: u32) -> Vec<u8> {
+    r2o_marked_route_lookup_request(family, sequence, 0)
+}
+
+fn r2o_marked_route_lookup_request(family: R2oRouteFamily, sequence: u32, mark: u32) -> Vec<u8> {
     let probe = family.r2o_probe();
     let attribute_length = R2O_NLA_HEADER_LEN + probe.len();
-    let length = R2O_NLMSG_HEADER_LEN + R2O_ROUTE_HEADER_LEN + attribute_length;
+    let mark_attribute_length = R2O_NLA_HEADER_LEN + size_of::<u32>();
+    let length = R2O_NLMSG_HEADER_LEN
+        + R2O_ROUTE_HEADER_LEN
+        + attribute_length
+        + if mark != 0 { mark_attribute_length } else { 0 };
     let mut message = vec![0; length];
     message[..4].copy_from_slice(&(length as u32).to_ne_bytes());
     message[4..6].copy_from_slice(&R2O_RTM_GETROUTE.to_ne_bytes());
@@ -1452,7 +1489,13 @@ pub fn r2o_route_lookup_request(family: R2oRouteFamily, sequence: u32) -> Vec<u8
     let attribute = route + R2O_ROUTE_HEADER_LEN;
     message[attribute..attribute + 2].copy_from_slice(&(attribute_length as u16).to_ne_bytes());
     message[attribute + 2..attribute + 4].copy_from_slice(&R2O_RTA_DST.to_ne_bytes());
-    message[attribute + R2O_NLA_HEADER_LEN..].copy_from_slice(probe);
+    let end = attribute + attribute_length;
+    message[attribute + R2O_NLA_HEADER_LEN..end].copy_from_slice(probe);
+    if mark != 0 {
+        message[end..end + 2].copy_from_slice(&(mark_attribute_length as u16).to_ne_bytes());
+        message[end + 2..end + 4].copy_from_slice(&R2O_RTA_MARK.to_ne_bytes());
+        message[end + R2O_NLA_HEADER_LEN..].copy_from_slice(&mark.to_ne_bytes());
+    }
     message
 }
 
@@ -2550,6 +2593,28 @@ mod tests {
         assert_eq!(route[16], 2);
         assert_eq!(route[17], 32);
         assert_eq!(&route[32..], &[192, 0, 2, 1]);
+    }
+
+    #[test]
+    fn keenetic_egress_query_uses_the_raw_socket_mark() {
+        let mark = 0x1234_002d;
+        for family in [R2oRouteFamily::Ipv4, R2oRouteFamily::Ipv6] {
+            let unmarked = r2o_route_lookup_request(family, 23);
+            let marked = r2o_marked_route_lookup_request(family, 23, mark);
+            assert_eq!(marked.len(), unmarked.len() + 8);
+            assert_eq!(&marked[..4], &(marked.len() as u32).to_ne_bytes());
+            assert_eq!(&marked[4..unmarked.len()], &unmarked[4..]);
+            let attributes =
+                r2o_route_attributes(&marked[R2O_NLMSG_HEADER_LEN..], R2O_ROUTE_HEADER_LEN)
+                    .unwrap();
+            assert_eq!(
+                attributes,
+                [
+                    (R2O_RTA_DST, family.r2o_probe()),
+                    (R2O_RTA_MARK, mark.to_ne_bytes().as_slice()),
+                ]
+            );
+        }
     }
 
     #[test]

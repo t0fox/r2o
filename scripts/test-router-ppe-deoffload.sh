@@ -72,8 +72,13 @@ elif args == ["--noflush"]:
             index, spec = rest[0].split(maxsplit=1)
             if os.environ.get("DROP_CAPTURE_HOOK") == "1" and chain == "FORWARD" and spec == "-j R2O_IN":
                 continue
+            if os.environ.get("REWRITE_RAW_MARK") == "1" and "--comment r2o-raw-udp" in spec:
+                spec = spec.replace("--mark 45", "--mark 0x2d/0xff")
+            if os.environ.get("REORDER_CAPTURE_HOOK") == "1" and chain == "FORWARD" and spec == "-j R2O_IN":
+                position = 0
+            else:
+                position = int(index) - 1
             indices = [i for i, r in enumerate(rules) if r.startswith(prefix)]
-            position = int(index) - 1
             assert 0 <= position <= len(indices), op
             offset = indices[position] if position < len(indices) else (
                 indices[-1] + 1 if indices else len(rules)
@@ -110,7 +115,7 @@ expect_status() {
 }
 compare_d2k() {
     [ -n "${R2O_PPE_D2K_ROOT:-}" ] || return 0
-    test "$(git -C "$R2O_PPE_D2K_ROOT" rev-parse HEAD)" = 8c6bcdc28b3aedeca8618ff645215bfd6408047c
+    test "$(git -C "$R2O_PPE_D2K_ROOT" rev-parse HEAD)" = 2a98b72f10e2a542a7667a2413cad119bc69abf4
     (
         export D2K_PPE_TAG=r2o-ppe D2K_PPE_TCP_PORTS="${R2O_PPE_TCP_PORTS:-$PORTS}"
         export D2K_PPE_UDP_PORTS="${R2O_PPE_UDP_PORTS:-0:65535}"
@@ -136,6 +141,17 @@ test ! -e "$journal"
 cmp "$WORK/foreign" "$WORK/4mangle"
 cmp "$WORK/foreign" "$WORK/6mangle"
 cmp "$WORK/foreign-nat" "$WORK/4nat"
+for defect in REWRITE_RAW_MARK REORDER_CAPTURE_HOOK; do
+    if env "$defect=1" "$R2O_DATAPATH_BIN" --platform up; then
+        echo "firewall up accepted $defect" >&2
+        exit 1
+    fi
+    test "$(cat "$fastnat")" = 1
+    test ! -e "$journal"
+    cmp "$WORK/foreign" "$WORK/4mangle"
+    cmp "$WORK/foreign" "$WORK/6mangle"
+    cmp "$WORK/foreign-nat" "$WORK/4nat"
+done
 if FAIL_RESTORE=all platform up; then exit 1; fi
 test "$(cat "$fastnat")" = 1
 test ! -e "$journal"
@@ -169,6 +185,16 @@ grep -q -- '^-A FORWARD -j R2O_IN$' "$WORK/4mangle"
 "$HELPER" ensure
 expect_status 'ipv4_rules=installed(8/8)'
 test ! -e "$R2O_RUN_DIR/platform.offload-error"
+
+# An NDM reconcile may race loss of the queue peer. Keep FastNAT disabled
+# even when restoring the firewall must wait for the listener.
+cp "$proc/net/netfilter/nfnetlink_queue" "$WORK/queues"
+: > "$proc/net/netfilter/nfnetlink_queue"
+printf '1\n' > "$fastnat"
+if "$HELPER" ensure; then exit 1; fi
+test "$(cat "$fastnat")" = 0
+test "$(cat "$journal")" = 1
+cp "$WORK/queues" "$proc/net/netfilter/nfnetlink_queue"
 
 rm "$fastnat"
 "$HELPER" ensure

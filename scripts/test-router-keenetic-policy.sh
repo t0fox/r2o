@@ -19,6 +19,14 @@ policy, name = Policy0, description = Guest:
     mark: 1234
 policy, name = Policy1, description = Office:
     mark: 00ff
+policy, name = Policy2, description = Duplicate:
+    mark: 0222
+policy, name = Policy3, description = Duplicate:
+    mark: 0333
+policy, name = Policy4, description = Policy5:
+    mark: 0444
+policy, name = Policy5:
+    mark: 0555
 OUT
 EOF
 chmod 0755 "$TEMP/bin/ndmc"
@@ -32,6 +40,8 @@ mark=$(r2o_keenetic_policy_mark Guest)
 [ "$mark" = 1234 ] || { echo "Guest mark: $mark" >&2; exit 1; }
 mark=$(r2o_keenetic_policy_mark Office)
 [ "$mark" = 00ff ] || { echo "Office mark: $mark" >&2; exit 1; }
+[ "$(r2o_keenetic_policy_mark Policy5)" = 0555 ] || { echo "policy ID did not take precedence" >&2; exit 1; }
+[ -z "$(r2o_keenetic_policy_mark Duplicate)" ] || { echo "ambiguous description returned a mark" >&2; exit 1; }
 [ -z "$(r2o_keenetic_policy_mark Missing)" ] || { echo "missing policy returned a mark" >&2; exit 1; }
 
 # Та же трансляция, что в S99r2o: найдено -> 0xMARK/0xffffffff, не найдено -> none.

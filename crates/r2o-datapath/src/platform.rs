@@ -245,6 +245,10 @@ pub fn checks_effective_routes() -> bool {
     Kind::detect().checks_effective_routes()
 }
 
+pub fn is_keenetic() -> bool {
+    Kind::detect() == Kind::Keenetic
+}
+
 impl Platform {
     fn detect() -> Result<Self> {
         let root = path("R2O_DIR", Path::new("/opt/r2o"));
@@ -587,10 +591,13 @@ impl Platform {
         if start {
             self.load_modules();
         }
+        let manage_fastnat = self.kind == Kind::Keenetic;
+        if manage_fastnat && !start {
+            self.suspend_keenetic_fastnat()?;
+        }
         let ipv6 = self.use_ipv6();
         self.peers(ipv6)?;
         self.accounting(true)?;
-        let manage_fastnat = self.kind == Kind::Keenetic;
         if !manage_fastnat {
             keenetic::restore_fastnat(self)?;
         }
@@ -658,15 +665,8 @@ impl Platform {
         if start {
             atomic(&active_path, "1\n")?;
         }
-        if manage_fastnat {
-            let state = self.run.join(FASTNAT_ERROR);
-            match keenetic::suspend_fastnat(self) {
-                Ok(()) => remove(&state)?,
-                Err(err) => {
-                    atomic(&state, &err.to_string())?;
-                    eprintln!("r2o-platform: FastNAT, ограниченное покрытие: {err}");
-                }
-            }
+        if manage_fastnat && start {
+            self.suspend_keenetic_fastnat()?;
         }
         if self.kind == Kind::OpenWrt && self.backend == Backend::Nft {
             let state = self.run.join("platform.offload-error");
@@ -685,6 +685,18 @@ impl Platform {
             }
         }
         Ok(None)
+    }
+
+    fn suspend_keenetic_fastnat(&self) -> Result<()> {
+        let state = self.run.join(FASTNAT_ERROR);
+        match keenetic::suspend_fastnat(self) {
+            Ok(()) => remove(&state),
+            Err(err) => {
+                atomic(&state, &err.to_string())?;
+                eprintln!("r2o-platform: FastNAT, ограниченное покрытие: {err}");
+                Ok(())
+            }
+        }
     }
 
     fn reconcile_reported(&self, start: bool, refresh_dns: bool) -> Result<()> {

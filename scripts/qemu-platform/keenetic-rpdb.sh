@@ -162,6 +162,28 @@ ip -6 rule add pref 8 fwmark 45 lookup 302
 run_case unreachable
 ip rule del pref 8
 ip -6 rule del pref 8
+# Only the unmarked reference path is unreachable. The marked raw socket
+# still uses the test WAN. The route gate must use that same WAN.
+ip rule add pref 8 fwmark 0/0xffffffff lookup 302
+ip -6 rule add pref 8 fwmark 0/0xffffffff lookup 302
+for dev in rlan rwan; do
+    ip rule add pref 7 iif "$dev" lookup main
+    ip -6 rule add pref 7 iif "$dev" lookup main
+done
+run_case raw_mark_egress
+for family in 4 6; do
+    baseline=$(counter "$root/source_selected.$family.json" other_egress_packets)
+    before=$(counter "$root/unreachable.$family.json" other_egress_packets)
+    after=$(counter "$root/raw_mark_egress.$family.json" other_egress_packets)
+    [ "$before" -gt "$baseline" ]
+    [ "$before" = "$after" ]
+done
+for dev in rlan rwan; do
+    ip rule del pref 7 iif "$dev" lookup main
+    ip -6 rule del pref 7 iif "$dev" lookup main
+done
+ip rule del pref 8
+ip -6 rule del pref 8
 ip rule add pref 7 iif rvpn lookup 301
 ip -6 rule add pref 7 iif rvpn lookup 301
 run_case unknown_context
