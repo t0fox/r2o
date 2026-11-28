@@ -1,16 +1,20 @@
 //! Локальный opt-in снимок истории поиска и ресурсов для панели.
 
+mod evidence;
 mod process_memory;
+pub use evidence::Components;
+mod report;
 
 use crate::portable_atomic::R2oAtomicU64;
 use process_memory::{Growth, Measurement};
-use serde_json::{Value, json};
+use report::{MemoryRow, Report};
+use serde_json::{Value, json, value::RawValue};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_int, c_long};
 #[cfg(unix)]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -240,6 +244,7 @@ const SAMPLE_CAPACITY: usize = 120;
 const MEMORY_HISTORY_CAPACITY: usize = 1440;
 const ANOMALY_CAPACITY: usize = 8;
 const GROWTH_CAPACITY: usize = 10;
+const CLIENT_HTTP_CAPACITY: usize = 8;
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 // D2O: D2K_DIAG_REPORT_MAX (448 КиБ). История 1440 строк не помещается
 // в прежние 256 КиБ и молча перестала бы записываться.
@@ -581,6 +586,7 @@ struct ProcessSpec {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counts {
+    pub components: Components,
     pub boxes: usize,
     pub bindings: usize,
     pub plans: usize,
@@ -658,14 +664,14 @@ pub struct Recorder {
     event_total: u64,
     sample_total: u64,
     events: VecDeque<Value>,
-    samples: VecDeque<Value>,
+    client_http: VecDeque<Value>,
+    samples: VecDeque<Box<RawValue>>,
     limit_total: u64,
     limits: VecDeque<Value>,
     last_counts: Option<Counts>,
     last_limit_change: Option<Instant>,
     memory_total: u64,
-    // Кортеж: (абсолютное время at, абсолютное mono_ms, значения строки без времени).
-    memory_history: VecDeque<(u64, u64, Vec<Value>)>,
+    memory_history: VecDeque<MemoryRow>,
     anomaly_total: u64,
     anomalies: VecDeque<Value>,
     write_failures: u64,
@@ -693,16 +699,17 @@ impl Recorder {
             sampled: None,
             event_total: 0,
             sample_total: 0,
-            events: VecDeque::with_capacity(EVENT_CAPACITY),
-            samples: VecDeque::with_capacity(SAMPLE_CAPACITY),
+            events: VecDeque::new(),
+            client_http: VecDeque::new(),
+            samples: VecDeque::new(),
             limit_total: 0,
-            limits: VecDeque::with_capacity(LIMIT_CAPACITY),
+            limits: VecDeque::new(),
             last_counts: None,
             last_limit_change: None,
             memory_total: 0,
-            memory_history: VecDeque::with_capacity(MEMORY_HISTORY_CAPACITY),
+            memory_history: VecDeque::new(),
             anomaly_total: 0,
-            anomalies: VecDeque::with_capacity(ANOMALY_CAPACITY),
+            anomalies: VecDeque::new(),
             write_failures: 0,
             process_growth: std::array::from_fn(|_| Growth::default()),
             memory_pid: None,
@@ -711,6 +718,10 @@ impl Recorder {
             first_details: HashMap::new(),
             madvise: MadviseStats::default(),
         }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 
     pub fn set_madvise(&mut self, stats: MadviseStats) {
@@ -760,6 +771,36 @@ impl Recorder {
         self.events.push_back(event);
     }
 
+    /// Только ответ запроса с подтверждённой владельцем каталога привязкой.
+    pub fn record_client_http(&mut self, response: &r2k_core::control::HttpResponseEvent) {
+        if !self.enabled || self.dir.join("paused").is_file() {
+            return;
+        }
+        let target = std::str::from_utf8(&response.host).ok().filter(|host| {
+            host.len() <= 255
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+        });
+        if self.client_http.len() == CLIENT_HTTP_CAPACITY {
+            self.client_http.pop_front();
+        }
+        self.client_http.push_back(json!({
+            "at": unix_seconds(),
+            "target": target,
+            "family": response.key[0],
+            "scope": "client-http-request",
+            "execution_id": response.execution_id,
+            "binding_generation": response.binding.generation,
+            "request_no": response.request_no,
+            "observed_outcome_code": response.code,
+            "complete_response": (response.code == 1).then_some(true),
+            "http_status": (response.status != 0).then_some(response.status),
+            "response_body_bytes": response.body_bytes,
+            "connection_result": null,
+        }));
+    }
+
     pub fn tick(&mut self, collect_counts: impl FnOnce() -> Counts) {
         let now = Instant::now();
         if self
@@ -786,11 +827,12 @@ impl Recorder {
         }
         if session != self.session {
             memory_enable(false);
-            self.events.clear();
-            self.samples.clear();
-            self.limits.clear();
-            self.memory_history.clear();
-            self.anomalies.clear();
+            self.events = VecDeque::new();
+            self.client_http = VecDeque::new();
+            self.samples = VecDeque::new();
+            self.limits = VecDeque::new();
+            self.memory_history = VecDeque::new();
+            self.anomalies = VecDeque::new();
             self.process_growth = std::array::from_fn(|_| Growth::default());
             self.event_total = 0;
             self.sample_total = 0;
@@ -803,7 +845,7 @@ impl Recorder {
             self.memory_pid = None;
             self.memory_start_ticks = None;
             self.memory_epoch = 0;
-            self.first_details.clear();
+            self.first_details = HashMap::new();
             self.sampled = None;
             self.session = session;
             self.enabled = false;
@@ -852,26 +894,29 @@ impl Recorder {
         }
         self.last_counts = Some(counts);
 
-        let mut processes = process_memory(&self.proc_dir, &self.run_dir);
+        let mut processes = Vec::with_capacity(PROCESS_SPECS.len());
         let datapath = [4, 6].map(|family| {
             let name = format!("datapath-health.{family}.json");
             let (age, value) = runtime_health(&self.health_dir.join(name));
             let fresh = age.is_some_and(|age| age <= 20);
             (family, age, value, fresh)
         });
-        let mut details = Vec::with_capacity(processes.len());
-        for (index, process) in processes.iter_mut().enumerate() {
-            let name = PROCESS_SPECS[index].name;
-            let Some(pid) = process["pid"].as_u64().filter(|pid| *pid != 0) else {
+        let mut details = Vec::with_capacity(PROCESS_SPECS.len());
+        for (index, spec) in PROCESS_SPECS.iter().enumerate() {
+            let name = spec.name;
+            let Some(pid) = process_pid(spec, &self.proc_dir, &self.run_dir) else {
+                processes.push(empty_process(name));
                 self.process_growth[index].reset_window();
                 details
                     .push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
                 continue;
             };
-            let mut detail = process_detail(process, at, mono_ms, &self.proc_dir);
-            let ticks = detail["start_ticks"].as_u64();
             let base = self.proc_dir.join(pid.to_string());
-            let (anonymous, source) = process_memory::anonymous(process, &detail, &base);
+            let ticks = process_memory::start_ticks(&base);
+            let status = fs::read_to_string(base.join("status")).unwrap_or_default();
+            let mut process = process_status(name, pid, &status);
+            let mut detail = process_detail(&process, at, mono_ms, &base, &status, ticks);
+            let (anonymous, source) = process_memory::anonymous(&process, &detail, &base);
             let sidecar = match name {
                 "r2o-controller6" => "r2o-controller6.memory",
                 "r2o-datapath" => "datapath-health.4.memory",
@@ -906,7 +951,7 @@ impl Recorder {
             }
             // A restart between procfs reads invalidates the entire sample.
             if ticks.is_some() && process_memory::start_ticks(&base) != ticks {
-                *process = empty_process(name);
+                processes.push(empty_process(name));
                 self.process_growth[index].reset_window();
                 details
                     .push(json!({"name":name,"first":self.first_details.get(name),"latest":null}));
@@ -945,7 +990,7 @@ impl Recorder {
                 }
                 json!(tables)
             };
-            let measurement = Measurement::from_report(process, &detail, mono_ms);
+            let measurement = Measurement::from_report(&process, &detail, mono_ms);
             if let Some(anomaly) = self.process_growth[index].record(measurement, name, at) {
                 self.record_anomaly(anomaly);
             }
@@ -956,6 +1001,7 @@ impl Recorder {
             }) {
                 self.first_details.insert(name.to_owned(), detail.clone());
             }
+            processes.push(process);
             details.push(json!({
                 "name": name,
                 "first": self.first_details.get(name),
@@ -1028,45 +1074,60 @@ impl Recorder {
                 .unwrap_or(-1)
         };
         let rollup = if rollup_status != ROLLUP_OK && rollup_value("rss_kib") < 0 {
-            Value::Null
+            None
         } else {
-            json!([
-                compact_kib(rollup_value("rss_kib")),
-                compact_kib(rollup_value("pss_kib")),
-                compact_kib(rollup_value("anonymous_kib")),
-                compact_kib(rollup_value("private_dirty_kib")),
-                compact_kib(rollup_value("swap_kib")),
-            ])
+            Some(
+                [
+                    "rss_kib",
+                    "pss_kib",
+                    "anonymous_kib",
+                    "private_dirty_kib",
+                    "swap_kib",
+                ]
+                .map(|key| compact_kib(rollup_value(key))),
+            )
         };
         let rss_kib = compact_kib(field_i64(primary, "rss_kib").unwrap_or(-1));
         let vm_data_kib = compact_kib(field_i64(primary, "vm_data_kib").unwrap_or(-1));
         let vm_swap_kib = compact_kib(field_i64(primary, "vm_swap_kib").unwrap_or(-1));
         let rss_anon_kib = compact_kib(field_i64(primary, "anon_kib").unwrap_or(-1));
-        let memory_tail = vec![
-            json!(rss_kib),
-            json!(vm_data_kib),
-            json!(vm_swap_kib),
-            json!(rollup_status),
-            json!(rollup_errno),
-            json!(rollup),
-            json!(rss_anon_kib),
-            json!(compact_bytes(counts.catalog_bytes)),
-            json!(compact_bytes(counts.http_bytes)),
-            json!(compact_bytes(counts.snapshot_bytes)),
-            json!(compact_bytes(counts.tracked_tcp_bytes)),
-            json!(compact_bytes(counts.tracked_quic_bytes)),
-            json!(compact_bytes(counts.tracked_tls_bytes)),
-            json!(compact_count(counts.tasks as u64)),
-            json!(compact_count(counts.workers_live)),
-            json!(compact_count(counts.workers_result_pending)),
-            json!(compact_count(counts.workers_join_pending)),
-            json!(self.memory_epoch),
-        ];
+        let row = MemoryRow {
+            at,
+            mono_s: mono_ms / 1000,
+            rss_kib,
+            vm_data_kib,
+            vm_swap_kib,
+            rollup_status,
+            rollup_errno: rollup_errno.and_then(|errno| i32::try_from(errno).ok()),
+            rollup,
+            rss_anon_kib,
+            bytes: [
+                counts.catalog_bytes,
+                counts.http_bytes,
+                counts.snapshot_bytes,
+                counts.tracked_tcp_bytes,
+                counts.tracked_quic_bytes,
+                counts.tracked_tls_bytes,
+            ]
+            .map(compact_bytes),
+            counts: [
+                counts.tasks as u64,
+                counts.workers_live,
+                counts.workers_result_pending,
+                counts.workers_join_pending,
+            ]
+            .map(compact_count),
+            epoch: self.memory_epoch,
+        };
         self.memory_total = self.memory_total.saturating_add(1);
         if self.memory_history.len() == MEMORY_HISTORY_CAPACITY {
             self.memory_history.pop_front();
+        } else if self.memory_history.len() == self.memory_history.capacity() {
+            let remaining = MEMORY_HISTORY_CAPACITY - self.memory_history.len();
+            self.memory_history
+                .reserve_exact(remaining.min(self.memory_history.len().max(4)));
         }
-        self.memory_history.push_back((at, mono_ms, memory_tail));
+        self.memory_history.push_back(row);
 
         let conntrack_count =
             read_number(&self.proc_dir.join("sys/net/netfilter/nf_conntrack_count"));
@@ -1080,11 +1141,36 @@ impl Recorder {
             .filter(|(_, _, _, fresh)| *fresh)
             .filter_map(|(_, _, value, _)| value["flows"].as_u64())
             .reduce(u64::saturating_add);
+        let process_totals = evidence::process_totals(&processes);
+        let datapath_identity = datapath.each_ref().map(|(_, _, health, fresh)| {
+            if !fresh {
+                return None;
+            }
+            let pid = health["pid"].as_u64()?;
+            let ticks = health["start_ticks"].as_u64()?;
+            Some(processes.iter().any(|process| {
+                matches!(
+                    process["name"].as_str(),
+                    Some("r2o-datapath" | "r2o-datapath6")
+                ) && process["pid"].as_u64() == Some(pid)
+                    && process["start_ticks"].as_u64() == Some(ticks)
+            }))
+        });
+        let telegram = processes.iter().find(|row| row["name"] == "r2o-telegram");
+        let telegram = evidence::telegram(
+            &self.health_dir,
+            &self.proc_dir,
+            telegram
+                .and_then(|row| row["pid"].as_u64())
+                .filter(|pid| *pid != 0),
+            telegram.and_then(|row| row["start_ticks"].as_u64()),
+        );
+        let [mem_total_kib, mem_available_kib] = meminfo(&self.proc_dir);
         let sample = json!({
             "at": at,
             "mono_ms": mono_ms,
-            "mem_total_kib": meminfo(&self.proc_dir, "MemTotal:"),
-            "mem_available_kib": meminfo(&self.proc_dir, "MemAvailable:"),
+            "mem_total_kib": mem_total_kib,
+            "mem_available_kib": mem_available_kib,
             "system_conntrack": conntrack_count,
             "datapath_flows": datapath_flows,
             "datapath_packets_v4_v6": datapath.each_ref().map(|(_, _, value, fresh)| {
@@ -1150,32 +1236,15 @@ impl Recorder {
             "limit_reason": limit_reason_values(&counts),
             "processes": processes,
         });
+        let Ok(sample) = serde_json::value::to_raw_value(&sample) else {
+            self.record_write_error("serialize", 0);
+            return;
+        };
         if self.samples.len() == SAMPLE_CAPACITY {
             self.samples.pop_front();
         }
         self.samples.push_back(sample);
 
-        let memory_base = self
-            .memory_history
-            .front()
-            .map(|(row_at, row_mono_ms, _)| (*row_at, *row_mono_ms / 1000));
-        let memory_rows: Vec<Value> = self
-            .memory_history
-            .iter()
-            .map(|(row_at, row_mono_ms, tail)| {
-                // Компактная история и time_base используют секунды, подробные снимки — миллисекунды.
-                let row_mono_s = *row_mono_ms / 1000;
-                let (base_at, base_mono) = memory_base.unwrap_or((*row_at, row_mono_s));
-                let mut row = Vec::with_capacity(2 + tail.len());
-                row.push(json!(row_at.saturating_sub(base_at)));
-                row.push(json!(row_mono_s.saturating_sub(base_mono)));
-                row.extend(tail.iter().cloned());
-                Value::Array(row)
-            })
-            .collect();
-        let memory_time_base = memory_base
-            .map(|(base_at, base_mono)| json!([base_at, base_mono]))
-            .unwrap_or_else(|| json!([null, null]));
         let (worker_age, worker_state) =
             runtime_health(&self.health_dir.join("platform-health.json"));
         let (start_age, start_state) =
@@ -1186,7 +1255,8 @@ impl Recorder {
             } else {
                 (start_age, start_state)
             };
-        let report = json!({
+        let state = self.dir.parent();
+        let current = json!({
             "schema": 1,
             "enabled": true,
             "controller_pid": std::process::id(),
@@ -1201,7 +1271,6 @@ impl Recorder {
             "events_overwritten": self.event_total.saturating_sub(self.events.len() as u64),
             "limit_transitions_overwritten": self.limit_total.saturating_sub(self.limits.len() as u64),
             "samples_overwritten": self.sample_total.saturating_sub(self.samples.len() as u64),
-            "memory_history_overwritten": self.memory_total.saturating_sub(self.memory_history.len() as u64),
             "http_storage_limits": {
                 "records_bytes": counts.http_records_limit_bytes,
                 "queue_bytes": counts.http_queue_limit_bytes,
@@ -1214,9 +1283,11 @@ impl Recorder {
             "anomalies_overwritten": self.anomaly_total.saturating_sub(self.anomalies.len() as u64),
             "diagnostic_write_failures": self.write_failures,
             "observation_pipeline": {
-                "families": datapath.map(|(family, age, value, fresh)| json!({
-                    "family": family, "sample_age_s": age, "fresh": fresh, "datapath": value,
-                })),
+                "families": datapath.into_iter().zip(datapath_identity).map(|((family, age, value, fresh), identity)| json!({
+                    "family": family, "sample_age_s": age, "fresh": fresh,
+                    "process_identity_confirmed": identity,
+                    "datapath": value,
+                })).collect::<Vec<_>>(),
                 "kernel_nfqueue": kernel_nfqueue(&self.proc_dir),
                 "firewall": {
                     "active_marker": self.run_dir.join("platform.active").is_file(),
@@ -1224,21 +1295,27 @@ impl Recorder {
                     "state": firewall_state,
                 },
             },
-            "anomalies": self.anomalies,
-            "events": self.events,
-            "limit_transitions": self.limits,
-            "memory_history": {
-                "capacity": MEMORY_HISTORY_CAPACITY,
-                "sample_interval_ms": SAMPLE_INTERVAL.as_millis(),
-                "time_base": memory_time_base,
-                "smaps_rollup_status_codes": ["not-read","unavailable","ok","parse-error","unsupported"],
-                "fields": MEMORY_HISTORY_FIELDS,
-                "samples": memory_rows,
-            },
-            "samples": self.samples,
             "memory_details": details,
+            "runtime_evidence": {
+                "process_memory_totals": process_totals,
+                "network_environment": evidence::network(&self.proc_dir),
+                "components": counts.components,
+                "dns_source_order": ["keenetic-system", "keenetic-filter", "dnsproxy", "doqd", "other-known", "other"],
+                "raw_trial_field_order": ["pending", "executed", "dedup_entries"],
+                "telegram": telegram,
+                "telegram_explicit_check": state.map(evidence::telegram_check),
+                "meta_verification": state.and_then(evidence::meta_result),
+                "client_http": self.client_http,
+                "collector_storage": {
+                    "compacted_sample_bytes": self.samples.iter().map(|row| row.get().len()).sum::<usize>(),
+                    "memory_history_capacity_bytes": self.memory_history.capacity() * size_of::<MemoryRow>(),
+                },
+            },
         });
-        self.write_report(&report);
+        let report = Report::new(self, current);
+        if let Err(error) = self.publish_report(&report, self.memory_history.len()) {
+            self.record_write_error(error.0, error.1);
+        }
     }
 
     fn remove_disabled_report(&self) {
@@ -1282,47 +1359,37 @@ impl Recorder {
         self.record_anomaly(anomaly);
     }
 
+    #[cfg(test)]
     fn write_report(&mut self, report: &Value) {
-        if !ensure_diagnostics_dir(&self.dir, true) {
-            let error = Self::last_errno();
-            self.record_write_error("path", error);
-            return;
+        if let Err(error) = self.publish_report(report, 0) {
+            self.record_write_error(error.0, error.1);
         }
-        let bytes = match process_memory::serialize_report(report, REPORT_MAX) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                self.record_write_error("serialize", 0);
-                return;
-            }
-        };
-        if bytes.is_empty() {
-            return;
+    }
+
+    fn publish_report(
+        &self,
+        report: &impl report::SerializeReport,
+        memory_rows: usize,
+    ) -> Result<(), (&'static str, i32)> {
+        let error = |stage, err: std::io::Error| (stage, err.raw_os_error().unwrap_or(0));
+        if !ensure_diagnostics_dir(&self.dir, true) {
+            return Err(("path", Self::last_errno()));
         }
         #[cfg(unix)]
-        let _guard = match lock_diagnostics_dir(&self.dir) {
-            Ok(guard) => guard,
-            Err(error) => {
-                self.record_write_error("lock", error.raw_os_error().unwrap_or(0));
-                return;
-            }
-        };
+        let _guard = lock_diagnostics_dir(&self.dir).map_err(|err| error("lock", err))?;
         let current = diagnostics_session(&self.dir);
         if current.is_none()
             || self.dir.join("paused").is_file()
             || self.session.is_some_and(|session| Some(session) != current)
         {
-            return;
-        }
-        if bytes.len() > REPORT_MAX {
-            self.record_write_error("size-limit", libc::EFBIG);
-            return;
+            return Ok(());
         }
         let tmp = self.dir.join("report.new");
         let path = self.dir.join("report.json");
-        if let Err(error) = fs::remove_file(&tmp)
-            && error.kind() != std::io::ErrorKind::NotFound
+        if let Err(err) = fs::remove_file(&tmp)
+            && err.kind() != std::io::ErrorKind::NotFound
         {
-            self.record_write_error("remove-old-temp", error.raw_os_error().unwrap_or(0));
+            return Err(error("remove-old-temp", err));
         }
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -1331,34 +1398,21 @@ impl Recorder {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let Ok(mut file) = options.open(&tmp) else {
-            let error = Self::last_errno();
-            self.record_write_error("open-temp", error);
-            return;
-        };
-        let write_result = file.write_all(&bytes).and_then(|()| file.sync_all());
-        let write_error = write_result
-            .as_ref()
-            .err()
-            .and_then(std::io::Error::raw_os_error)
-            .unwrap_or(0);
-        let write_failed = write_result.is_err();
-        if write_failed
-            || fs::metadata(&tmp).map_or(true, |metadata| metadata.len() as usize > REPORT_MAX)
+        let mut file = options.open(&tmp).map_err(|err| error("open-temp", err))?;
+        let result = report::write_bounded(&mut file, report, memory_rows)
+            .and_then(|()| file.sync_all().map_err(|err| error("flush-close", err)));
+        drop(file);
+        if result.is_err()
             || diagnostics_session(&self.dir) != current
+            || self.dir.join("paused").is_file()
         {
             let _ = fs::remove_file(&tmp);
-            if write_failed {
-                self.record_write_error("flush-close", write_error);
-            }
-            return;
+            return result;
         }
-        drop(file);
-        if let Err(error) = fs::rename(&tmp, &path) {
-            let code = error.raw_os_error().unwrap_or(0);
+        fs::rename(&tmp, &path).map_err(|err| {
             let _ = fs::remove_file(&tmp);
-            self.record_write_error("rename", code);
-        }
+            error("rename", err)
+        })
     }
 }
 
@@ -1599,58 +1653,47 @@ fn read_number(path: &Path) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-fn meminfo(proc_dir: &Path, key: &str) -> Option<u64> {
-    fs::read_to_string(proc_dir.join("meminfo"))
-        .ok()?
-        .lines()
-        .find_map(|line| {
-            let (name, rest) = line.split_once(':')?;
-            (name == key.trim_end_matches(':'))
-                .then(|| rest.split_whitespace().next()?.parse().ok())
-                .flatten()
+fn meminfo(proc_dir: &Path) -> [Option<u64>; 2] {
+    let Ok(text) = fs::read_to_string(proc_dir.join("meminfo")) else {
+        return [None; 2];
+    };
+    ["MemTotal:", "MemAvailable:"].map(|key| {
+        text.lines().find_map(|line| {
+            line.strip_prefix(key)
+                .and_then(|value| value.split_whitespace().next()?.parse().ok())
         })
+    })
 }
 
-fn process_memory(proc_dir: &Path, run_dir: &Path) -> Vec<Value> {
-    PROCESS_SPECS
-        .iter()
-        .map(|spec| {
-            let read_pid = |pidfile: &str| {
-                fs::read_to_string(run_dir.join(pidfile))
-                    .ok()
-                    .and_then(|value| value.trim().parse::<u64>().ok())
-                    .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64)
-            };
-            let pid = read_pid(spec.pidfile)
-                .or_else(|| spec.fallback_pidfile.and_then(|pidfile| read_pid(pidfile)));
-            let Some(pid) = pid else {
-                return empty_process(spec.name);
-            };
-            let base = proc_dir.join(pid.to_string());
-            // Ядро усекает comm до 15 символов: r2o-controller-linux…
-            // превращается в r2o-controller-. Проверяем префикс, иначе
-            // диагностика показывала pid=0 и нулевой RSS для всех процессов.
-            let comm_matches = fs::read_to_string(base.join("comm")).is_ok_and(|name| {
-                let name = name.trim_end_matches(['\r', '\n']);
-                name == spec.comm || name.starts_with(spec.comm)
-            });
-            if !comm_matches {
-                return empty_process(spec.name);
-            }
-            let status = fs::read_to_string(base.join("status")).unwrap_or_default();
-            let field = |key: &str| {
-                status
-                    .lines()
-                    .find_map(|line| proc_field(line, key))
-                    .map(|value| value as u64)
-            };
-            json!({
-                "name":spec.name,"pid":pid,"rss_kib":field("VmRSS"),"hwm_kib":field("VmHWM"),
-                "anon_kib":field("RssAnon"),"threads":field("Threads"),
-                "vm_data_kib":field("VmData"),"vm_swap_kib":field("VmSwap")
-            })
-        })
-        .collect()
+fn process_pid(spec: &ProcessSpec, proc_dir: &Path, run_dir: &Path) -> Option<u64> {
+    let read_pid = |pidfile: &str| {
+        fs::read_to_string(run_dir.join(pidfile))
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|pid| *pid > 0 && *pid <= i32::MAX as u64)
+    };
+    let pid = read_pid(spec.pidfile).or_else(|| spec.fallback_pidfile.and_then(read_pid))?;
+    // Ядро усекает имя процесса до 15 символов.
+    let comm = fs::read_to_string(proc_dir.join(pid.to_string()).join("comm")).ok()?;
+    comm.trim_end_matches(['\r', '\n'])
+        .starts_with(spec.comm)
+        .then_some(pid)
+}
+
+fn status_number(status: &str, key: &str) -> Option<u64> {
+    status
+        .lines()
+        .find_map(|line| proc_field(line, key))
+        .and_then(|value| u64::try_from(value).ok())
+}
+
+fn process_status(name: &str, pid: u64, status: &str) -> Value {
+    let field = |key| status_number(status, key);
+    json!({
+        "name":name,"pid":pid,"rss_kib":field("VmRSS"),"hwm_kib":field("VmHWM"),
+        "anon_kib":field("RssAnon"),"threads":field("Threads"),
+        "vm_data_kib":field("VmData"),"vm_swap_kib":field("VmSwap")
+    })
 }
 
 fn empty_process(name: &str) -> Value {
@@ -1658,23 +1701,21 @@ fn empty_process(name: &str) -> Value {
         "vm_data_kib":null,"vm_swap_kib":null})
 }
 
-fn process_detail(process: &Value, at: u64, mono_ms: u64, proc_dir: &Path) -> Value {
-    let pid = process["pid"].as_u64().unwrap_or(0);
-    let base = proc_dir.join(pid.to_string());
-    let status = fs::read_to_string(base.join("status")).unwrap_or_default();
-    let field = |key: &str| {
-        status
-            .lines()
-            .find_map(|line| proc_field(line, key))
-            .map(|value| value as u64)
-    };
-    let start_ticks = process_memory::start_ticks(&base);
+fn process_detail(
+    process: &Value,
+    at: u64,
+    mono_ms: u64,
+    base: &Path,
+    status: &str,
+    start_ticks: Option<u64>,
+) -> Value {
+    let field = |key| status_number(status, key);
     let fd_count = read_fd_count(&base.join("fd"));
     // D2O читает только smaps_rollup; полный smaps не обходит даже как
     // fallback, потому что это дорого и не требуется для отчёта.
-    let (rollup_status, rollup_source, rollup_errno, rollup) = read_smaps_rollup(&base);
+    let (rollup_status, rollup_source, rollup_errno, rollup) = read_smaps_rollup(base);
     json!({
-        "pid":pid,"at":at,"mono_ms":mono_ms,"rss_kib":process["rss_kib"],
+        "pid":process["pid"],"at":at,"mono_ms":mono_ms,"rss_kib":process["rss_kib"],
         "start_ticks":start_ticks,"vm_size_kib":field("VmSize"),"vm_data_kib":field("VmData"),
         "vm_stack_kib":field("VmStk"),"vm_swap_kib":field("VmSwap"),"fd_count":fd_count,
         "smaps_rollup_status":rollup_status,
@@ -2410,15 +2451,16 @@ mod tests {
         recorder.proc_dir = proc_dir;
         recorder.tick(|| Counts::default());
         assert_eq!(recorder.memory_history.len(), 1);
-        let row = &recorder.memory_history.front().unwrap().2;
-        assert_eq!(row[0], json!(1024));
-        assert_eq!(row[1], json!(4096));
-        assert_eq!(row[2], json!(8));
-        // C memory_history: rollup_status_code/errno/rollup[5].
-        assert_eq!(row[3], json!(2));
-        assert_eq!(row[4], json!(null));
-        assert_eq!(row[5], json!([1024, 2048, 512, 256, 8]));
-        assert_eq!(row[6], json!(512));
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(recorder.dir.join("report.json")).unwrap()).unwrap();
+        let row = &report["memory_history"]["samples"][0];
+        assert_eq!(row[2], json!(1024));
+        assert_eq!(row[3], json!(4096));
+        assert_eq!(row[4], json!(8));
+        assert_eq!(row[5], json!(2));
+        assert_eq!(row[6], json!(null));
+        assert_eq!(row[7], json!([1024, 2048, 512, 256, 8]));
+        assert_eq!(row[8], json!(512));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2995,6 +3037,26 @@ mod tests {
         )
         .unwrap();
 
+        fs::create_dir_all(proc_dir.join("128")).unwrap();
+        fs::write(run_dir.join("r2o-datapath.pid"), "128\n").unwrap();
+        fs::write(proc_dir.join("128/comm"), "r2o-datapath\n").unwrap();
+        fs::write(
+            proc_dir.join("128/stat"),
+            "128 (r2o-datapath) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20 21\n",
+        )
+        .unwrap();
+        fs::write(proc_dir.join("128/status"), "VmRSS: 2048 kB\n").unwrap();
+        fs::write(
+            run_dir.join("datapath-health.4.json"),
+            r#"{"pid":128,"start_ticks":987654}"#,
+        )
+        .unwrap();
+        fs::write(
+            run_dir.join("datapath-health.6.json"),
+            r#"{"pid":128,"start_ticks":987655}"#,
+        )
+        .unwrap();
+
         let mut recorder = Recorder::new(diag_dir.clone(), run_dir);
         recorder.proc_dir = proc_dir.clone();
         recorder.tick(Counts::default);
@@ -3002,6 +3064,14 @@ mod tests {
             serde_json::from_slice(&fs::read(diag_dir.join("report.json")).unwrap()).unwrap()
         };
         let first = read_report();
+        let families = &first["observation_pipeline"]["families"];
+        assert_eq!(families[0]["process_identity_confirmed"], true);
+        assert_eq!(families[1]["process_identity_confirmed"], false);
+        let total = &first["runtime_evidence"]["process_memory_totals"];
+        assert_eq!(total["processes"], 2);
+        assert_eq!(total["rss_kib"]["sum"], 3072);
+        assert_eq!(total["rss_anon_kib"]["measured"], 1);
+
         let process = first["samples"][0]["processes"]
             .as_array()
             .unwrap()

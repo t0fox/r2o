@@ -1,5 +1,5 @@
 use super::{Value, VecDeque, fs, json};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 const WINDOW: usize = 10;
@@ -143,31 +143,33 @@ pub(super) fn anonymous(
     if let Some(value) = detail["smaps_rollup"]["anonymous_kib"].as_u64() {
         return (Some(value), "smaps_rollup");
     }
-    const MAX: usize = 1024 * 1024;
-    let read = || {
-        let mut data = String::new();
-        fs::File::open(base.join("smaps"))
-            .ok()?
-            .take(MAX as u64 + 1)
-            .read_to_string(&mut data)
-            .ok()?;
-        (data.len() <= MAX)
-            .then(|| smaps_anonymous(&data))
-            .flatten()
-    };
-    read().map_or((None, "unavailable"), |value| (Some(value), "smaps"))
+    let value = fs::File::open(base.join("smaps"))
+        .ok()
+        .and_then(smaps_anonymous);
+    value.map_or((None, "unavailable"), |value| (Some(value), "smaps"))
 }
 
-fn smaps_anonymous(data: &str) -> Option<u64> {
+fn smaps_anonymous(input: impl Read) -> Option<u64> {
+    const MAX: u64 = 1024 * 1024;
+    let mut reader = BufReader::new(input.take(MAX + 1));
+    let mut line = Vec::new();
     let mut sum = None::<u64>;
-    for line in data
-        .lines()
-        .filter_map(|line| line.strip_prefix("Anonymous:"))
-    {
-        let value: u64 = line.split_whitespace().next()?.parse().ok()?;
-        sum = Some(sum.unwrap_or(0).checked_add(value)?);
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line).ok()? == 0 {
+            break;
+        }
+        if let Some(field) = line.strip_prefix(b"Anonymous:") {
+            let value = std::str::from_utf8(field)
+                .ok()?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()?;
+            sum = Some(sum.unwrap_or(0).checked_add(value)?);
+        }
     }
-    sum
+    (reader.get_ref().limit() != 0).then_some(sum).flatten()
 }
 
 fn heap_payload(bytes: u64, objects: u64, peak_bytes: u64) -> Value {
@@ -285,27 +287,6 @@ pub(super) fn linkage(path: &Path) -> Option<&'static str> {
     Some("static")
 }
 
-pub(super) fn serialize_report(report: &Value, limit: usize) -> serde_json::Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec(report)?;
-    if bytes.len() <= limit || !report["memory_history"]["samples"].is_array() {
-        return Ok(bytes);
-    }
-
-    let mut compact = report.clone();
-    while bytes.len() > limit {
-        let samples = compact["memory_history"]["samples"].as_array_mut().unwrap();
-        let drop_count = ((bytes.len() - limit) / 96 + 1).min(samples.len().saturating_sub(1));
-        if drop_count == 0 {
-            break;
-        }
-        samples.drain(..drop_count);
-        let dropped = compact["memory_history_overwritten"].as_u64().unwrap_or(0);
-        compact["memory_history_overwritten"] = json!(dropped.saturating_add(drop_count as u64));
-        bytes = serde_json::to_vec(&compact)?;
-    }
-    Ok(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,27 +353,19 @@ mod tests {
     }
 
     #[test]
-    fn report_drops_old_rows_when_needed_and_preserves_time_base() {
-        let data = json!({
-            "memory_history_overwritten": 42,
-            "memory_history": {"time_base": [9000, 0], "samples": [[0, 0], [60, 60], [120, 120]]},
-        });
-        let limit = serde_json::to_vec(&data).unwrap().len() - 6;
-        let bounded: Value =
-            serde_json::from_slice(&serialize_report(&data, limit).unwrap()).unwrap();
-        assert_eq!(bounded["memory_history"]["time_base"], json!([9000, 0]));
-        assert_eq!(bounded["memory_history"]["samples"][0], json!([60, 60]));
-        assert_eq!(bounded["memory_history_overwritten"], 43);
-    }
-
-    #[test]
     fn older_smaps_counts_anonymous_pages_and_preserves_missing_fields() {
-        assert_eq!(smaps_anonymous("Rss: 24 kB\nAnonymous: 0 kB\n"), Some(0));
         assert_eq!(
-            smaps_anonymous("Anonymous: 8 kB\nAnonymous: 16 kB\n"),
+            smaps_anonymous("Rss: 24 kB\nAnonymous: 0 kB\n".as_bytes()),
+            Some(0)
+        );
+        assert_eq!(
+            smaps_anonymous("Anonymous: 8 kB\nAnonymous: 16 kB\n".as_bytes()),
             Some(24)
         );
-        assert_eq!(smaps_anonymous("Rss: 24 kB\n"), None);
-        assert_eq!(smaps_anonymous("Anonymous: 8 kB\nAnonymous: ?\n"), None);
+        assert_eq!(smaps_anonymous("Rss: 24 kB\n".as_bytes()), None);
+        assert_eq!(
+            smaps_anonymous("Anonymous: 8 kB\nAnonymous: ?\n".as_bytes()),
+            None
+        );
     }
 }

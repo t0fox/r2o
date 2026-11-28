@@ -107,6 +107,10 @@ impl MetaTraffic {
         protection_enabled(&self.state)
     }
 
+    pub fn diagnostic_counts(&self) -> (bool, usize, usize) {
+        (self.enabled, self.names.len(), self.pending.len())
+    }
+
     pub fn enabled_for(&self, host: &str) -> bool {
         self.enabled()
             && product(host)

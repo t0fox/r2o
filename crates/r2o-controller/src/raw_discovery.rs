@@ -203,6 +203,15 @@ pub struct Trials {
 }
 
 impl Trials {
+    /// Незавершённые, наблюдавшие исполнение, и записи дедупликации.
+    pub fn diagnostic_counts(&self) -> [usize; 3] {
+        [
+            self.pending.len(),
+            self.pending.iter().filter(|entry| entry.execution.is_some()).count(),
+            self.recent.len(),
+        ]
+    }
+
     pub fn expire(&mut self, now: Instant) {
         self.pending.retain(|entry| {
             if now >= entry.expires {

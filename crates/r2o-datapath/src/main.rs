@@ -1,5 +1,9 @@
 #[cfg(target_os = "linux")]
+mod diagnostic_evidence;
+
+#[cfg(target_os = "linux")]
 mod app {
+    use super::diagnostic_evidence::Evidence;
     use r2k_core::control::{
         ACK_BAD_ARGS, ACK_OK, Ack, AppliedEvent, COMMAND_SET_TCP_STALL_BUDGETS, EVENT_APPLIED,
         EVENT_HELLO, EVENT_HTTP_PORTAL, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL,
@@ -1877,6 +1881,7 @@ mod app {
             });
         let mut next_diagnostics = Instant::now();
         let mut diagnostic_write_failed = false;
+        let mut diagnostic_evidence = Evidence::default();
         let mut rpdb_observe_only_packets = 0u64;
         let mut rpdb_checked_packets = [0u64; 4];
         const ROUTE_CHECK_LIMIT: usize = 16;
@@ -2038,7 +2043,9 @@ mod app {
                 && now >= next_diagnostics
             {
                 next_diagnostics = now + Duration::from_secs(5);
-                if dir.join("enabled").is_file() && !dir.join("paused").is_file() {
+                diagnostic_evidence
+                    .set_enabled(dir.join("enabled").is_file() && !dir.join("paused").is_file());
+                if diagnostic_evidence.enabled() {
                     let stats = socket.stats();
                     let udp_stats = udp_sessions.stats();
                     let start_ticks = r2o_proc_start_ticks();
@@ -2046,6 +2053,8 @@ mod app {
                         &output.with_extension("memory"),
                         start_ticks,
                     );
+                    let default_egress =
+                        route_gate.r2o_describe_default_ifindices(route_family, 128);
                     let mut health = serde_json::json!({
                         "pid": std::process::id(),
                         "start_ticks": start_ticks,
@@ -2063,6 +2072,16 @@ mod app {
                             "pending-udp": [pending_udp_releases.len(), pending_udp_releases.capacity()],
                         },
                         "journal_entries": flow_journal.count(),
+                        "flow_evidence": diagnostic_evidence.snapshot(&flow_journal, r2o_now_ns()),
+                        "route_monitor": {
+                            "default_egress": default_egress,
+                            "fwmark_selectors": route_gate.r2o_rule_count(route_family),
+                            "updates": route_watch_notifications,
+                            "effective_lookup_enabled": check_effective_routes,
+                            "configuration_is_flow_proof": false,
+                        },
+                        "raw_discovery_active": opaque_flows.is_some(),
+                        "kernel_receive_losses": socket.lost_packets(),
                         "conntrack_netlink_up": ct_up,
                         "nfqueue": {
                             "packets": stats.packets, "bytes": stats.bytes,
@@ -2113,7 +2132,7 @@ mod app {
                         }
                         let [prepared, done, refused, unsent, damaged] = journal_counts;
                         health["keenetic"] = serde_json::json!({
-                            "route_scope": route_scope.diagnostics(&route_gate, route_family),
+                            "route_scope": route_scope.diagnostics(&route_gate, &default_egress),
                             "socket_marks": {
                                 "raw": raw_mark, "probe": options.probe_mark, "measure": measure_mark,
                             },
@@ -2777,6 +2796,20 @@ mod app {
                         now,
                     ) {
                         route_scope.total = route_scope.total.saturating_add(1);
+                        if diagnostic_evidence.wants_route() {
+                            let decision = match reason {
+                                RouteScopeSkip::Policy => "outside-policy",
+                                RouteScopeSkip::Egress => "other-egress",
+                                RouteScopeSkip::Mark(_) => "route-mark",
+                                RouteScopeSkip::KnownFlow => "previously-excluded-flow",
+                            };
+                            diagnostic_evidence.route(
+                                &packet,
+                                decision,
+                                controller_probe,
+                                r2o_now_ns(),
+                            );
+                        }
                         if keenetic_runtime {
                             route_scope.record(reason, packet.output_device);
                         }
@@ -2790,6 +2823,7 @@ mod app {
                     }
                     let mut verified_path = false;
                     let mut rpdb_blocks_apply = false;
+                    let mut rpdb_diagnostic_decision = "rpdb-observe-only";
                     if check_effective_routes
                         && options.mode == RuntimeMode::Apply
                         && outbound
@@ -2855,6 +2889,13 @@ mod app {
                             };
                             rpdb_checked_packets[index] =
                                 rpdb_checked_packets[index].saturating_add(1);
+                            if index != 0 && diagnostic_evidence.wants_route() {
+                                rpdb_diagnostic_decision = match result {
+                                    Some(R2oEffectiveRoute::Different) => "rpdb-different",
+                                    Some(R2oEffectiveRoute::Unavailable) => "rpdb-unavailable",
+                                    _ => "rpdb-pending",
+                                };
+                            }
                             if result == Some(R2oEffectiveRoute::Different)
                                 && controller_probe
                                 && let Some(bytes) = original_from_queue
@@ -2921,6 +2962,14 @@ mod app {
                     };
                     let packet_mode = if rpdb_observe_only {
                         rpdb_observe_only_packets = rpdb_observe_only_packets.saturating_add(1);
+                        if diagnostic_evidence.wants_route() {
+                            diagnostic_evidence.route(
+                                &packet,
+                                rpdb_diagnostic_decision,
+                                controller_probe,
+                                r2o_now_ns(),
+                            );
+                        }
                         if !route_context_reported {
                             eprintln!(
                                 "r2o-datapath: {family_name} RPDB не подтвердил общий маршрут LAN, зонда и raw; продолжаю наблюдение без применения плана"
@@ -6257,7 +6306,7 @@ mod app {
             }
         }
 
-        fn diagnostics(&self, gate: &R2oRouteGate, family: R2oRouteFamily) -> serde_json::Value {
+        fn diagnostics(&self, gate: &R2oRouteGate, default_egress: &str) -> serde_json::Value {
             serde_json::json!({
                 "outside_policy_packets": self.policy,
                 "other_egress_packets": self.egress,
@@ -6265,7 +6314,7 @@ mod app {
                 "known_flow_packets": self.known_flow,
                 "by_mark": self.by_mark,
                 "by_egress_ifindex": self.by_ifindex,
-                "default_egress": gate.r2o_describe_default_ifindices(family, 128),
+                "default_egress": default_egress,
                 "rule_selectors": gate.r2o_describe_rules(512),
             })
         }

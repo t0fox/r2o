@@ -14038,6 +14038,9 @@ struct R2oDiscoverySearches {
     suspect_events: u64,
     probes_used: u64,
     client_unfit: u64,
+    tcp_order_experiments: u64,
+    tcp_order_probes: u64,
+    tcp_order_confirmations: u64,
     /// C `s->confirms`: подтверждения, полученные за сессию процесса.
     confirms: u64,
     /// C `t->unfit_plan_id[]`: планы, которые уже не подошли клиенту.
@@ -14086,6 +14089,53 @@ struct R2oDiscoveryVerify {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy)]
+struct R2oDiagnosticPhase {
+    since: std::time::Instant,
+    ms: [u32; 5],
+    complete_from_start: bool,
+}
+
+#[cfg(unix)]
+impl R2oDiagnosticPhase {
+    fn elapsed(mut self, phase: &str, now: std::time::Instant) -> Self {
+        let index = match phase {
+            "распознаём поведение"
+            | "базовый вопрос перед своими планами"
+            | "спрашиваем коробку о свойствах" => 0,
+            "выводим планы" => 1,
+            "проверяем свои планы"
+            | "проверяем сохранённые планы коробок"
+            | "проверяем готовое узнанной коробки" => 2,
+            "проверяем выведенный план" => 3,
+            _ => 4,
+        };
+        let ms = now.saturating_duration_since(self.since).as_millis();
+        self.ms[index] = self.ms[index].saturating_add(ms.min(u32::MAX as u128) as u32);
+        self.since = now;
+        self
+    }
+}
+
+#[cfg(all(unix, test))]
+#[test]
+fn diagnostic_phase_times_keep_saved_checks_and_verification_separate() {
+    use std::time::{Duration, Instant};
+
+    let start = Instant::now();
+    let phases = R2oDiagnosticPhase {
+        since: start,
+        ms: [0; 5],
+        complete_from_start: true,
+    }
+    .elapsed("распознаём поведение", start + Duration::from_millis(40))
+    .elapsed("проверяем свои планы", start + Duration::from_millis(130))
+    .elapsed("выводим планы", start + Duration::from_millis(150))
+    .elapsed("проверяем выведенный план", start + Duration::from_millis(200));
+    assert_eq!(phases.ms, [40, 20, 90, 50, 0]);
+}
+
+#[cfg(unix)]
 struct R2oDiscoverySearch {
     target: r2o_controller::discovery::DiscoveryTarget,
     queued_at: std::time::Instant,
@@ -14115,6 +14165,7 @@ struct R2oDiscoverySearch {
     report_closed: bool,
     /// C `t->props`/`prop_*`: текущий вопрос о свойствах.
     props: R2oPropsState,
+    diagnostic_phase: Option<R2oDiagnosticPhase>,
 }
 
 /// C `ask_settle` (`core/sched.c:2810-2813`): поднять `ask_probes` до
@@ -14186,7 +14237,7 @@ impl R2oDiscoverySearches {
         if starting_run {
             // C `task_reset`: прежний поиск закрывается `local-abort`
             // до очистки полей и выдачи нового report_id.
-            self.report_terminal(target, "local-abort", None, None, now);
+            self.report_terminal(target, "local-abort", None, Some("worker-restarted"), now);
         }
         let search = self
             .entries
@@ -14213,6 +14264,7 @@ impl R2oDiscoverySearches {
                 verify: R2oDiscoveryVerify::default(),
                 report_closed: false,
                 props: R2oPropsState::default(),
+                diagnostic_phase: None,
             });
         if phase == "ожидает безопасного слота замера" || starting_run
         {
@@ -14234,6 +14286,22 @@ impl R2oDiscoverySearches {
             search.trigger_code = 0;
             search.report_closed = false;
             search.props = R2oPropsState::default();
+            search.diagnostic_phase = None;
+        }
+        if r2o_controller::diagnostics::memory_active() {
+            if let Some(timing) = search.diagnostic_phase {
+                if phase != search.phase {
+                    search.diagnostic_phase = Some(timing.elapsed(search.phase, now));
+                }
+            } else if phase != "ожидает безопасного слота замера" {
+                search.diagnostic_phase = Some(R2oDiagnosticPhase {
+                    since: now,
+                    ms: [0; 5],
+                    complete_from_start: search.started_at.is_none(),
+                });
+            }
+        } else {
+            search.diagnostic_phase = None;
         }
         if phase != "ожидает безопасного слота замера" && search.started_at.is_none()
         {
@@ -14299,9 +14367,10 @@ impl R2oDiscoverySearches {
         &mut self,
         target: &r2o_controller::discovery::DiscoveryTarget,
         now: std::time::Instant,
+        cause: Option<&'static str>,
     ) -> bool {
         let key = r2o_discovery_task_key(target);
-        let reported = self.report_terminal(target, "cancelled", None, None, now);
+        let reported = self.report_terminal(target, "cancelled", None, cause, now);
         if let Some(search) = self.entries.get_mut(&key) {
             search.report_id = None;
             search.report_closed = true;
@@ -15519,6 +15588,37 @@ fn r2o_discovery_diagnostic_event(
     // тогда как C печатает `own-plan`; differential ловил это только при
     // явно заданном path.
     let report_path = r2o_discovery_report_path(&source);
+    let stages = entry.and_then(|entry| {
+        let phase = entry.diagnostic_phase?.elapsed(entry.phase, now);
+        let [
+            classification,
+            plan_derivation,
+            saved_plan_checks,
+            plan_verification,
+            other,
+        ] = phase.ms;
+        Some(serde_json::json!({
+            "source": "worker-progress",
+            "from_start": phase.complete_from_start,
+            "classification_ms": classification,
+            "plan_derivation_ms": plan_derivation,
+            "saved_plan_checks_ms": saved_plan_checks,
+            "plan_verification_ms": plan_verification,
+            "other_ms": other,
+        }))
+    });
+    let verification = entry
+        .filter(|entry| entry.verify.level != 0 || entry.verify.applied)
+        .map(|entry| {
+            serde_json::json!({
+                "scope": "discovery-probe",
+                "execution_confirmed": entry.verify.applied,
+                "verified": entry.verify.verified,
+                "level": entry.verify.level,
+                "status": entry.verify.status,
+                "dns_answer": entry.verify.dns_reply,
+            })
+        });
     serde_json::json!({
         "id": report_id,
         "family": target.family,
@@ -15528,6 +15628,10 @@ fn r2o_discovery_diagnostic_event(
         "probe_units": probes,
         "target": target.host,
         "ip": endpoint.map(|address| address.ip().to_string()),
+        "port": endpoint.map(|address| address.port()),
+        "phase_times": stages,
+        "verification": verification,
+        "client_application_result": serde_json::Value::Null,
         "path": report_path,
         "kind": if target.host.parse::<std::net::IpAddr>().is_ok() { "addr" } else { "name" },
         "shape": target.shape,
@@ -15692,10 +15796,9 @@ fn r2o_record_voice_terminal_diagnostic(
     let Some(report) = report else {
         return;
     };
-    if let (Some(recorder), Some(event)) = (
-        diagnostics.as_mut(),
-        r2o_voice_terminal_diagnostic_event(target, report, outcome, path, now),
-    ) {
+    if let Some(recorder) = diagnostics.as_mut().filter(|recorder| recorder.enabled())
+        && let Some(event) = r2o_voice_terminal_diagnostic_event(target, report, outcome, path, now)
+    {
         recorder.record(event);
     }
 }
@@ -19298,6 +19401,19 @@ group_block_proven: false,
                         runner_started + R2O_DISCOVERY_TASK_LIFETIME,
                         &mut order_probes,
                     );
+                    if r2o_controller::diagnostics::memory_active() {
+                        let mut searches = runner_searches
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        searches.tcp_order_experiments =
+                            searches.tcp_order_experiments.saturating_add(1);
+                        searches.tcp_order_probes = searches
+                            .tcp_order_probes
+                            .saturating_add(order_probes as u64);
+                        searches.tcp_order_confirmations = searches
+                            .tcp_order_confirmations
+                            .saturating_add(u64::from(ordered.is_some()));
+                    }
                     probe_counts.candidates += order_probes;
                     if let Some((text, fetch)) = ordered {
                         outcome.plan_text = Some(text);
@@ -21210,7 +21326,7 @@ group_block_proven: false,
         self.searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .report_cancelled(&target, now);
+            .report_cancelled(&target, now, Some("watcher-evicted"));
         self.r2o_forget_completed_task(task_key, true);
         self.r2o_reconcile_task_slots(now);
         true
@@ -21336,7 +21452,7 @@ group_block_proven: false,
             self.searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .report_cancelled(&target, now);
+                .report_cancelled(&target, now, Some("client-shape-deadline"));
             self.seen.remove(&target);
             self.seen_order.retain(|seen| seen != &target);
             self.suspect_fingerprints
@@ -22269,7 +22385,7 @@ group_block_proven: false,
             self.searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .report_cancelled(target, std::time::Instant::now());
+                .report_cancelled(target, now, Some("queue-deadline"));
             self.active_cancels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -22411,7 +22527,7 @@ group_block_proven: false,
             self.searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .report_cancelled(&target, std::time::Instant::now());
+                .report_cancelled(&target, std::time::Instant::now(), Some("catalog-changed"));
             self.active_cancels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -26592,7 +26708,91 @@ impl ControlClient {
                             .or_else(|| meminfo("MemAvailable"));
                         let (tracked_tcp, tracked_quic, tracked_tls) =
                             r2o_controller::diagnostics::tracked_memory_bytes();
+                        let mut components = r2o_controller::diagnostics::Components {
+                            raw_trials: opaque_trials
+                                .as_ref()
+                                .map(r2o_controller::raw_discovery::Trials::diagnostic_counts),
+                            dns_inventory: dns_services.live.len(),
+                            ..Default::default()
+                        };
+                        for (config, service) in
+                            dns_services.services.iter().zip(&dns_services.live)
+                        {
+                            let origin = match config.source.as_str() {
+                                "keenetic-system" => 0,
+                                "keenetic-filter" => 1,
+                                "dnsproxy" | "dnsproxy-http3" => 2,
+                                "doqd" | "keenetic-doq-web" => 3,
+                                "https-dns-proxy" | "stubby" | "unbound" | "smartdns" => 4,
+                                _ => 5,
+                            };
+                            let active = usize::from(
+                                service.inventory_current && service.upstream_active == Some(true),
+                            );
+                            let observed = usize::from(
+                                service.journal_current && service.router_seen_at.is_some(),
+                            );
+                            let source = &mut components.dns_by_source[origin];
+                            source.configured += 1;
+                            source.active += active;
+                            source.observed += observed;
+                            components.dns_active += active;
+                            components.dns_observed += observed;
+                            components.dns_health_current += usize::from(service.health_current);
+                            components.dns_answer +=
+                                usize::from(service.health_current && service.dns_answer);
+                            components.dns_verified_recovery += usize::from(
+                                service.health_current && service.verified_recovery.is_some(),
+                            );
+                        }
+                        if let Some(meta) = &meta_traffic {
+                            let (enabled, observed, pending) = meta.diagnostic_counts();
+                            components.meta_enabled = Some(enabled);
+                            components.meta_observed_names = Some(observed);
+                            components.meta_pending_searches = Some(pending);
+                        }
+                        if let Some(persistence) = &catalog_persistence {
+                            let (current, owners) = {
+                                let guard = persistence
+                                    .catalog_snapshot
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let owners = Arc::strong_count(&guard);
+                                (Arc::clone(&guard), owners)
+                            };
+                            let distinct = !Arc::ptr_eq(&persistence.base_catalog, &current);
+                            let previous_bytes = if distinct {
+                                persistence.base_catalog.memory_bytes()
+                            } else {
+                                0
+                            };
+                            components.catalog_snapshot_bytes =
+                                Some(current.memory_bytes().saturating_add(previous_bytes));
+                            components.catalog_snapshot_copies = Some(1 + usize::from(distinct));
+                            components.catalog_snapshot_owners = Some(owners);
+                            components.catalog_generation = Some(persistence.generation);
+                            components.catalog_dirty = Some(persistence.dirty);
+                        }
+                        if let Some((worker, _, _, _)) = &discovery {
+                            let searches = worker
+                                .searches
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            components.discovery_suspects = Some(searches.suspect_events);
+                            components.discovery_confirmations = Some(searches.confirms);
+                            components.discovery_client_unfit = Some(searches.client_unfit);
+                            components.tcp_order_experiments = Some(searches.tcp_order_experiments);
+                            components.tcp_order_probes = Some(searches.tcp_order_probes);
+                            components.tcp_order_confirmations =
+                                Some(searches.tcp_order_confirmations);
+                        }
+                        let snapshot_payload_bytes = quic_snapshots
+                            .values()
+                            .map(|(payload, _)| payload.capacity() as u64)
+                            .sum();
+                        components.snapshot_payload_bytes = Some(snapshot_payload_bytes);
                         r2o_controller::diagnostics::Counts {
+                            components,
                             boxes: catalog.map_or(0, |catalog| catalog.boxes.len()),
                             bindings: catalog.map_or(0, |catalog| {
                                 catalog
@@ -26666,7 +26866,7 @@ impl ControlClient {
                                 .as_ref()
                                 .map_or(0, HttpSearchWorker::queue_alloc_failures),
                             catalog_bytes: catalog.map_or(0, Catalog::memory_bytes),
-                            snapshot_bytes: 0,
+                            snapshot_bytes: snapshot_payload_bytes,
                             measurement_limit: measurements.limit as u64,
                             measurement_slots: measurement_gate.r2o_max_slots() as u64,
                             limiter_mask,
@@ -27076,7 +27276,9 @@ impl ControlClient {
                         outcome.group_block_proven = false;
                     }
                     let outcome_reason = outcome.detail.clone();
-                    if let Some(diagnostics) = diagnostics.as_mut() {
+                    if let Some(diagnostics) =
+                        diagnostics.as_mut().filter(|recorder| recorder.enabled())
+                    {
                         let mut diagnostic = worker.r2o_diagnostic_event(&target);
                         diagnostic["outcome"] = serde_json::Value::String(
                             if outcome.plan_text.is_some() {
@@ -29642,6 +29844,9 @@ impl ControlClient {
                         })
                     });
                     if live_owner {
+                        if let Some(recorder) = diagnostics.as_mut() {
+                            recorder.record_client_http(&response);
+                        }
                         let outcome = if response.code == 1 {
                             "response-complete"
                         } else {
@@ -39755,6 +39960,7 @@ mod tests {
                     verify: R2oDiscoveryVerify::default(),
                     report_closed: false,
                     props: crate::R2oPropsState::default(),
+                    diagnostic_phase: None,
                 },
             );
             let event = match scenario.kind {
@@ -39877,6 +40083,7 @@ mod tests {
                     },
                     report_closed: false,
                     props: crate::R2oPropsState::default(),
+                    diagnostic_phase: None,
                 },
             );
         }
@@ -40000,7 +40207,7 @@ mod tests {
             .searches
             .lock()
             .unwrap()
-            .report_cancelled(&cancelled, now);
+            .report_cancelled(&cancelled, now, None);
         let event = worker.try_diagnostic_report().unwrap();
         write_event(&mut output, &event, 3000, 400);
         worker.searches.lock().unwrap().entries.clear();
@@ -40142,6 +40349,7 @@ mod tests {
                     },
                     report_closed: false,
                     props: crate::R2oPropsState::default(),
+                    diagnostic_phase: None,
                 },
             );
         }
@@ -41033,6 +41241,7 @@ mod tests {
             verify: Default::default(),
             report_closed: false,
             props: crate::R2oPropsState::default(),
+            diagnostic_phase: None,
         };
         assert_eq!(
             super::r2o_dns_task_state_from_search(&search),
@@ -45463,6 +45672,7 @@ mod tests {
                     verify: R2oDiscoveryVerify::default(),
                     report_closed: false,
                     props: crate::R2oPropsState::default(),
+                    diagnostic_phase: None,
                 },
             );
             searches.order.push_back(task_key);
