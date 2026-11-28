@@ -140,6 +140,58 @@ fn read_u16(bytes: &[u8], offset: usize) -> Option<usize> {
     Some(usize::from(u16::from_be_bytes([value[0], value[1]])))
 }
 
+/// Validate one complete ClientHello record before interpreting its SNI layout.
+pub fn complete_sni(bytes: &[u8]) -> Option<Range<usize>> {
+    if bytes.get(..2)? != [TLS_HANDSHAKE, 3]
+        || bytes.get(5).copied()? != HANDSHAKE_CLIENT_HELLO
+        || RECORD_HEADER + read_u16(bytes, 3)? != bytes.len()
+        || RECORD_HEADER + HANDSHAKE_HEADER + read_u24(bytes, 6)? != bytes.len()
+    {
+        return None;
+    }
+    let mut cursor = RECORD_HEADER + HANDSHAKE_HEADER + 34;
+    if *bytes.get(cursor)? > 32 || !skip_u8_vector(bytes, bytes.len(), &mut cursor) {
+        return None;
+    }
+    let ciphers = read_u16(bytes, cursor)?;
+    if ciphers < 2
+        || ciphers % 2 != 0
+        || !skip_u16_vector(bytes, bytes.len(), &mut cursor)
+        || *bytes.get(cursor)? == 0
+        || !skip_u8_vector(bytes, bytes.len(), &mut cursor)
+    {
+        return None;
+    }
+    let length = read_u16(bytes, cursor)?;
+    cursor += 2;
+    if cursor + length != bytes.len() {
+        return None;
+    }
+    let mut sni = None;
+    while cursor < bytes.len() {
+        let kind = read_u16(bytes, cursor)?;
+        let size = read_u16(bytes, cursor + 2)?;
+        cursor += 4;
+        let end = cursor + size;
+        let extension = bytes.get(cursor..end)?;
+        if kind == usize::from(EXT_SERVER_NAME) {
+            let list_len = read_u16(extension, 0)?;
+            let host_len = read_u16(extension, 3)?;
+            if sni.is_some()
+                || list_len + 2 != size
+                || host_len + 5 != size
+                || host_len == 0
+                || extension[2] != SNI_HOST_NAME
+            {
+                return None;
+            }
+            sni = Some(cursor + 5..end);
+        }
+        cursor = end;
+    }
+    sni
+}
+
 fn read_u24(bytes: &[u8], offset: usize) -> Option<usize> {
     let end = offset.checked_add(3)?;
     let value = bytes.get(offset..end)?;

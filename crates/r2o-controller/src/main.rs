@@ -4406,6 +4406,32 @@ fn catalog_commands_with_send_cap(
             if binding.kind == "raw" {
                 continue;
             }
+            if binding.kind == "tcpord" {
+                let Some(saved) = plans_by_id.get(binding.plan_id.as_str()) else {
+                    skipped += 1;
+                    continue;
+                };
+                plan_compilations += 1;
+                let Some((bytes, plan)) = r2o_catalog_compile_plan(&saved.text, &saved.id) else {
+                    skipped += 1;
+                    continue;
+                };
+                let command = r2o_controller::tcp_order::catalog_key(binding, &plan)
+                    .filter(|_| {
+                        r2o_control_wire() == control::WireProfile::V48
+                            && (send_cap == 0 || plan.max_emit() <= send_cap)
+                    })
+                    .and_then(|key| {
+                        encode_set_name(&key, binding.shape, binding.family, &bytes).ok()
+                    });
+                if let Some(command) = command {
+                    commands.push((binding.target.clone(), command));
+                    install_order.push(CatalogInstallOp::Command(commands.len() - 1));
+                } else {
+                    skipped += 1;
+                }
+                continue;
+            }
             if binding.kind == "addr" {
                 if control::dns_endpoint_transport(binding.shape).is_some()
                     && binding.dns_query_bytes != 0
@@ -8988,6 +9014,7 @@ struct PreparedCandidate {
     plan_id: [u8; 16],
     wire_records: Vec<u8>,
     preparation_elapsed: std::time::Duration,
+    order_input: Option<(usize, usize)>,
 }
 
 #[cfg(unix)]
@@ -9015,6 +9042,10 @@ impl PreparedCandidate {
             plan_id: plan.id,
             wire_records,
             preparation_elapsed: started_at.elapsed(),
+            order_input: plan
+                .tcp_order
+                .as_ref()
+                .map(|_| (plan.input_len as usize, plan.input_sni_off as usize)),
         })
     }
 }
@@ -9534,6 +9565,19 @@ fn r2o_confirm_discovery_outcome(
     result: Result<r2o_controller::fetch::FetchResult, String>,
     applied: bool,
 ) -> DiscoveryOutcome {
+    let scoped_order = outcome
+        .plan_text
+        .as_deref()
+        .is_some_and(|text| text.lines().any(|line| line.starts_with("scope ")));
+    if scoped_order && (!applied || !r2o_tcp_order_https_verified(&result)) {
+        outcome.plan_text = None;
+        outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+        r2o_confirmed_proof_forget(&outcome.target);
+        outcome
+            .detail
+            .push_str("; порядок TCP не получил полного HTTPS-подтверждения");
+        return outcome;
+    }
     outcome.budget_mark = r2o_budget_mark_from_result(&result);
     let verified_by = r2o_confirmed_verified_by(&result);
     // C `T_VERIFY_WAIT`: `ver.level == APPLICATION && ver.budget == CUT` —
@@ -10127,12 +10171,24 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                                 .as_ref()
                                 .map(|(path, _)| path.clone())
                                 .unwrap_or_else(|| probe_path.to_owned()),
-                            deadline: remaining(std::time::Duration::from_secs(8)),
+                            deadline: remaining(if candidate.order_input.is_some() {
+                                step_timeout
+                            } else {
+                                std::time::Duration::from_secs(8)
+                            }),
                             tls12: control::r2k_link_shape_tcp_base(target.shape) == SHAPE_LEGACY,
                             wire_len,
                             mark: confirmation_mark,
                         };
-                        if let Some(alpn) = address_alpn.as_deref() {
+                        if let Some((wire_len, sni_offset)) = candidate.order_input {
+                            r2o_controller::fetch::fetch_tcp_order(
+                                &options,
+                                stream,
+                                wire_len,
+                                sni_offset,
+                                request_encoding,
+                            )
+                        } else if let Some(alpn) = address_alpn.as_deref() {
                             r2o_controller::fetch::r2o_verify_tls_address_connected_stream_with_alpn(
                                 &options,
                                 stream,
@@ -10258,7 +10314,10 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 local_port,
                 candidate.plan_id,
                 trial_id,
-            );
+            ) && (candidate.order_input.is_none()
+                || event.execution_id != 0
+                    && event.binding.temporary
+                    && event.binding.shape == wire_shape);
             if matched {
                 applied_flow = Some(event.key);
             }
@@ -11126,6 +11185,116 @@ fn r2o_discovery_measured_fallback_allowed(
         transport_established: evidence.transport_established,
     }
     .fallback_enabled()
+}
+
+#[cfg(unix)]
+fn r2o_tcp_order_https_verified(
+    result: &Result<r2o_controller::fetch::FetchResult, String>,
+) -> bool {
+    result.as_ref().is_ok_and(|fetch| {
+        fetch.tls.is_some()
+            && fetch.peer_name_ok == Some(true)
+            && fetch.complete
+            && fetch.application_verified
+            && fetch.dns_probe.is_none()
+            && !fetch.r2o_volume_observation.local_limit
+    }) && r2o_family_recovery_decision(result, true) == R2oFamilyRecoveryDecision::Verified
+}
+
+#[cfg(unix)]
+fn r2o_tcp_order_peer_failure(result: &Result<r2o_controller::fetch::FetchResult, String>) -> bool {
+    match result {
+        Err(error) => error.starts_with(r2o_controller::fetch::TCP_ORDER_PEER_FAILURE),
+        Ok(fetch) => {
+            fetch.tls.is_some()
+                && fetch.peer_name_ok == Some(true)
+                && fetch.complete
+                && !fetch.cloudflare_challenge
+                && !fetch.r2o_volume_observation.local_limit
+                && fetch.http_outcome == r2o_controller::fetch::R2oFetchHttpOutcome::Blocked
+        }
+    }
+}
+
+/// Two strict controls share the measured partition; only observed failures
+/// of both authorize one further permutation in this Discovery episode.
+#[cfg(unix)]
+fn r2o_run_tcp_order_experiment(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    experiment: &r2o_controller::tcp_order::Experiment<'_>,
+    probe_path: &str,
+    mark: Option<u32>,
+    commands: &dyn HttpSearchCommandSink,
+    has_timestamp: bool,
+    cancel: &AtomicBool,
+    dropped_events: &AtomicUsize,
+    deadline: std::time::Instant,
+    probes: &mut usize,
+) -> Option<(String, r2o_controller::fetch::FetchResult)> {
+    let destination = target.endpoint.parse().ok()?;
+    let encoding = r2o_controller::fetch::r2o_d2o_verification_encoding(probe_path);
+    for (index, name) in ["forward", "reverse", "mixed"].into_iter().enumerate() {
+        let now = std::time::Instant::now();
+        if cancel.load(Ordering::Relaxed)
+            || deadline.saturating_duration_since(now) < std::time::Duration::from_secs(10)
+        {
+            return None;
+        }
+        let text = if index == 2 {
+            experiment.mixed()?
+        } else {
+            experiment.control(index == 1)?
+        };
+        *probes += 1;
+        let candidate = r2o_prepare_discovery_candidate(target, &text).ok()?;
+        println!(
+            "TCP order {} {}: built {name}, plan={:02x?}",
+            target.host, destination, candidate.plan_id
+        );
+        let before = dropped_events.load(Ordering::Relaxed);
+        let (result, applied, established) = r2o_family_recovery_sibling_trial_with_ech_state(
+            target,
+            destination,
+            &candidate,
+            probe_path,
+            mark,
+            commands,
+            None,
+            None,
+            Some(has_timestamp),
+            false,
+            None,
+            None,
+            encoding,
+            Some(deadline),
+        );
+        let correlated = applied
+            && established
+            && dropped_events.load(Ordering::Relaxed) == before
+            && !cancel.load(Ordering::Relaxed)
+            && std::time::Instant::now() < deadline;
+        if correlated && r2o_tcp_order_https_verified(&result) {
+            println!(
+                "TCP order {} {}: {name} applied and HTTPS verified",
+                target.host, destination
+            );
+            return result.ok().map(|fetch| (text, fetch));
+        }
+        if !correlated || !r2o_tcp_order_peer_failure(&result) {
+            println!(
+                "TCP order {} {}: {name} inconclusive, APPLIED={applied}, result={:?}",
+                target.host,
+                destination,
+                result.as_ref().err()
+            );
+            return None;
+        }
+        println!(
+            "TCP order {} {}: {name} applied, exchange failed",
+            target.host, destination
+        );
+    }
+    None
 }
 
 #[cfg(unix)]
@@ -19078,6 +19247,52 @@ group_block_proven: false,
                     );
                     outcome.retry_after = Some(R2O_DISCOVERY_CHALLENGE_RETRY);
                     return outcome;
+                }
+                if !primary_verified
+                    && !primary_from_owned_fallback
+                    && applied
+                    && !candidate_evidence.local_limit
+                    && candidate_evidence.dropped_before == candidate_evidence.dropped_after
+                    && candidate_evidence.transport_established
+                    && r2o_control_wire() == control::WireProfile::V48
+                    && probe_counts.remaining(probe_cap) >= 3
+                    && let (Some(hello), Some(has_timestamp)) =
+                        (client_hello.as_deref(), client_has_tcp_timestamps)
+                    && let Some(experiment) = r2o_controller::tcp_order::Experiment::from_measured(
+                        &target,
+                        hello,
+                        plan_text,
+                        runner_send_cap.load(Ordering::Relaxed),
+                    )
+                {
+                    let mut order_probes = 0;
+                    let ordered = r2o_run_tcp_order_experiment(
+                        &target,
+                        &experiment,
+                        &probe_path,
+                        confirm_mark,
+                        &commands,
+                        has_timestamp,
+                        &cancel,
+                        &dropped_events,
+                        runner_started + R2O_DISCOVERY_TASK_LIFETIME,
+                        &mut order_probes,
+                    );
+                    probe_counts.candidates += order_probes;
+                    if let Some((text, fetch)) = ordered {
+                        outcome.plan_text = Some(text);
+                        outcome.group_block_proven = false;
+                        outcome.retry_after = None;
+                        outcome
+                            .detail
+                            .push_str("; порядок TCP подтверждён полным HTTPS-обменом");
+                        return r2o_confirm_discovery_outcome_checked(
+                            outcome,
+                            Ok(fetch),
+                            true,
+                            &runner_searches,
+                        );
+                    }
                 }
                 let primary_untranslatable = r2o_discovery_plan_untranslatable(&result);
                 if primary_verified
@@ -36267,6 +36482,9 @@ fn r2o_fresh_id_fallback() -> [u8; 16] {
 fn r2o_quic_binding_blocks_retry(binding_exists: bool, planned: bool) -> bool {
     binding_exists && !planned
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tcp_order_live;
 
 #[cfg(test)]
 mod tests {

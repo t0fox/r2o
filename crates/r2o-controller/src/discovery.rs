@@ -1534,9 +1534,10 @@ pub fn bind_confirmed(
                         || shape == r2k_core::control::SHAPE_DNS_TCP)
         }
         "raw" => transport == 6 && shape == r2k_core::raw_flow::SHAPE_RAW_TCP && proto == "raw",
+        "tcpord" => transport == 6 && crate::tcp_order::valid_shape(shape) && proto == "tls",
         _ => false,
     };
-    if port != 0 && !endpoint_shape || kind == "raw" && port == 0 {
+    if port != 0 && !endpoint_shape || matches!(kind, "raw" | "tcpord") && port == 0 {
         return Err("неверная область привязки конечной точки".into());
     }
     if !matches!(family, 4 | 6) {
@@ -1798,6 +1799,12 @@ fn add_measured_binding_with_fingerprint_in_box_learn(
         return Err("discovery timestamp must be nonnegative".into());
     }
     let canonical_text = canonical_plan_text(source_text)?;
+    if canonical_text
+        .lines()
+        .any(|line| line.starts_with("scope "))
+    {
+        return crate::tcp_order::save(catalog, target, &canonical_text, now, input);
+    }
     let compatible_boxes: Vec<usize> = observed_fingerprint
         .map(|observed| {
             catalog
@@ -2356,7 +2363,7 @@ fn canonical_plan_text(text: &str) -> Result<String, String> {
     Ok(canonical)
 }
 
-fn text_with_id(canonical: &str, id: &str) -> Result<String, String> {
+pub(crate) fn text_with_id(canonical: &str, id: &str) -> Result<String, String> {
     const ZERO_ID: &str = "00000000000000000000000000000000";
     if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("catalog plan id is invalid".into());
@@ -2398,7 +2405,7 @@ pub fn plan_text_for_trial(text: &str, id: [u8; 16]) -> Result<String, String> {
     text_with_id(&canonical, &id)
 }
 
-fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
+pub(crate) fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
     fn hash(seed: u64, bytes: impl IntoIterator<Item = u8>) -> u64 {
         bytes.into_iter().fold(seed, |value, byte| {
             (value ^ u64::from(byte)).wrapping_mul(0x100000001b3)

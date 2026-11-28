@@ -221,6 +221,9 @@ impl Plan {
                 "приёмы этого плана к запросу HTTP не применяются",
             ));
         }
+        if let Some(order) = &self.tcp_order {
+            return self.apply_tcp_order(input, order);
+        }
         if self.input_tls {
             validate_tls_input(input)?;
         }
@@ -475,6 +478,9 @@ impl Plan {
 
     /// Консервативный максимум размера в сети для любого действия из этого плана.
     pub fn max_emit(&self) -> usize {
+        if self.tcp_order.is_some() {
+            return self.segment_size as usize + 100;
+        }
         let mut maximum = 0;
         for fake in &self.fakes {
             let Some(payload) = self
@@ -517,6 +523,73 @@ impl Plan {
             maximum = maximum.max(self.emit_overhead(None) + body);
         }
         maximum
+    }
+
+    fn apply_tcp_order(
+        &self,
+        input: &PacketInput<'_>,
+        order: &super::TcpOrder,
+    ) -> Result<Actions, ApplyError> {
+        let compatible = input.payload.len() == self.input_len as usize
+            && input
+                .tcp_flags
+                .is_some_and(|flags| matches!(flags, 0x10 | 0x18))
+            && crate::tls::complete_sni(input.payload).is_some_and(|range| {
+                range.start == self.input_sni_off as usize
+                    && range.len() == self.input_sni_len as usize
+                    && input.payload[range].eq_ignore_ascii_case(order.host.as_bytes())
+            });
+        if !compatible {
+            return Err(ApplyError::new(
+                "mixed-input",
+                "перестановка TCP измерена для другого ClientHello",
+            ));
+        }
+        let mut limit = self.segment_size as usize;
+        if input.segment_cap != 0 {
+            limit = limit.min(input.segment_cap);
+        }
+        let range = |part: u8| {
+            let i = usize::from(part) - 1;
+            let start = i
+                .checked_sub(1)
+                .map_or(0, |index| self.splits[index].offset as usize);
+            let end = self
+                .splits
+                .get(i)
+                .map_or(input.payload.len(), |split| split.offset as usize);
+            start..end
+        };
+        let count = order
+            .segments
+            .iter()
+            .map(|&part| range(part).len().div_ceil(limit))
+            .sum();
+        if count > MAX_EMISSIONS {
+            return Err(ApplyError::new(
+                "too-many-emissions",
+                "перестановка TCP превышает предел посылок",
+            ));
+        }
+        let mut emits = Vec::new();
+        emits
+            .try_reserve_exact(count)
+            .map_err(|_| ApplyError::new("out-of-memory", "нет памяти на перестановку TCP"))?;
+        for &part in &order.segments {
+            let range = range(part);
+            let start = range.start;
+            for (index, bytes) in input.payload[range].chunks(limit).enumerate() {
+                let offset = start + index * limit;
+                let mut emission = Emission::payload(input.seq.wrapping_add(offset as u32), bytes)?;
+                emission.wire_profile = self.wire_profile;
+                emits.push(emission);
+            }
+        }
+        self.apply_timing(&mut emits);
+        Ok(Actions {
+            fate: OriginalFate::Drop,
+            emits,
+        })
     }
 
     fn append_fake_repeats(

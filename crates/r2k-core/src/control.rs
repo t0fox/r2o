@@ -110,9 +110,21 @@ pub const COMMAND_SET_NAME_BOUND: u16 = 0x0092;
 pub const COMMAND_DEL_NAME_BOUND: u16 = 0x0093;
 
 const DNS_TCP_PLAN_PREFIX: &str = "@dns-tcp/";
+const TCP_ORDER_PLAN_PREFIX: &str = "@tcp-order/";
 const DNS_DOQ_PLAN_PREFIX: &str = "@dns-doq/";
 const DNS_DOH3_PLAN_PREFIX: &str = "@dns-doh3/";
 pub const DNS_PLAN_LEASE: std::time::Duration = std::time::Duration::from_secs(300);
+
+pub fn tcp_order_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
+    if sni.is_empty() {
+        return None;
+    }
+    dns_plan_key(TCP_ORDER_PLAN_PREFIX, endpoint, sni)
+}
+
+pub fn tcp_order_plan_endpoint(key: &[u8]) -> Option<SocketAddr> {
+    dns_plan_endpoint(TCP_ORDER_PLAN_PREFIX, key)
+}
 
 /// Ключ TLS-привязки с адресом, портом и видимым SNI. Пустое имя обозначает TLS без SNI.
 pub fn dns_tcp_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {

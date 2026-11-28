@@ -1,10 +1,13 @@
 use std::error::Error;
 use std::fmt;
+use std::net::{IpAddr, SocketAddr};
 
 mod apply;
 pub use apply::{Actions, ApplyError, Cancellation, Emission, EmitKind, OriginalFate, PacketInput};
 
-pub const EXEC_VERSION: u16 = 15;
+pub const TCP_ORDER_EXEC: u16 = 16;
+pub const EXEC_VERSION: u16 = TCP_ORDER_EXEC;
+pub const TCP_ORDER_MAX_PARTS: usize = 9;
 pub const SCHEMA_MAX: u16 = 1;
 /// Максимальное число пакетов в результате обработки потока.
 pub const WIRE_BATCH_MAX: usize = 26;
@@ -59,6 +62,7 @@ const REC_QSPLIT: u16 = 0x010f;
 const REC_QDENY: u16 = 0x0110;
 const REC_AUTOTTL: u16 = 0x0111;
 const REC_INPUT_TCP_FLAGS: u16 = 0x0112;
+pub const REC_TCP_ORDER: u16 = 0x0113;
 
 const ANCHOR_SNI_MIDDLE: u16 = 5;
 const PLACE_BEFORE: u8 = 0;
@@ -154,6 +158,72 @@ pub struct SeqOverlay {
     pub poison_id: u16,
 }
 
+/// Permutation of the ascending, one-based payload ranges before MTU slicing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TcpOrder {
+    pub segments: Vec<u8>,
+    pub endpoint: SocketAddr,
+    pub host: String,
+}
+
+impl TcpOrder {
+    pub fn record(&self) -> Vec<u8> {
+        let mut bytes = vec![self.segments.len() as u8];
+        bytes.extend_from_slice(&self.segments);
+        match self.endpoint.ip() {
+            IpAddr::V4(ip) => {
+                bytes.push(4);
+                bytes.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                bytes.push(6);
+                bytes.extend_from_slice(&ip.octets());
+            }
+        }
+        bytes.extend_from_slice(&self.endpoint.port().to_be_bytes());
+        bytes.extend_from_slice(self.host.as_bytes());
+        bytes
+    }
+
+    fn from_record(bytes: &[u8]) -> Option<Self> {
+        let (&count, rest) = bytes.split_first()?;
+        if !(2..=TCP_ORDER_MAX_PARTS).contains(&usize::from(count)) {
+            return None;
+        }
+        let (segments, rest) = rest.split_at_checked(usize::from(count))?;
+        let (&family, rest) = rest.split_first()?;
+        let (ip, tail) = match family {
+            4 => (
+                IpAddr::from(<[u8; 4]>::try_from(rest.get(..4)?).ok()?),
+                &rest[4..],
+            ),
+            6 => (
+                IpAddr::from(<[u8; 16]>::try_from(rest.get(..16)?).ok()?),
+                &rest[16..],
+            ),
+            _ => return None,
+        };
+        let port = read_u16(tail, 0).ok()?;
+        let host = std::str::from_utf8(tail.get(2..)?).ok()?;
+        if host.is_empty()
+            || host.len() > 253
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-'))
+            || port == 0
+            || ip.is_unspecified()
+            || ip.is_multicast()
+        {
+            return None;
+        }
+        Some(Self {
+            segments: segments.to_vec(),
+            endpoint: SocketAddr::new(ip, port),
+            host: host.into(),
+        })
+    }
+}
+
 /// Полностью проверенное неизменяемое представление плана R2O.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Plan {
@@ -163,6 +233,7 @@ pub struct Plan {
     pub transport: u8,
     pub proto: u8,
     pub order: u8,
+    pub tcp_order: Option<Box<TcpOrder>>,
     pub guards: u8,
     pub input_len: u32,
     pub input_sni_off: u32,
@@ -207,7 +278,12 @@ impl Plan {
     /// Перекодировать валидный R2OP в выбранный внешний контейнер.
     /// Тело не меняется; для legacy D2KP заменяется только magic.
     pub fn to_wire(bytes: &[u8], legacy: bool) -> Result<Vec<u8>, PlanError> {
-        Self::parse_wire(bytes)?;
+        let plan = Self::parse_wire(bytes)?;
+        if legacy && plan.tcp_order.is_some() {
+            return Err(PlanError::new(
+                "перестановка TCP не поддерживается legacy-исполнителем",
+            ));
+        }
         let mut converted = bytes.to_vec();
         converted[..PLAN_MAGIC.len()].copy_from_slice(if legacy {
             &LEGACY_PLAN_MAGIC
@@ -371,6 +447,13 @@ impl Plan {
                     poison_id: read_u16(value, 2)?,
                 }),
                 REC_ORDER => plan.order = value[0],
+                REC_TCP_ORDER => {
+                    let order = TcpOrder::from_record(value)
+                        .ok_or_else(|| PlanError::new("недопустимая перестановка TCP"))?;
+                    if plan.tcp_order.replace(Box::new(order)).is_some() {
+                        return Err(PlanError::new("повторная перестановка TCP"));
+                    }
+                }
                 REC_PACE => plan.pace_us = read_u32(value, 0)?,
                 REC_DELAY => plan.delay_us = read_u32(value, 0)?,
                 REC_INPUT => {
@@ -785,6 +868,55 @@ impl Plan {
         if !matches!(self.order, ORDER_FORWARD | ORDER_REVERSE) {
             return Err(PlanError::new("неизвестный порядок посылки"));
         }
+        if let Some(order) = &self.tcp_order {
+            let count = self.splits.len() + 1;
+            let mut used = 0_u16;
+            let permutation = count <= TCP_ORDER_MAX_PARTS
+                && order.segments.len() == count
+                && order.segments.iter().all(|&part| {
+                    if part == 0 || usize::from(part) > count || used & (1 << (part - 1)) != 0 {
+                        return false;
+                    }
+                    used |= 1 << (part - 1);
+                    true
+                });
+            if self.minexec < TCP_ORDER_EXEC
+                || self.order != ORDER_FORWARD
+                || !(2..=TCP_ORDER_MAX_PARTS).contains(&count)
+                || !permutation
+                || self.transport != 6
+                || self.proto != 1
+                || !self.input_tls
+                || self.input_len == 0
+                || self.input_len > 16_384
+                || self.input_sni_off == 0
+                || self.input_sni_len as usize != order.host.len()
+                || self.input_sni_off.saturating_add(self.input_sni_len) > self.input_len
+                || self.segment_size == 0
+                || self.segment_size > 16_384
+                || self.wire_profile != WIRE_TCP_TEMPLATE
+                || self.ipfrag != 0
+                || self.udplen != 0
+                || self.qsplit != 0
+                || self.qdeny != 0
+                || self.oob_enabled
+                || self.settle_us != 0
+                || self.delay_us != 0
+                || !self.fakes.is_empty()
+                || !self.seq_overlays.is_empty()
+                || self.splits.iter().any(|split| {
+                    split.anchor != 0 || split.offset <= 0 || split.offset as u32 >= self.input_len
+                })
+                || self
+                    .splits
+                    .windows(2)
+                    .any(|pair| pair[0].offset >= pair[1].offset)
+            {
+                return Err(PlanError::new(
+                    "перестановка требует полного измеренного TLS-входа и точного разбиения TCP",
+                ));
+            }
+        }
         if self.seq_overlays.len() > 1 {
             return Err(PlanError::new("перекрытие может быть только одно"));
         }
@@ -923,6 +1055,11 @@ fn scan(bytes: &[u8], minexec: u16) -> Result<(Counts, usize), PlanError> {
                 counts.seq_overlays += 1;
             }
             REC_ORDER => require_len(value, 1, "порядок не 1 байт")?,
+            REC_TCP_ORDER => {
+                if minexec < TCP_ORDER_EXEC || !(11..=282).contains(&value.len()) {
+                    return Err(PlanError::new("перестановка TCP требует minexec=16"));
+                }
+            }
             REC_PACE => require_len(value, 4, "разнос во времени не 4 байта")?,
             REC_DELAY => {
                 if minexec < 6 || value.len() != 4 || read_u32(value, 0)? == 0 {

@@ -449,6 +449,12 @@ fn emit_client_hello_for_retry(
         }
     }
 
+    if let Some(offset) = config.r2o_client_hello_sni_offset {
+        if cx.common.is_quic() || !chp_payload.r2o_place_sni(offset, config.r2o_client_hello_wire_len) {
+            return Err(Error::General("ClientHello SNI layout is unavailable".into()));
+        }
+    }
+
     // Note what extensions we sent.
     input.hello.sent_extensions = chp_payload.collect_used();
     input.hello.offered_cipher_suites = chp_payload.cipher_suites.clone();

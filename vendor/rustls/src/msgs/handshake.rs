@@ -1338,6 +1338,56 @@ pub(crate) struct ClientHelloPayload {
 }
 
 impl ClientHelloPayload {
+    /// Select a prefix of existing extensions whose encoded lengths put SNI
+    /// at the measured offset. Extension values and the TLS transcript remain
+    /// owned by rustls. No packets are sent if the layout cannot be reproduced.
+    pub(crate) fn r2o_place_sni(&mut self, offset: usize, wire_len: Option<usize>) -> bool {
+        let extensions = &mut self.extensions;
+        if extensions.server_name.is_none() || !extensions.contiguous_extensions.is_empty()
+            || extensions.preshared_key_offer.is_some() || extensions.encrypted_client_hello.is_some()
+            || extensions.encrypted_client_hello_outer.is_some()
+        {
+            return false;
+        }
+        // Record + handshake + legacy version + random + vector prefixes.
+        let header = 5 + 4 + 2 + 32 + 1 + self.session_id.as_ref().len()
+            + 2 + self.cipher_suites.len() * 2 + 1 + self.compression_methods.len() + 2;
+        let Some(prefix) = offset.checked_sub(header + 9).filter(|length| *length <= 16_384) else {
+            return false;
+        };
+        let all = extensions.collect_used();
+        let mut encoded = Vec::new();
+        let lengths: Vec<_> = all.iter().map(|&extension| {
+            encoded.clear();
+            extensions.encode_one(extension, &mut encoded);
+            encoded.len()
+        }).collect();
+        if wire_len != Some(header + lengths.iter().sum::<usize>()) {
+            return false;
+        }
+        let mut reachable = vec![None; prefix + 1];
+        reachable[0] = Some(0_u64);
+        for (index, (&extension, length)) in all.iter().zip(lengths).enumerate() {
+            if extension == ExtensionType::ServerName || length > prefix || index >= 64 {
+                continue;
+            }
+            for position in (length..=prefix).rev() {
+                if reachable[position].is_none() {
+                    reachable[position] = reachable[position - length].map(|bits| bits | (1 << index));
+                }
+            }
+        }
+        let Some(bits) = reachable[prefix] else {
+            return false;
+        };
+        let (mut before, after): (Vec<_>, Vec<_>) = all.into_iter().enumerate()
+            .filter(|(_, extension)| *extension != ExtensionType::ServerName)
+            .partition(|(index, _)| *index < 64 && bits & (1 << index) != 0);
+        before.push((0, ExtensionType::ServerName));
+        extensions.contiguous_extensions = before.into_iter().chain(after).map(|(_, extension)| extension).collect();
+        true
+    }
+
     pub(crate) fn ech_inner_encoding(&self, to_compress: Vec<ExtensionType>) -> Vec<u8> {
         let mut bytes = Vec::new();
         self.payload_encode(&mut bytes, Encoding::EchInnerHello { to_compress });

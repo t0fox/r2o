@@ -1,4 +1,4 @@
-use r2k_core::plan::{PLAN_MAGIC, Plan};
+use r2k_core::plan::{PLAN_MAGIC, Plan, REC_TCP_ORDER, TcpOrder};
 
 const REC_ID: u16 = 0x0001;
 const REC_PROTO: u16 = 0x0002;
@@ -51,6 +51,9 @@ struct ParsedPlan {
     fakes: Vec<Vec<u8>>,
     seqovls: Vec<Vec<u8>>,
     order: u8,
+    permutation: Option<Vec<u8>>,
+    order_seen: bool,
+    order_scope: Option<(std::net::SocketAddr, String)>,
     guards: u8,
     pace_us: u32,
     input: Option<Vec<u8>>,
@@ -551,11 +554,42 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
             }
             "order" => {
                 require_fields(&fields, 2, line_number, "order expects one value")?;
+                if plan.order_seen && (plan.permutation.is_some() || fields[1].contains(',')) {
+                    return Err(parse_error("duplicate TCP order"));
+                }
+                plan.order_seen = true;
                 plan.order = match fields[1] {
                     "forward" => 0,
                     "reverse" => 1,
+                    word if word.contains(',') => {
+                        plan.permutation = Some(
+                            word.split(',')
+                                .map(|part| {
+                                    number(part, r2k_core::plan::TCP_ORDER_MAX_PARTS as u64)
+                                        .map(|index| index as u8)
+                                        .map_err(|_| parse_error("invalid TCP order index"))
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                        );
+                        0
+                    }
                     _ => return Err(parse_error("unknown order")),
                 };
+            }
+            "scope" => {
+                require_fields(&fields, 3, line_number, "scope expects endpoint and SNI")?;
+                let endpoint: std::net::SocketAddr = fields[1]
+                    .parse()
+                    .map_err(|_| parse_error("invalid TCP order endpoint"))?;
+                let host = crate::domain::normalize(fields[2])
+                    .map_err(|_| parse_error("invalid TCP order SNI"))?;
+                if endpoint.to_string() != fields[1]
+                    || host != fields[2]
+                    || matches!(endpoint, std::net::SocketAddr::V6(addr) if addr.scope_id() != 0)
+                    || plan.order_scope.replace((endpoint, host)).is_some()
+                {
+                    return Err(parse_error("invalid or duplicate TCP order scope"));
+                }
             }
             "pace" | "delay" => {
                 require_fields(
@@ -678,6 +712,21 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
     records.extend(plan.fakes.into_iter().map(|value| (REC_FAKE, value)));
     records.extend(plan.seqovls.into_iter().map(|value| (REC_SEQOVL, value)));
     records.push((REC_ORDER, vec![plan.order]));
+    match (plan.permutation, plan.order_scope) {
+        (Some(segments), Some((endpoint, host))) => {
+            records.push((
+                REC_TCP_ORDER,
+                TcpOrder {
+                    segments,
+                    endpoint,
+                    host,
+                }
+                .record(),
+            ));
+        }
+        (None, None) => {}
+        _ => return Err("TCP permutation and endpoint scope are required together".into()),
+    }
     if plan.pace_us != 0 {
         records.push((REC_PACE, plan.pace_us.to_be_bytes().to_vec()));
     }

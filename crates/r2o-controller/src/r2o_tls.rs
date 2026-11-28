@@ -75,7 +75,28 @@ pub fn r2o_tls_client_connection_with_alpn(
     _roots: rustls::RootCertStore,
     alpn_protocols: &[Vec<u8>],
 ) -> Result<rustls::ClientConnection, String> {
-    r2o_tls_client_connection_with_alpn_mode(name, tls12, wire_len, alpn_protocols, false)
+    r2o_tls_client_connection_with_alpn_mode(name, tls12, wire_len, alpn_protocols, false, None)
+}
+
+pub(crate) fn tcp_order_connection(
+    name: &str,
+    tls12: bool,
+    wire_len: usize,
+    sni_offset: usize,
+) -> Result<rustls::ClientConnection, String> {
+    let alpn = if tls12 {
+        Vec::new()
+    } else {
+        vec![b"http/1.1".to_vec()]
+    };
+    r2o_tls_client_connection_with_alpn_mode(
+        name,
+        tls12,
+        Some(wire_len),
+        &alpn,
+        false,
+        Some(sni_offset),
+    )
 }
 
 /// Финальная адресная проба: без SNI, с проверкой Finished. Legacy предлагает
@@ -93,6 +114,7 @@ pub fn r2o_tls_address_client_connection_with_alpn(
         wire_len,
         alpn_protocols,
         true,
+        None,
     )
 }
 
@@ -102,6 +124,7 @@ fn r2o_tls_client_connection_with_alpn_mode(
     wire_len: Option<usize>,
     alpn_protocols: &[Vec<u8>],
     address_probe: bool,
+    sni_offset: Option<usize>,
 ) -> Result<rustls::ClientConnection, String> {
     let versions = if tls12 {
         &[&rustls::version::TLS12][..]
@@ -111,7 +134,7 @@ fn r2o_tls_client_connection_with_alpn_mode(
     let mut provider = rustls::crypto::ring::default_provider();
     let verifier = R2oD2oServerCertVerifier {
         algorithms: provider.signature_verification_algorithms.clone(),
-        verify_finished: address_probe,
+        verify_finished: address_probe || sni_offset.is_some(),
     };
     provider.cipher_suites = if tls12 {
         vec![
@@ -145,6 +168,7 @@ fn r2o_tls_client_connection_with_alpn_mode(
         .with_no_client_auth();
     config.alpn_protocols = alpn_protocols.to_vec();
     config.r2o_client_hello_wire_len = wire_len;
+    config.r2o_client_hello_sni_offset = sni_offset;
     let server_name = rustls::pki_types::ServerName::try_from(name.to_owned())
         .map_err(|_| "имя цели недопустимо для TLS SNI".to_owned())?;
     rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)

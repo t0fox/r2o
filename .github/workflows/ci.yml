@@ -278,7 +278,7 @@ jobs:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Установить средства проверки сетевых пакетов
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential iproute2 nftables python3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential iproute2 nftables openssl python3
       - name: Собрать сетевой исполнитель
         run: cargo build --release --locked --package r2o-datapath --package r2o-controller
       - name: Собрать регрессию предела raw-пакета по MTU
@@ -299,6 +299,14 @@ jobs:
           R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
           R2OC_BIN="$GITHUB_WORKSPACE/target/release/r2o-controller"
           sh scripts/test-raw-discovery-nfq.sh
+      - name: Проверить измеренную перестановку TCP с HTTPS и восстановлением плана
+        env:
+          CARGO_PROFILE_TEST_DEBUG: '0'
+        run: |
+          test_bin=$(cargo test --locked --package r2o-controller --bin r2o-controller --no-run --message-format=json |
+              python3 -c 'import json,sys; print(next(x["executable"] for x in map(json.loads, sys.stdin) if x.get("executable") and x.get("profile", {}).get("test")))')
+          sudo env R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath" \
+              R2O_ORDER_TEST_BIN="$test_bin" sh scripts/test-tcp-order-nfq.sh
       - name: Проверить правила nftables без применения
         run: sudo sh scripts/test-router-firewall.sh
 

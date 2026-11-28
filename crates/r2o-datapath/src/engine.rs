@@ -2139,6 +2139,24 @@ fn tcp_plan_input<'a>(
     let payload = packet
         .get(tcp.payload.clone())
         .filter(|bytes| !bytes.is_empty())?;
+    if let Some(order) = &plan.tcp_order {
+        if order.endpoint.ip() != view.dst.as_ip_addr()
+            || order.endpoint.port() != tcp.destination_port
+            || view.fragment & 0x3fff != 0
+        {
+            return None;
+        }
+        let mut input = PacketInput::new(payload, tcp.sequence);
+        input.tcp_flags = Some(tcp.wire_flags);
+        // The shared TLS cap reserves 12 bytes for options. Template output
+        // copies the packet's actual TCP options, which may be longer.
+        let extra_options = tcp.options.len().saturating_sub(12);
+        if tcp_segment_cap != 0 && extra_options >= tcp_segment_cap {
+            return None;
+        }
+        input.segment_cap = tcp_segment_cap.saturating_sub(extra_options);
+        return Some(input);
+    }
     if dns_tcp {
         if !r2k_core::dns_probe::is_dns_tcp_probe_frame(payload)
             || !is_dns_tcp_split_plan(plan, payload.len())
@@ -2704,6 +2722,9 @@ fn decide_tcp(
     }
     let Some(input) = tcp_plan_input(plan, packet, view, tcp_segment_cap, reference_ttl, dns_tcp)
     else {
+        if plan.tcp_order.is_some() {
+            return PacketDecision::FlowUnfit { plan_id: plan.id };
+        }
         return PacketDecision::Accept;
     };
 
@@ -2718,9 +2739,23 @@ fn decide_tcp(
         return PacketDecision::FlowUnfit { plan_id: plan.id };
     }
 
-    let Ok(actions) = plan.apply(&input) else {
-        return PacketDecision::Refused { plan_id: plan.id };
+    let actions = match plan.apply(&input) {
+        Ok(actions) => actions,
+        Err(error) if plan.tcp_order.is_some() && error.kind() == "mixed-input" => {
+            return PacketDecision::FlowUnfit { plan_id: plan.id };
+        }
+        Err(_) => return PacketDecision::Refused { plan_id: plan.id },
     };
+    if plan.tcp_order.is_some()
+        && view.family == 4
+        && actions
+            .emits
+            .iter()
+            .enumerate()
+            .any(|(index, _)| view.ip_id.wrapping_add(index as u16) == 0)
+    {
+        return PacketDecision::Refused { plan_id: plan.id };
+    }
     tcp_actions_to_wire(packet, actions)
 }
 

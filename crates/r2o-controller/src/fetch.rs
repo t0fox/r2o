@@ -1113,6 +1113,39 @@ pub fn r2o_fetch_connected_stream_with_packet_budget_phase_timeout_and_encoding(
     )
 }
 
+/// Run the same HTTP verifier with a TLS connection that can reproduce the
+/// exact measured layout. A preparation error occurs before any TLS write.
+pub fn fetch_tcp_order(
+    options: &FetchOptions,
+    stream: TcpStream,
+    wire_len: usize,
+    sni_offset: usize,
+    encoding: R2oFetchEncoding,
+) -> Result<FetchResult, String> {
+    options.validate()?;
+    let address = resolve_target(options)?;
+    if stream.peer_addr().map_err(|error| error.to_string())? != address {
+        return Err("HTTPS TCP order: unexpected peer".into());
+    }
+    let connection =
+        crate::r2o_tls::tcp_order_connection(&options.name, options.tls12, wire_len, sni_offset)?;
+    r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
+        options,
+        stream,
+        address,
+        Instant::now(),
+        encoding,
+        RootCertStore::empty(),
+        None,
+        None,
+        None,
+        Some(connection),
+        |socket| r2o_tcp_counters(socket).data_packets,
+    )
+}
+
+pub const TCP_ORDER_PEER_FAILURE: &str = "HTTPS TCP order: peer exchange failed";
+
 /// Выполнить HTTP GET по ECH и завершиться ошибкой, если сервер его отклонил.
 pub fn r2o_fetch_ech_connected_stream(
     options: &FetchOptions,
@@ -1815,6 +1848,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding(
         ech,
         packet_budget,
         phase_timeout,
+        None,
         |socket| r2o_tcp_counters(socket).data_packets,
     )
 }
@@ -1829,6 +1863,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     ech: Option<&rustls::client::EchConfig>,
     packet_budget: Option<u32>,
     phase_timeout: Option<Duration>,
+    order_connection: Option<rustls::ClientConnection>,
     mut packet_counter: impl FnMut(&TcpStream) -> Option<u32>,
 ) -> Result<FetchResult, String> {
     let deadline = match phase_timeout {
@@ -1853,6 +1888,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         .or_else(|| doh.as_ref().map(|query| query.spki_pin))
         .flatten();
     let dns_probe = dot_query.is_some() || doh_query.is_some();
+    let tcp_order = order_connection.is_some();
     let (mut connection, socket) = if let Some(query) = doh_query.filter(|_| ech.is_none()) {
         let session = crate::dns_health::connect_doh_tls(
             socket,
@@ -1938,7 +1974,9 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             }
         }
     } else {
-        let connection = if let Some(ech) = ech {
+        let connection = if let Some(connection) = order_connection {
+            connection
+        } else if let Some(ech) = ech {
             crate::r2o_tls::r2o_tls_ech_connection(
                 &options.name,
                 ech.clone(),
@@ -1981,11 +2019,22 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 ) =>
             {
                 if Instant::now() >= deadline {
+                    if tcp_order {
+                        return Err(format!("{TCP_ORDER_PEER_FAILURE}: {error}"));
+                    }
                     return Err(format!("TLS-рукопожатие не завершилось: {error}"));
                 }
                 continue;
             }
             Err(error) => {
+                if tcp_order
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof
+                    )
+                {
+                    return Err(format!("{TCP_ORDER_PEER_FAILURE}: {error}"));
+                }
                 if ech.is_some()
                     && matches!(
                         error
@@ -6252,6 +6301,7 @@ mod tests {
             None,
             Some(50),
             None,
+            None,
             |_| packet_counts.next(),
         )
         .expect("завершить HTTP-проверку бюджета TCP");
@@ -6344,6 +6394,7 @@ mod tests {
             roots,
             None,
             Some(5),
+            None,
             None,
             |_| packet_counts.next(),
         )
@@ -6496,6 +6547,7 @@ mod tests {
                 roots,
                 None,
                 Some(5),
+                None,
                 None,
                 |_| counts.next(),
             )
@@ -6765,6 +6817,7 @@ mod tests {
             Instant::now(),
             R2oFetchEncoding::Identity,
             roots,
+            None,
             None,
             None,
             None,

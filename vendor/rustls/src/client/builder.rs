@@ -167,6 +167,7 @@ impl ConfigBuilder<ClientConfig, WantsClientCert> {
 
         ClientConfig {
             r2o_client_hello_wire_len: None,
+            r2o_client_hello_sni_offset: None,
             provider: self.provider,
             alpn_protocols: Vec::new(),
             check_selected_alpn: true,

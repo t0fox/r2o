@@ -164,6 +164,8 @@ pub trait ResolvesClientCert: fmt::Debug + Send + Sync {
 pub struct ClientConfig {
     /// Целевая длина ClientHello в TLS-записи; QUIC использует длину handshake-сообщения.
     pub r2o_client_hello_wire_len: Option<usize>,
+    /// Require this SNI byte offset in the first TLS record of a measurement.
+    pub r2o_client_hello_sni_offset: Option<usize>,
 
     /// Which ALPN protocols we include in our client hello.
     /// If empty, no ALPN extension is sent.

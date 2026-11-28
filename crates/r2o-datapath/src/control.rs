@@ -91,6 +91,7 @@ struct DomainBypassKey {
 
 pub struct NamePlans {
     plans: HashMap<NamePlanKey, InstalledPlan>,
+    has_tcp_order: bool,
     dns_plans: HashMap<NamePlanKey, DnsBoundPlan>,
     addr_plans: HashMap<AddrPlanKey, InstalledPlan>,
     suffix_plans: HashMap<SuffixPlanKey, InstalledPlan>,
@@ -232,6 +233,7 @@ impl NamePlans {
         }
         Self {
             plans: HashMap::new(),
+            has_tcp_order: false,
             dns_plans: HashMap::new(),
             addr_plans: HashMap::new(),
             suffix_plans: HashMap::new(),
@@ -341,7 +343,7 @@ impl NamePlans {
         }
         match self.exact_victim() {
             Some(ExactVictim::Name(key)) => {
-                self.plans.remove(&key);
+                self.remove_exact_name(&key);
                 true
             }
             Some(ExactVictim::Addr(key)) => {
@@ -353,6 +355,12 @@ impl NamePlans {
                 true
             }
             None => false,
+        }
+    }
+
+    fn remove_exact_name(&mut self, key: &NamePlanKey) {
+        if self.plans.remove(key).is_some_and(|entry| entry.plan.tcp_order.is_some()) {
+            self.has_tcp_order = self.plans.values().any(|entry| entry.plan.tcp_order.is_some());
         }
     }
 
@@ -449,6 +457,7 @@ impl NamePlans {
                 COMMAND_SET_HTTPS => self.set_https(body),
                 COMMAND_CLEAR if frame.body.is_empty() => {
                     self.plans.clear();
+                    self.has_tcp_order = false;
                     self.dns_plans.clear();
                     self.addr_plans.clear();
                     self.suffix_plans.clear();
@@ -897,7 +906,17 @@ impl NamePlans {
             })
             .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, shape, 6))
             .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, bridge_shape, 6))
-            .or_else(|| self.find_addr_shape_fits(view.dst, shape));
+            .or_else(|| self.find_addr_shape_fits(view.dst, shape))
+            .or_else(|| {
+                if !self.has_tcp_order || !tcp_order_shape(shape) {
+                    return None;
+                }
+                let host = control::tcp_order_plan_key(
+                    SocketAddr::new(view.dst.as_ip_addr(), tcp.destination_port),
+                    sni,
+                )?;
+                self.find_exact(host.as_bytes(), view.family, shape)
+            });
         if plan.is_none() {
             self.note_shape_miss(Some(sni), view.dst, view.family, shape);
         }
@@ -1079,6 +1098,18 @@ impl NamePlans {
         destination_port: u16,
     ) -> bool {
         let host = name.and_then(canonical_name);
+        let scoped = self.has_tcp_order
+            && address.zip(name).is_some_and(|(address, name)| {
+                control::tcp_order_plan_key(
+                    SocketAddr::new(address.as_ip_addr(), destination_port),
+                    name,
+                )
+                .is_some_and(|host| {
+                    self.plans
+                        .keys()
+                        .any(|key| key.family == family && key.host == host)
+                })
+            });
         let exact = host.as_ref().is_some_and(|host| {
             self.plans.iter().any(|(key, entry)| {
                 key.family == family
@@ -1132,7 +1163,7 @@ impl NamePlans {
                     })
             })
         });
-        exact || probes || suffix || addr
+        exact || probes || suffix || addr || scoped
     }
 
     /// C `d2k_plantab_http_candidate`: при `sport==0` подходит постоянная
@@ -1505,6 +1536,18 @@ impl NamePlans {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
+        let scoped = control::tcp_order_plan_endpoint(name);
+        match (scoped, &plan.tcp_order) {
+            (None, None) => {}
+            (Some(endpoint), Some(order))
+                if !dns_scope
+                    && tcp_order_shape(shape)
+                    && (if endpoint.is_ipv4() { 4 } else { 6 }) == family
+                    && endpoint == order.endpoint
+                    && control::tcp_order_plan_key(endpoint, order.host.as_bytes()).as_deref()
+                        == Some(key.host.as_str()) => {}
+            _ => return (false, control::ACK_BAD_PLAN),
+        }
         let compatible = match shape {
             SHAPE_HTTP => plan.transport == 6 && plan.proto == PROTO_HTTP,
             SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP => {
@@ -1566,6 +1609,7 @@ impl NamePlans {
         }
         let generation = self.next_generation();
         let last_used = Cell::new(self.next_plan_clock());
+        self.has_tcp_order |= scoped.is_some();
         self.plans.insert(
             key,
             InstalledPlan {
@@ -1939,7 +1983,12 @@ impl NamePlans {
             _ if is_tcp_context_shape(shape) => plan.proto == 1,
             _ => false,
         };
-        if plan.transport != 6 || !proto_matches || !self.r2o_plan_valid(&plan) {
+        if plan.transport != 6 || !proto_matches || !self.r2o_plan_valid(&plan)
+            || plan.tcp_order.as_ref().is_some_and(|order| {
+                !tcp_order_shape(shape) || key.name.host != order.host
+                    || (if order.endpoint.is_ipv4() { 4 } else { 6 }) != family
+            })
+        {
             return (false, control::ACK_BAD_PLAN);
         }
         // D2O `set_name_trial` снимает прежнюю пробную запись того же
@@ -2337,7 +2386,7 @@ impl NamePlans {
         {
             return (false, control::ACK_BAD_ARGS);
         }
-        self.plans.remove(&NamePlanKey {
+        self.remove_exact_name(&NamePlanKey {
             host,
             family,
             shape,
@@ -3329,9 +3378,16 @@ fn r2o_addr_probe_packet_flow(
 fn canonical_plan_name(bytes: &[u8], shape: u8) -> Option<String> {
     if shape == SHAPE_VOICE && bytes == b"@discord-voice" {
         Some("@discord-voice".to_owned())
+    } else if tcp_order_shape(shape) && control::tcp_order_plan_endpoint(bytes).is_some() {
+        Some(std::str::from_utf8(bytes).ok()?.to_owned())
     } else {
         canonical_name(bytes)
     }
+}
+
+fn tcp_order_shape(shape: u8) -> bool {
+    is_tcp_context_shape(shape)
+        && matches!(r2k_link_shape_tcp_base(shape), SHAPE_MODERN | SHAPE_LEGACY)
 }
 
 fn dns_bound_name(name: &[u8], family: u8, shape: u8) -> Option<String> {
