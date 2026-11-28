@@ -21,6 +21,9 @@ import time
 
 pid, control = int(sys.argv[1]), sys.argv[2]
 deadline = time.monotonic() + 5
+# A delayed verdict still proves this run's queue path. Reusing the random
+# challenge keeps a slow runner from perpetually reading the previous reply.
+challenge = os.urandom(16)
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
     probe.bind(('127.0.0.1', 46991))
     probe.settimeout(0.1)
@@ -29,7 +32,6 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         if not os.path.exists(control) or not stat.S_ISSOCK(os.stat(control).st_mode):
             time.sleep(0.05)
             continue
-        challenge = os.urandom(16)
         probe.sendto(challenge, probe.getsockname())
         try:
             if probe.recv(16) == challenge:
