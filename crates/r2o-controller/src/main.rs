@@ -10349,6 +10349,36 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy)]
+struct R2oCandidateTrialPolicy<'a> {
+    cancel: &'a AtomicBool,
+    deadline: std::time::Instant,
+    retries: bool,
+}
+
+#[cfg(unix)]
+impl<'a> R2oCandidateTrialPolicy<'a> {
+    fn until(cancel: &'a AtomicBool, deadline: std::time::Instant) -> Self {
+        Self {
+            cancel,
+            deadline,
+            retries: true,
+        }
+    }
+
+    fn single(self) -> Self {
+        Self {
+            retries: false,
+            ..self
+        }
+    }
+
+    fn active(self) -> bool {
+        !self.cancel.load(Ordering::Relaxed) && std::time::Instant::now() < self.deadline
+    }
+}
+
+#[cfg(unix)]
 fn r2o_run_discovery_candidate_trial(
     target: &r2o_controller::discovery::DiscoveryTarget,
     source_text: &str,
@@ -10360,7 +10390,9 @@ fn r2o_run_discovery_candidate_trial(
     has_timestamp: Option<bool>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+    probe_budget_remaining: usize,
     packet_budget: Option<u32>,
+    policy: R2oCandidateTrialPolicy<'_>,
 ) -> (
     Result<r2o_controller::fetch::FetchResult, String>,
     bool,
@@ -10377,8 +10409,10 @@ fn r2o_run_discovery_candidate_trial(
         has_timestamp,
         ech_config,
         resource_memory,
+        probe_budget_remaining,
         packet_budget,
         r2o_controller::fetch::R2oFetchEncoding::Identity,
+        policy,
     )
 }
 
@@ -10394,8 +10428,10 @@ fn r2o_run_discovery_candidate_trial_with_encoding(
     has_timestamp: Option<bool>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     resource_memory: &std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>,
+    probe_budget_remaining: usize,
     packet_budget: Option<u32>,
     request_encoding: r2o_controller::fetch::R2oFetchEncoding,
+    policy: R2oCandidateTrialPolicy<'_>,
 ) -> (
     Result<r2o_controller::fetch::FetchResult, String>,
     bool,
@@ -10412,10 +10448,10 @@ fn r2o_run_discovery_candidate_trial_with_encoding(
         has_timestamp,
         ech_config,
         resource_memory,
-        1 + usize::from(client_hello.is_some()),
+        probe_budget_remaining,
         packet_budget,
         request_encoding,
-        || false,
+        policy.single(),
     );
     (result, applied, attempts)
 }
@@ -10435,7 +10471,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
     probe_budget_remaining: usize,
     packet_budget: Option<u32>,
     request_encoding: r2o_controller::fetch::R2oFetchEncoding,
-    retry_budget_available: impl FnMut() -> bool,
+    policy: R2oCandidateTrialPolicy<'_>,
 ) -> (
     Result<r2o_controller::fetch::FetchResult, String>,
     bool,
@@ -10457,7 +10493,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
         packet_budget,
         request_encoding,
         false,
-        retry_budget_available,
+        policy,
         true,
         None,
         &mut |_, _, _, _| {},
@@ -10486,6 +10522,44 @@ fn r2o_outcome_wall_time() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+// One sample for ranking, then at most four pairs around candidate trials.
+const R2O_DISCOVERY_ROUTE_LOOKUPS: u8 = 9;
+
+#[derive(Default)]
+struct R2oDiscoveryRouteChecks(std::cell::Cell<u8>);
+
+impl R2oDiscoveryRouteChecks {
+    fn sample(
+        &self,
+        lookup: impl FnOnce() -> Option<discovery_outcomes::ProbeScope>,
+    ) -> Option<discovery_outcomes::ProbeScope> {
+        let used = self.0.get();
+        if used == R2O_DISCOVERY_ROUTE_LOOKUPS {
+            return None;
+        }
+        self.0.set(used + 1);
+        let started = std::time::Instant::now();
+        let scope = lookup();
+        if std::env::var_os("R2O_DEBUG_APPLIED").is_some() {
+            eprintln!(
+                "R2O_DEBUG_APPLIED route_lookup={} scope_known={} elapsed_us={}",
+                used + 1,
+                scope.is_some(),
+                started.elapsed().as_micros(),
+            );
+        }
+        scope
+    }
+
+    fn confirm(
+        &self,
+        before: Option<discovery_outcomes::ProbeScope>,
+        lookup: impl FnOnce() -> Option<discovery_outcomes::ProbeScope>,
+    ) -> Option<discovery_outcomes::ProbeScope> {
+        before.filter(|scope| self.sample(lookup) == Some(*scope))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -10618,17 +10692,18 @@ fn r2o_run_discovery_props_questions(
     cancel: &AtomicBool,
     deadline: std::time::Instant,
     probes: &mut r2o_controller::r2o_fallback::ProbeCounts,
-    probe_cap: usize,
+    probe_limit: usize,
 ) -> Option<r2o_controller::classify::DpiProps> {
     use std::time::{Duration, Instant};
 
+    let initial_probes = probes.candidates;
     let destination = target.endpoint.parse::<std::net::SocketAddr>().ok()?;
     let probe_key = target.probe_key();
     let wire_shape = r2o_plan_wire_shape(target.shape, has_timestamp);
     for (question_index, question) in AskQuestion::ALL.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed)
             || Instant::now() >= deadline
-            || probes.remaining(probe_cap) == 0
+            || probes.candidates.saturating_sub(initial_probes) >= probe_limit
         {
             break;
         }
@@ -10851,7 +10926,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     packet_budget: Option<u32>,
     request_encoding: r2o_controller::fetch::R2oFetchEncoding,
     layered_rx: bool,
-    mut retry_budget_available: impl FnMut() -> bool,
+    policy: R2oCandidateTrialPolicy<'_>,
     measured_arm: bool,
     dropped_events: Option<&AtomicUsize>,
     progress: &mut dyn FnMut(usize, usize, &str, &str),
@@ -10861,9 +10936,9 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     usize,
     R2oCandidateTrialEvidence,
 ) {
-    if probe_budget_remaining == 0 || !retry_budget_available() {
+    if !policy.active() {
         return (
-            Err("бюджет зондов Discovery исчерпан до проверки кандидата".into()),
+            Err("проверка кандидата Discovery отменена или истёк срок поиска".into()),
             false,
             0,
             Default::default(),
@@ -10872,9 +10947,8 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     let ech_snapshot_is_trial_proof =
         r2o_is_ech_shape(target.shape) && ech_config.is_none() && client_hello.is_some();
     let proof_probe_reserve = usize::from(client_hello.is_some() && !ech_snapshot_is_trial_proof);
-    let Some(max_retries) = r2o_discovery_candidate_retry_count(
-        probe_budget_remaining.saturating_sub(proof_probe_reserve),
-    ) else {
+    let exchange_budget = probe_budget_remaining.saturating_sub(proof_probe_reserve);
+    let Some(max_retries) = r2o_discovery_candidate_retry_count(exchange_budget) else {
         return (
             Err(
                 "бюджета зондов Discovery недостаточно для проверки и подтверждения кандидата"
@@ -10886,11 +10960,11 @@ fn r2o_run_discovery_candidate_trial_with_progress(
         );
     };
     let arm_retry_limit = if measured_arm { max_retries } else { 0 };
-    let max_retries = (arm_retry_limit + 1).min(
-        probe_budget_remaining
-            .saturating_sub(proof_probe_reserve + 1)
-            .min(u8::MAX as usize) as u8,
-    );
+    let max_retries = if policy.retries {
+        (arm_retry_limit + 1).min(exchange_budget.saturating_sub(1).min(u8::MAX as usize) as u8)
+    } else {
+        0
+    };
     // C `install_next`: probe списывается до проверки текста плана, поэтому
     // негодный кандидат тоже расходует бюджет. Ошибка подготовки возвращает
     // attempts=1, а не 0.
@@ -10932,24 +11006,36 @@ fn r2o_run_discovery_candidate_trial_with_progress(
             Default::default(),
         );
     }
-    let mut attempts = 0;
+    let attempts = std::cell::Cell::new(0_usize);
     let mut bare_retries = 0;
     let mut arm_retries = 0;
     let mut ech_resolver = r2o_controller::ech::R2oEchProbeResolver::default();
-    let retry_budget_available = std::cell::RefCell::new(retry_budget_available);
     let (result, applied, _, evidence) = r2o_repeat_candidate_trials(
         max_retries,
         || {
-            let sequence_budget = probe_budget_remaining.saturating_sub(attempts);
+            // A partial layered RX exchange finishes without a ClientHello
+            // proof and can use the slot reserved for that proof.
+            let sequence_budget = probe_budget_remaining.saturating_sub(attempts.get());
             let (sequence, layered_rx_handled, _, layered_rx_evidence) =
                 r2o_discovery_layered_rx_candidate_trials(
                     layered_rx,
                     request_encoding,
                     sequence_budget,
-                    || retry_budget_available.borrow_mut()(),
+                    || policy.retries && policy.active(),
                     || std::thread::sleep(r2o_controller::fetch::R2O_VOLUME_RX_PROBE_GAP),
                     |encoding| {
-                        attempts += 1;
+                        if !policy.active() {
+                            return (
+                                (
+                                    Err("проверка кандидата Discovery прервана".into()),
+                                    false,
+                                    false,
+                                ),
+                                0,
+                                0,
+                            );
+                        }
+                        attempts.set(attempts.get() + 1);
                         let dropped_before = dropped_events
                             .map_or(0, |counter| counter.load(Ordering::Relaxed) as u32);
                         let trial_ech_config = r2o_discovery_refresh_ech_probe_config(
@@ -11009,8 +11095,8 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                     == R2oFamilyRecoveryDecision::Verified;
             let (application, result) = r2o_discovery_plan_result(&trial.0, trial.1, verified);
             progress(
-                attempts,
-                (usize::from(max_retries) + 1).max(attempts),
+                attempts.get(),
+                (usize::from(max_retries) + 1).max(attempts.get()),
                 &application,
                 &result,
             );
@@ -11030,7 +11116,8 @@ fn r2o_run_discovery_candidate_trial_with_progress(
         },
         |(result, applied, transport_established, evidence)| {
             if evidence.layered_rx_handled
-                || !retry_budget_available.borrow_mut()()
+                || attempts.get() >= exchange_budget
+                || !policy.active()
                 || r2o_family_recovery_decision(result, *applied)
                     == R2oFamilyRecoveryDecision::Verified
             {
@@ -11058,13 +11145,13 @@ fn r2o_run_discovery_candidate_trial_with_progress(
         && let Some(client_hello) = client_hello
     {
         progress(
-            attempts,
+            attempts.get(),
             usize::from(max_retries) + 1,
             "точный APPLIED получен",
             "проверяется ClientHello из живого потока",
         );
-        if !retry_budget_available.borrow_mut()() {
-            return (result, false, attempts, evidence);
+        if !policy.active() || attempts.get() >= probe_budget_remaining {
+            return (result, false, attempts.get(), evidence);
         }
         let snapshot_applied = r2o_discovery_client_shape_trial(
             target,
@@ -11072,12 +11159,12 @@ fn r2o_run_discovery_candidate_trial_with_progress(
             client_hello,
             confirm_mark,
             commands,
-            None,
+            Some(policy.deadline),
         )
         .unwrap_or(false);
-        attempts += 1;
+        attempts.set(attempts.get() + 1);
         progress(
-            attempts,
+            attempts.get(),
             usize::from(max_retries) + 2,
             if snapshot_applied {
                 "точный APPLIED получен для ClientHello"
@@ -11090,9 +11177,14 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                 "план не прошёл проверку ClientHello из живого потока"
             },
         );
-        return (result, applied && snapshot_applied, attempts, evidence);
+        return (
+            result,
+            applied && snapshot_applied,
+            attempts.get(),
+            evidence,
+        );
     }
-    (result, applied, attempts, evidence)
+    (result, applied, attempts.get(), evidence)
 }
 
 #[cfg(unix)]
@@ -18261,6 +18353,7 @@ impl DiscoveryWorker {
             };
             let runner_started = std::time::Instant::now();
             let runner_deadline = runner_started + R2O_DISCOVERY_TASK_LIFETIME;
+            let trial_policy = R2oCandidateTrialPolicy::until(&cancel, runner_deadline);
             runner_searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -18407,13 +18500,18 @@ impl DiscoveryWorker {
             };
             let (ech_witness_candidates, next_witness, ech_config, ech_grease) =
                 prepare_ech(&mut target, client_hello.is_some());
-            let learn_tls = matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY)
-                && !ech_grease
+            let ordinary_tls = matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY)
                 && ech_config.is_none()
                 && target.address_key().is_none();
-            let probe_scope = learn_tls
-                .then(|| r2o_local_probe_scope(&target, confirm_mark))
-                .flatten();
+            let learn_tls = ordinary_tls && !ech_grease;
+            let route_checks = R2oDiscoveryRouteChecks::default();
+            let lookup_route = || r2o_local_probe_scope(&target, confirm_mark);
+            let begin_attempt = || {
+                (learn_tls && trial_policy.active())
+                    .then(|| route_checks.sample(lookup_route))
+                    .flatten()
+            };
+            let probe_scope = begin_attempt();
             let target_key = || {
                 r2o_controller::r2o_fallback::tried_key(&target.host)
                     ^ r2o_controller::r2o_fallback::tried_key(&target.endpoint).rotate_left(19)
@@ -18424,49 +18522,51 @@ impl DiscoveryWorker {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .ranking(scope, target_key(), r2o_outcome_wall_time())
             });
-            let path_verified = std::cell::OnceCell::new();
-            let record_attempt = |id: &str,
-                                  text: &str,
-                                  result: &Result<r2o_controller::fetch::FetchResult, String>,
-                                  applied: bool,
-                                  evidence: R2oCandidateTrialEvidence,
-                                  probes: usize,
-                                  started: std::time::Instant| {
-                if !learn_tls || probes == 0 {
-                    return;
-                }
-                let active = !cancel.load(Ordering::Relaxed)
-                    && r2o_discovery_trial_time_available(runner_started.elapsed());
-                let elapsed = started.elapsed();
-                let kind = r2o_discovery_attempt_result(result, applied, evidence, active);
-                let scope = probe_scope.filter(|scope| {
-                    !matches!(
+            let record_attempt =
+                |id: &str,
+                 text: &str,
+                 result: &Result<r2o_controller::fetch::FetchResult, String>,
+                 applied: bool,
+                 evidence: R2oCandidateTrialEvidence,
+                 probes: usize,
+                 started: std::time::Instant,
+                 route_before: Option<discovery_outcomes::ProbeScope>| {
+                    if !learn_tls || probes == 0 {
+                        return None;
+                    }
+                    let active = !cancel.load(Ordering::Relaxed)
+                        && r2o_discovery_trial_time_available(runner_started.elapsed());
+                    let elapsed = started.elapsed();
+                    let kind = r2o_discovery_attempt_result(result, applied, evidence, active);
+                    let scope = if matches!(
                         kind,
                         discovery_outcomes::ResultKind::Application
                             | discovery_outcomes::ResultKind::Rejected
-                    ) || *path_verified.get_or_init(|| {
-                        r2o_local_probe_scope(&target, confirm_mark) == Some(*scope)
-                    })
-                });
-                let mut observation =
-                    discovery_outcomes::Completion::new(discovery_outcomes::Observation {
-                        scope,
-                        plan: discovery_outcomes::plan_key(id),
-                        program: discovery_outcomes::plan_key(text),
-                        target: target_key(),
-                        result: kind,
-                        applied,
-                        transport_established: evidence.transport_established,
-                        probes,
-                        elapsed,
-                    });
-                observation.commit(
-                    &mut outcomes
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
-                    r2o_outcome_wall_time(),
-                );
-            };
+                    ) {
+                        route_checks.confirm(route_before, lookup_route)
+                    } else {
+                        route_before
+                    };
+                    let mut observation =
+                        discovery_outcomes::Completion::new(discovery_outcomes::Observation {
+                            scope,
+                            plan: discovery_outcomes::plan_key(id),
+                            program: discovery_outcomes::plan_key(text),
+                            target: target_key(),
+                            result: kind,
+                            applied,
+                            transport_established: evidence.transport_established,
+                            probes,
+                            elapsed,
+                        });
+                    observation.commit(
+                        &mut outcomes
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        r2o_outcome_wall_time(),
+                    );
+                    scope
+                };
             let persisted_ech_tried = runner_ech_rx_cursor
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -18529,11 +18629,12 @@ impl DiscoveryWorker {
             let mut own_probes = 0;
             let network_probe =
                 r2o_discovery_network_whitelist_probe(candidate_catalog.as_deref(), false);
-            let search_probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
-                r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
-            } else {
-                0
-            });
+            let search_probe_cap =
+                R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe && !ordinary_tls {
+                    r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
+                } else {
+                    0
+                });
             let geneva_midpoint = if !trigger_planned
                 && matches!(target.family, 4 | 6)
                 && control::r2k_link_shape_tcp_base(target.shape) == SHAPE_LEGACY
@@ -18717,6 +18818,7 @@ impl DiscoveryWorker {
                                             &format!("проверка плана {attempt}/{total}: {result}"),
                                         );
                                 };
+                            let route_before = begin_attempt();
                             let attempt_started = std::time::Instant::now();
                             let (result, applied, attempts, candidate_evidence) =
                                 r2o_run_discovery_candidate_trial_with_progress(
@@ -18744,18 +18846,13 @@ impl DiscoveryWorker {
                                         &probe_path,
                                     ),
                                     target.shape == SHAPE_MODERN && ech_config.is_none(),
-                                    || {
-                                        !cancel.load(Ordering::Relaxed)
-                                            && r2o_discovery_trial_time_available(
-                                                runner_started.elapsed(),
-                                            )
-                                    },
+                                    trial_policy,
                                     false,
                                     Some(&dropped_events),
                                     &mut candidate_progress,
                                 );
                             own_probes = own_probes.saturating_add(attempts);
-                            record_attempt(
+                            let result_scope = record_attempt(
                                 &candidate.plan.id,
                                 text,
                                 &result,
@@ -18763,6 +18860,7 @@ impl DiscoveryWorker {
                                 candidate_evidence,
                                 attempts,
                                 attempt_started,
+                                route_before,
                             );
                             if applied && attempts > 0 {
                                 own_tried.push(candidate.key);
@@ -18776,6 +18874,8 @@ impl DiscoveryWorker {
                                 && !cancel.load(Ordering::Relaxed)
                                 && r2o_discovery_trial_time_available(runner_started.elapsed())
                                 && r2o_own_plan_failed(&result, candidate_evidence)
+                                && (!learn_tls
+                                    || result_scope.is_some() && result_scope == probe_scope)
                             {
                                 let mut searches = runner_searches
                                     .lock()
@@ -18944,7 +19044,7 @@ group_block_proven: false,
                                 2,
                                 None,
                                 r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
-                                || !cancel.load(Ordering::Relaxed),
+                                trial_policy,
                             );
                         own_probes = own_probes.saturating_add(attempts);
                         if r2o_family_recovery_decision(&result, applied)
@@ -19006,7 +19106,7 @@ group_block_proven: false,
                         .or_default(),
                 )
             };
-            let classifier_limit = if learn_tls {
+            let classifier_limit = if ordinary_tls {
                 search_probe_cap.saturating_sub(base_probes.saturating_add(own_probes))
             } else {
                 usize::MAX
@@ -19072,6 +19172,8 @@ group_block_proven: false,
                         "",
                         "",
                     );
+                let remaining =
+                    r2o_discovery_remaining_probes(&full_counts, search_probe_cap, ordinary_tls);
                 if let Some(props) = r2o_run_discovery_props_questions(
                     &target,
                     &props_trigger,
@@ -19083,7 +19185,7 @@ group_block_proven: false,
                     &cancel,
                     runner_deadline,
                     &mut full_counts,
-                    search_probe_cap,
+                    remaining,
                 ) {
                     let Ok(plans) = compose_plan_texts(
                         &props,
@@ -19112,6 +19214,7 @@ group_block_proven: false,
                             &runner_resource_memory,
                         );
                         let mut progress = |_: usize, _: usize, _: &str, _: &str| {};
+                        let route_before = begin_attempt();
                         let attempt_started = std::time::Instant::now();
                         let (result, applied, attempts, evidence) =
                             r2o_run_discovery_candidate_trial_with_progress(
@@ -19132,14 +19235,15 @@ group_block_proven: false,
                                 ),
                                 ech_config.as_ref(),
                                 &runner_resource_memory,
-                                full_counts.remaining(search_probe_cap),
+                                r2o_discovery_remaining_probes(
+                                    &full_counts,
+                                    search_probe_cap,
+                                    ordinary_tls,
+                                ),
                                 None,
                                 r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
                                 false,
-                                || {
-                                    !cancel.load(Ordering::Relaxed)
-                                        && std::time::Instant::now() < runner_deadline
-                                },
+                                trial_policy,
                                 false,
                                 Some(&dropped_events),
                                 &mut progress,
@@ -19154,6 +19258,7 @@ group_block_proven: false,
                                 evidence,
                                 attempts,
                                 attempt_started,
+                                route_before,
                             );
                         }
                         if r2o_family_recovery_decision(&result, applied)
@@ -19267,6 +19372,7 @@ group_block_proven: false,
                                     &format!("проверка плана {attempt}/{total}: {result}"),
                                 );
                         };
+                    let route_before = begin_attempt();
                     let attempt_started = std::time::Instant::now();
                     let (result, applied, attempts, candidate_evidence) =
                         r2o_run_discovery_candidate_trial_with_progress(
@@ -19293,10 +19399,7 @@ group_block_proven: false,
                             None,
                             r2o_controller::fetch::r2o_d2o_verification_encoding(&known_probe_path),
                             false,
-                            || {
-                                !cancel.load(Ordering::Relaxed)
-                                    && r2o_discovery_trial_time_available(runner_started.elapsed())
-                            },
+                            trial_policy,
                             false,
                             Some(&dropped_events),
                             &mut candidate_progress,
@@ -19312,6 +19415,7 @@ group_block_proven: false,
                             candidate_evidence,
                             attempts,
                             attempt_started,
+                            route_before,
                         );
                     }
                     let verified = r2o_family_recovery_decision(&result, applied)
@@ -19507,6 +19611,7 @@ group_block_proven: false,
                 raw: classify_probes,
                 candidates: discovery_candidate_probes,
             };
+            let route_before = begin_attempt();
             let attempt_started = std::time::Instant::now();
             let (result, applied, candidate_attempts, candidate_evidence) =
                 r2o_run_discovery_candidate_trial_with_progress(
@@ -19527,14 +19632,11 @@ group_block_proven: false,
                     ),
                     ech_config.as_ref(),
                     &runner_resource_memory,
-                    probe_counts.remaining(probe_cap),
+                    r2o_discovery_remaining_probes(&probe_counts, probe_cap, ordinary_tls),
                     None,
                     r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
                     false,
-                    || {
-                        !cancel.load(Ordering::Relaxed)
-                            && r2o_discovery_trial_time_available(runner_started.elapsed())
-                    },
+                    trial_policy,
                     measured_arm_candidate && !primary_from_owned_fallback,
                     Some(&dropped_events),
                     &mut candidate_progress,
@@ -19555,6 +19657,7 @@ group_block_proven: false,
                     candidate_evidence,
                     candidate_attempts,
                     attempt_started,
+                    route_before,
                 );
             }
             let mut probes_used = probe_counts.candidates;
@@ -19614,7 +19717,7 @@ group_block_proven: false,
                     && candidate_evidence.dropped_before == candidate_evidence.dropped_after
                     && candidate_evidence.transport_established
                     && r2o_control_wire() == control::WireProfile::V48
-                    && probe_counts.remaining(probe_cap) >= 3
+                    && r2o_discovery_remaining_probes(&probe_counts, probe_cap, ordinary_tls) >= 3
                     && let (Some(hello), Some(has_timestamp)) =
                         (client_hello.as_deref(), client_has_tcp_timestamps)
                     && let Some(experiment) = r2o_controller::tcp_order::Experiment::from_measured(
@@ -19707,7 +19810,7 @@ group_block_proven: false,
                 loop {
                     if cancel.load(Ordering::Relaxed)
                         || !r2o_discovery_trial_time_available(runner_started.elapsed())
-                        || probe_counts.remaining(probe_cap)
+                        || r2o_discovery_remaining_probes(&probe_counts, probe_cap, ordinary_tls)
                             < 1 + usize::from(client_hello.is_some())
                     {
                         break;
@@ -19738,6 +19841,7 @@ group_block_proven: false,
                         "ожидается точное подтверждение datapath",
                     );
                     let progress_base = probe_counts.total();
+                    let route_before = begin_attempt();
                     let attempt_started = std::time::Instant::now();
                     let (result, applied, attempts, candidate_evidence) =
                         r2o_run_discovery_candidate_trial_with_progress(
@@ -19758,14 +19862,11 @@ group_block_proven: false,
                             ),
                             None,
                             &runner_resource_memory,
-                            probe_counts.remaining(probe_cap),
+                            r2o_discovery_remaining_probes(&probe_counts, probe_cap, ordinary_tls),
                             None,
                             r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
                             false,
-                            || {
-                                !cancel.load(Ordering::Relaxed)
-                                    && r2o_discovery_trial_time_available(runner_started.elapsed())
-                            },
+                            trial_policy,
                             false,
                             Some(&dropped_events),
                             &mut |attempt, _, application, result| {
@@ -19790,6 +19891,7 @@ group_block_proven: false,
                             candidate_evidence,
                             attempts,
                             attempt_started,
+                            route_before,
                         );
                     }
                     let verified = r2o_family_recovery_decision(&result, applied)
@@ -19898,7 +20000,9 @@ group_block_proven: false,
                             client_has_tcp_timestamps,
                             Some(config),
                             &runner_resource_memory,
+                            probe_cap.saturating_sub(probes_used),
                             None,
+                            trial_policy,
                         );
                         probes_used = probes_used.saturating_add(attempts);
                         (result, applied)
@@ -19999,7 +20103,9 @@ group_block_proven: false,
                         client_has_tcp_timestamps,
                         Some(&selected_config),
                         &runner_resource_memory,
+                        probe_cap.saturating_sub(probes_used),
                         None,
+                        trial_policy,
                     );
                     probes_used = probes_used.saturating_add(trial.2);
                     result = trial.0;
@@ -20149,7 +20255,9 @@ group_block_proven: false,
                         client_has_tcp_timestamps,
                         Some(&selected_config),
                         &runner_resource_memory,
+                        probe_cap.saturating_sub(probes_used),
                         None,
+                        trial_policy,
                     );
                     probes_used = probes_used.saturating_add(attempts);
                     let (next_config, (candidate_result, candidate_applied), newly_rejected) =
@@ -20199,7 +20307,9 @@ group_block_proven: false,
                                     client_has_tcp_timestamps,
                                     Some(config),
                                     &runner_resource_memory,
+                                    probe_cap.saturating_sub(probes_used),
                                     None,
+                                    trial_policy,
                                 );
                                 probes_used = probes_used.saturating_add(attempts);
                                 (result, applied)
@@ -23873,6 +23983,19 @@ fn r2o_ech_rx_ladder_candidate(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_remaining_probes(
+    counts: &r2o_controller::r2o_fallback::ProbeCounts,
+    cap: usize,
+    ordinary_tls: bool,
+) -> usize {
+    if ordinary_tls {
+        cap.saturating_sub(counts.total())
+    } else {
+        counts.remaining(cap)
+    }
+}
+
+#[cfg(unix)]
 fn r2o_full_search_probe_counts(
     base_probes: usize,
     classifier_probes: usize,
@@ -23927,6 +24050,8 @@ fn r2o_discovery_volume_recovery(
     let (probe_path, alternate_path) =
         r2o_discovery_resource_probe_paths(target, candidate_catalog, resource_memory);
     let initial_network_probe = r2o_discovery_network_whitelist_probe(candidate_catalog, false);
+    let trial_policy =
+        R2oCandidateTrialPolicy::until(cancel, started + R2O_DISCOVERY_TASK_LIFETIME);
     let mut probe_counts = r2o_controller::r2o_fallback::ProbeCounts {
         raw: classify_probes,
         candidates: prior_candidate_probes,
@@ -24079,8 +24204,10 @@ fn r2o_discovery_volume_recovery(
             Some(client_has_tcp_timestamps),
             None,
             resource_memory,
+            probe_counts.remaining(probe_cap),
             None,
             candidate_request_encoding,
+            trial_policy,
         );
         probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
         let verified =
@@ -24183,10 +24310,7 @@ fn r2o_discovery_volume_recovery(
             probe_counts.remaining(probe_cap),
             None,
             candidate_request_encoding,
-            || {
-                !cancel.load(Ordering::Relaxed)
-                    && r2o_discovery_trial_time_available(started.elapsed())
-            },
+            trial_policy,
         );
         probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
         let verified =
@@ -24348,8 +24472,10 @@ fn r2o_discovery_volume_recovery(
             Some(client_has_tcp_timestamps),
             None,
             resource_memory,
+            probe_counts.remaining(probe_cap),
             tx_ladder_requires_packet_budget.then_some(task_budget),
             candidate_request_encoding,
+            trial_policy,
         );
         probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
         // C `verify_confirm` (`sched.c:9593-9605`). Гейт объёмной лестницы
@@ -55113,7 +55239,10 @@ mod tests {
             None,
             r2o_controller::fetch::R2oFetchEncoding::Identity,
             false,
-            || true,
+            super::R2oCandidateTrialPolicy::until(
+                &std::sync::atomic::AtomicBool::new(false),
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            ),
             false,
             None,
             &mut progress,
@@ -55994,6 +56123,240 @@ mod tests {
         assert!(!applied);
         assert!(result.unwrap_err().contains("чужой trial ID"));
         controller.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_trial_reserves_client_hello_proof_independently_of_retries() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        const PLAN: &str = "r2o-plan 1 1\nid 42424242424242424242424242424242\nproto tcp tls\nsplit sni_middle +0\n";
+        let (_, plan_id) = r2o_controller::discovery::plan_ident(PLAN).unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(cert.serialize_der().unwrap())],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                        cert.serialize_private_key_der(),
+                    )),
+                )
+                .unwrap(),
+        );
+        let mut hello = Vec::new();
+        r2o_controller::r2o_tls::r2o_tls_client_connection(
+            "localhost",
+            true,
+            None,
+            rustls::RootCertStore::empty(),
+        )
+        .unwrap()
+        .write_tls(&mut hello)
+        .unwrap();
+
+        // The first case leaves spare budget with retries disabled. The
+        // second forces a retry and leaves exactly one probe for the proof.
+        for (retry, fail_first_exchange, cancel_after_exchange, budget, expected) in [
+            (false, false, false, 4, 2),
+            (true, true, false, 3, 3),
+            (false, true, false, 4, 1),
+            (false, false, true, 4, 1),
+            (false, false, false, 1, 0),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            let target = DiscoveryTarget {
+                host: "localhost".into(),
+                endpoint: endpoint.to_string(),
+                family: 4,
+                shape: SHAPE_LEGACY,
+                tcp_profile: 0,
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let policy = super::R2oCandidateTrialPolicy::until(
+                &cancel,
+                Instant::now() + Duration::from_secs(10),
+            );
+            let (commands, requests) = std::sync::mpsc::sync_channel(1);
+            let controller_cancel = Arc::clone(&cancel);
+            let controller = std::thread::spawn(move || {
+                let mut installed = 0;
+                let mut event = None;
+                while let Ok(command) = requests.recv() {
+                    match command {
+                        super::HttpSearchCommand::InstallProbe {
+                            port,
+                            trial_id,
+                            reply,
+                            ..
+                        } => {
+                            installed += 1;
+                            event = Some(r2k_core::control::AppliedEvent {
+                                key: super::r2o_ask_flow_key(endpoint.ip(), port, endpoint),
+                                plan_id,
+                                trial_id,
+                                execution_id: 1,
+                                binding: BindingContext {
+                                    generation: 1,
+                                    kind: 1,
+                                    family: 4,
+                                    shape: SHAPE_LEGACY,
+                                    temporary: true,
+                                    epoch: [1; 16],
+                                },
+                            });
+                            reply.send(Ok(None)).unwrap();
+                        }
+                        super::HttpSearchCommand::CollectApplied {
+                            trial_id, reply, ..
+                        } => {
+                            let event = event.take().expect("installed probe");
+                            assert_eq!(event.trial_id, trial_id);
+                            reply.send(Ok(vec![event])).unwrap();
+                        }
+                        super::HttpSearchCommand::DeleteProbe { reply, .. } => {
+                            if cancel_after_exchange {
+                                controller_cancel.store(true, Ordering::Relaxed);
+                            }
+                            reply.send(Ok(event.take().into_iter().collect())).unwrap();
+                        }
+                        _ => panic!("unexpected command"),
+                    }
+                }
+                installed
+            });
+            let config = Arc::clone(&config);
+            let snapshot = hello.clone();
+            let server = std::thread::spawn(move || {
+                if expected == 0 {
+                    return;
+                }
+                if fail_first_exchange {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    socket.read_exact(&mut [0]).unwrap();
+                    drop(socket);
+                    if !retry {
+                        return;
+                    }
+                }
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let connection = rustls::ServerConnection::new(config).unwrap();
+                let mut stream = rustls::StreamOwned::new(connection, socket);
+                let mut tail = [0; 4];
+                while tail != *b"\r\n\r\n" {
+                    tail.rotate_left(1);
+                    stream.read_exact(&mut tail[3..]).unwrap();
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .unwrap();
+                stream.flush().unwrap();
+                if !cancel_after_exchange {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut replay = vec![0; snapshot.len()];
+                    socket.read_exact(&mut replay).unwrap();
+                    assert_eq!(replay, snapshot);
+                    // The replay verifier only needs the TLS ServerHello prefix.
+                    socket.write_all(&[22, 3, 3, 0, 4, 2, 0]).unwrap();
+                }
+            });
+            let resource_memory = std::sync::Mutex::new(Default::default());
+            let encoding = r2o_controller::fetch::R2oFetchEncoding::Identity;
+            let (result, applied, attempts) = if retry {
+                super::r2o_run_discovery_candidate_trial_with_retries(
+                    &target,
+                    PLAN,
+                    "/",
+                    Some(0),
+                    Some(0),
+                    &commands,
+                    Some(&hello),
+                    Some(true),
+                    None,
+                    &resource_memory,
+                    budget,
+                    None,
+                    encoding,
+                    policy,
+                )
+            } else {
+                super::r2o_run_discovery_candidate_trial_with_encoding(
+                    &target,
+                    PLAN,
+                    "/",
+                    Some(0),
+                    Some(0),
+                    &commands,
+                    Some(&hello),
+                    Some(true),
+                    None,
+                    &resource_memory,
+                    budget,
+                    None,
+                    encoding,
+                    policy,
+                )
+            };
+            assert_eq!(attempts, expected, "{result:?}");
+            assert_eq!(
+                applied,
+                expected >= 2 || fail_first_exchange && !retry,
+                "{result:?}"
+            );
+            if expected >= 2 || cancel_after_exchange {
+                assert!(result.unwrap().application_verified);
+                super::r2o_discovery_verified_flow_take(&target);
+            } else {
+                assert!(result.is_err());
+            }
+            drop(commands);
+            assert_eq!(controller.join().unwrap(), expected);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn discovery_route_confirmation_is_per_candidate_and_bounded() {
+        let scope = super::discovery_outcomes::ProbeScope {
+            path: [1; 16],
+            port: 443,
+            family: 4,
+            shape: SHAPE_LEGACY,
+            profile: 0,
+        };
+        let moved = super::discovery_outcomes::ProbeScope {
+            path: [2; 16],
+            ..scope
+        };
+        let checks = super::R2oDiscoveryRouteChecks::default();
+        assert_eq!(checks.sample(|| Some(scope)), Some(scope)); // Ranking.
+        let first = checks.sample(|| Some(scope));
+        assert_eq!(checks.confirm(first, || Some(scope)), Some(scope));
+        let second = checks.sample(|| Some(scope));
+        assert_eq!(checks.confirm(second, || Some(moved)), None);
+        let third = checks.sample(|| Some(moved));
+        assert_eq!(checks.confirm(third, || Some(moved)), Some(moved));
+        let unknown = checks.sample(|| None);
+        assert_eq!(checks.confirm(unknown, || panic!("unknown path")), None);
+        assert_eq!(checks.sample(|| Some(scope)), Some(scope));
+        assert_eq!(
+            checks.confirm(Some(scope), || panic!("lookup budget reached")),
+            None
+        );
     }
 
     #[cfg(unix)]
@@ -63810,6 +64173,25 @@ group_block_proven: false,
             std::fs::write(path, &output).unwrap();
         }
         assert_eq!(output, "0 0\n1 1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_tls_probe_budget_carries_across_all_phases() {
+        let cap = super::R2O_DISCOVERY_PROBE_CAP;
+        let mut counts = super::r2o_full_search_probe_counts(3, cap - 14, 7);
+        let remaining = |counts: &r2o_controller::r2o_fallback::ProbeCounts| {
+            super::r2o_discovery_remaining_probes(counts, cap, true)
+        };
+
+        assert_eq!(remaining(&counts), 4);
+        counts.candidates += 1; // Property question.
+        assert_eq!(remaining(&counts), 3);
+        counts.candidates += 2; // Derived candidate and ClientHello proof.
+        assert_eq!(remaining(&counts), 1);
+        counts.candidates += 1; // Fallback without a captured ClientHello.
+        assert_eq!(remaining(&counts), 0);
+        assert_eq!(counts.remaining(cap), cap - 4); // RX/volume budget.
     }
 
     #[cfg(unix)]

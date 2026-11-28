@@ -247,10 +247,7 @@ impl Outcomes {
             }
             // A rejection only withdraws our extra preference for the same
             // target and local route. It never changes eligibility or catalog proof.
-            if entry.rejected_target == target
-                && entry.rejected_at >= entry.success_at
-                && fresh(entry.rejected_at, now)
-            {
+            if entry.rejected_target == target && fresh(entry.rejected_at, now) {
                 continue;
             }
             let age = ((now - entry.success_at) / (24 * 60 * 60)) as u8;
@@ -451,6 +448,34 @@ mod tests {
                 .for_plan("ready", "ready program")
                 > 0
         );
+    }
+
+    #[test]
+    fn another_targets_success_keeps_a_fresh_rejection_in_effect() {
+        let mut outcomes = Outcomes::default();
+        let app_a = observation(ResultKind::Application);
+        let app_b = Observation { target: 2, ..app_a };
+        let rank = |outcomes: &Outcomes, target, now| {
+            outcomes
+                .ranking(SCOPE, target, now)
+                .for_plan("ready", "ready program")
+        };
+
+        Completion::new(app_a).commit(&mut outcomes, 50);
+        Completion::new(Observation {
+            result: ResultKind::Rejected,
+            ..app_b
+        })
+        .commit(&mut outcomes, 51);
+        Completion::new(app_a).commit(&mut outcomes, 53);
+
+        assert_eq!(rank(&outcomes, 2, 53), 0);
+        assert!(rank(&outcomes, 1, 53) > 0);
+        assert!(rank(&outcomes, 3, 53) > 0);
+        assert!(rank(&outcomes, 2, 51 + MAX_AGE + 1) > 0);
+
+        Completion::new(app_b).commit(&mut outcomes, 54);
+        assert!(rank(&outcomes, 2, 54) > 0);
     }
 
     #[test]
