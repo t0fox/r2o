@@ -3997,6 +3997,7 @@ struct CompiledCatalog {
 struct CatalogPreparation {
     elapsed: std::time::Duration,
     plan_compilations: usize,
+    catalog_changed: bool,
 }
 
 #[cfg(unix)]
@@ -4295,6 +4296,7 @@ fn r2o_catalog_name_binding_index(catalog: &Catalog) -> HashMap<String, Vec<(usi
 fn r2o_newer_name_binding(
     catalog: &Catalog,
     by_name: &HashMap<String, Vec<(usize, usize)>>,
+    unfit: &HashMap<(usize, usize), std::time::Instant>,
     binding: &Binding,
 ) -> bool {
     match binding.kind.as_str() {
@@ -4324,6 +4326,7 @@ fn r2o_newer_name_binding(
                     && other.shape == binding.shape
                     && (r2o_catalog_binding_transport(other) != 6
                         || other.tcp_profile == binding.tcp_profile)
+                    && !unfit.contains_key(&(box_index, binding_index))
             })
         })
 }
@@ -4353,12 +4356,11 @@ fn catalog_commands_for_runtime(
     send_cap: usize,
 ) -> Result<(Catalog, CompiledCatalog), Box<dyn Error>> {
     let (_lock, mut catalog) = locked_catalog(path, fallback)?;
-    let before = catalog.clone();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
     let compiled = catalog_commands_with_send_cap(&mut catalog, send_cap, now)?;
-    if catalog != before {
+    if compiled.preparation.catalog_changed {
         catalog.save_atomic(path, now.max(1))?;
     }
     Ok((catalog, compiled))
@@ -4376,15 +4378,14 @@ fn catalog_commands_with_send_cap(
     let mut install_order = Vec::new();
     let mut group_commands = Vec::new();
     let mut skipped = 0_usize;
-    let mut selection_catalog = catalog.clone();
-    let name_bindings = r2o_catalog_name_binding_index(&selection_catalog);
-    for (box_index, box_record) in catalog.boxes.iter_mut().enumerate() {
+    let name_bindings = r2o_catalog_name_binding_index(catalog);
+    let mut unfit = HashMap::new();
+    for (box_index, box_record) in catalog.boxes.iter().enumerate() {
         // C `box_injects_rst(b)`: примета коробки, не привязки.
         let box_injects_rst = r2o_box_injects_rst(box_record);
         let plans_by_id = r2o_index_enabled_plans(box_record.plans.iter());
         let mut prepared_plans = HashMap::new();
-        for (binding_index, binding) in box_record.bindings.iter_mut().enumerate() {
-            let selection_binding = &selection_catalog.boxes[box_index].bindings[binding_index];
+        for (binding_index, binding) in box_record.bindings.iter().enumerate() {
             if !binding.enabled
                 || binding
                     .recheck_since
@@ -4392,7 +4393,7 @@ fn catalog_commands_with_send_cap(
             {
                 continue;
             }
-            if r2o_newer_name_binding(&selection_catalog, &name_bindings, selection_binding) {
+            if r2o_newer_name_binding(catalog, &name_bindings, &unfit, binding) {
                 continue;
             }
             if r2o_catalog_binding_is_weak(binding)
@@ -4446,12 +4447,7 @@ fn catalog_commands_with_send_cap(
                     continue;
                 };
                 if plan.exceeds_send_cap(send_cap) {
-                    r2o_catalog_mark_unfit(
-                        binding,
-                        &mut selection_catalog.boxes[box_index].bindings[binding_index],
-                        &mut box_record.updated,
-                        now,
-                    );
+                    unfit.insert((box_index, binding_index), std::time::Instant::now());
                     skipped += 1;
                     continue;
                 }
@@ -4527,12 +4523,7 @@ fn catalog_commands_with_send_cap(
                 continue;
             };
             if plan.exceeds_send_cap(send_cap) {
-                r2o_catalog_mark_unfit(
-                    binding,
-                    &mut selection_catalog.boxes[box_index].bindings[binding_index],
-                    &mut box_record.updated,
-                    now,
-                );
+                unfit.insert((box_index, binding_index), std::time::Instant::now());
                 if let Ok(delete) = encode_delete_name(
                     &binding.target,
                     r2o_catalog_binding_transport(binding),
@@ -4562,6 +4553,17 @@ fn catalog_commands_with_send_cap(
             commands.push((binding.target.clone(), command));
             install_order.push(CatalogInstallOp::Command(commands.len() - 1));
         }
+    }
+    // Keep the same selection order while borrowing the catalog immutably.
+    // A previously visited unfit binding stops suppressing older bindings.
+    let catalog_changed = !unfit.is_empty();
+    let marked_at = now.max(1);
+    for ((box_index, binding_index), marked_mono) in unfit {
+        let record = &mut catalog.boxes[box_index];
+        let binding = &mut record.bindings[binding_index];
+        binding.recheck_since = Some(marked_at);
+        binding.recheck_mono = Some(marked_mono);
+        record.updated = marked_at;
     }
     if let Some(domain_state) = &catalog.domain_state {
         let plans_by_id = r2o_index_enabled_plans(
@@ -4739,6 +4741,7 @@ fn catalog_commands_with_send_cap(
         preparation: CatalogPreparation {
             elapsed: preparation_started.elapsed(),
             plan_compilations,
+            catalog_changed,
         },
     })
 }
@@ -4856,20 +4859,6 @@ fn r2o_discovery_delete_commands(
         ));
     }
     Ok(commands)
-}
-
-#[cfg(unix)]
-fn r2o_catalog_mark_unfit(
-    binding: &mut Binding,
-    selection_binding: &mut Binding,
-    box_updated: &mut i64,
-    now: i64,
-) {
-    let marked_at = now.max(1);
-    binding.recheck_since = Some(marked_at);
-    binding.recheck_mono = Some(std::time::Instant::now());
-    selection_binding.recheck_since = Some(marked_at);
-    *box_updated = marked_at;
 }
 
 #[cfg(unix)]
@@ -26505,9 +26494,8 @@ impl ControlClient {
                     let compiled = if let Some((prepared, _)) = prepared {
                         Some(prepared)
                     } else if let Some((_, catalog, path, _)) = discovery.as_mut() {
-                        let before = catalog.clone();
                         let compiled = catalog_commands_with_send_cap(catalog, send_cap, wall_now)?;
-                        if *catalog != before {
+                        if compiled.preparation.catalog_changed {
                             persist_catalog_update(
                                 catalog,
                                 path,
@@ -26517,9 +26505,8 @@ impl ControlClient {
                         }
                         Some(compiled)
                     } else if let Some((catalog, path)) = live_catalog.as_mut() {
-                        let before = catalog.clone();
                         let compiled = catalog_commands_with_send_cap(catalog, send_cap, wall_now)?;
-                        if *catalog != before {
+                        if compiled.preparation.catalog_changed {
                             catalog.save_atomic(path, wall_now.max(1))?;
                         }
                         Some(compiled)
@@ -70034,6 +70021,7 @@ mod tcp_profile_tests {
         assert!(!r2o_newer_name_binding(
             &catalog,
             &super::r2o_catalog_name_binding_index(&catalog),
+            &Default::default(),
             &catalog.boxes[0].bindings[0]
         ));
         let mut same_profile = catalog.clone();
@@ -70041,6 +70029,7 @@ mod tcp_profile_tests {
         assert!(r2o_newer_name_binding(
             &same_profile,
             &super::r2o_catalog_name_binding_index(&same_profile),
+            &Default::default(),
             &same_profile.boxes[0].bindings[0]
         ));
     }
