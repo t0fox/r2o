@@ -43,6 +43,8 @@ jobs:
           shellcheck -S warning -s sh router/S99r2o router/S99r2o.shim router/openwrt-init
       - name: Проверить передачу артефактов из CI в Release
         run: python3 -B scripts/test-ci-release-artifacts.py
+      - name: Проверить формирование заметок выпуска
+        run: python3 -B scripts/test-release-changelog.py
       - name: Проверить закреплённые суммы установщика
         run: python3 -B scripts/bootstrap-pins.py
       - name: Проверить форматирование Rust

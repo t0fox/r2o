@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       notes:
-        description: Заметки выпуска, которые увидит пользователь панели
+        description: Ручные заметки выпуска. Если поле пустое, описание сформируется автоматически.
         type: string
         required: false
       validate_only:
-        description: Проверить артефакты и упаковку без публикации
+        description: Проверить без публикации. На других ветках проверяются только заметки.
         type: boolean
         default: false
 
@@ -27,7 +27,6 @@ jobs:
       release_id: ${{ steps.plan.outputs.release_id }}
       version: ${{ steps.plan.outputs.version }}
       title: ${{ steps.plan.outputs.title }}
-      notes: ${{ steps.plan.outputs.notes }}
       ci_run: ${{ steps.ci.outputs.run }}
       ci_attempt: ${{ steps.ci.outputs.attempt }}
     steps:
@@ -48,7 +47,6 @@ jobs:
           printf 'run=%s\nattempt=%s\n' "$run" "$attempt" >> "$GITHUB_OUTPUT"
       - id: plan
         env:
-          NOTES: ${{ inputs.notes }}
           CI_RUN: ${{ steps.ci.outputs.run }}
         run: |
           set -euo pipefail
@@ -61,12 +59,59 @@ jobs:
             echo "sha=$sha"
             echo "version=$id"
           } >> "$GITHUB_OUTPUT"
-          delimiter="notes-$(openssl rand -hex 12)"
-          {
-            echo "notes<<$delimiter"
-            printf '%s\n' "$NOTES"
-            echo "$delimiter"
-          } >> "$GITHUB_OUTPUT"
+
+  changelog:
+    name: Заметки выпуска
+    if: github.ref == 'refs/heads/main' || inputs.validate_only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    outputs:
+      notes: ${{ steps.notes.outputs.notes }}
+      base_tag: ${{ steps.base.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Найти предыдущий опубликованный выпуск
+        id: base
+        if: inputs.notes == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          git check-ref-format "refs/tags/$tag"
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          key=$(python3 -B scripts/release-changelog.py cache-key)
+          printf 'cache_key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+      - name: Восстановить кеш модели
+        id: model-cache
+        if: inputs.notes == ''
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
+        with:
+          path: ${{ runner.temp }}/r2o-changelog/Qwen3-4B-Q4_K_M.gguf
+          key: ${{ steps.base.outputs.cache_key }}
+      - name: Подготовить описание выпуска
+        id: notes
+        env:
+          MANUAL_NOTES: ${{ inputs.notes }}
+          BASE_TAG: ${{ steps.base.outputs.tag }}
+          MODEL_PATH: ${{ runner.temp }}/r2o-changelog/Qwen3-4B-Q4_K_M.gguf
+        run: python3 -B scripts/release-changelog.py generate "$BASE_TAG" "$GITHUB_SHA" "$MODEL_PATH"
+      - name: Сохранить проверенную модель в кеш
+        if: steps.notes.outputs.model_verified == 'true' && steps.model-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/r2o-changelog/Qwen3-4B-Q4_K_M.gguf
+          key: ${{ steps.base.outputs.cache_key }}
 
   package:
     name: Упаковка общего выпуска
@@ -84,7 +129,7 @@ jobs:
       RELEASE_SHA: ${{ needs.plan.outputs.sha }}
       RELEASE_TITLE: ${{ needs.plan.outputs.title }}
       R2O_R2_PUBLIC_URL: ${{ vars.R2O_R2_PUBLIC_URL }}
-      NOTES: ${{ needs.plan.outputs.notes }}
+      NOTES: ${{ inputs.notes }}
       CI_RUN: ${{ needs.plan.outputs.ci_run }}
       CI_ATTEMPT: ${{ needs.plan.outputs.ci_attempt }}
     steps:
@@ -139,7 +184,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [plan, package]
+    needs: [plan, package, changelog]
     if: ${{ !inputs.validate_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -157,7 +202,8 @@ jobs:
       TITLE: ${{ needs.plan.outputs.title }}
       SHA: ${{ needs.plan.outputs.sha }}
       R2O_R2_PUBLIC_URL: ${{ vars.R2O_R2_PUBLIC_URL }}
-      NOTES: ${{ needs.plan.outputs.notes }}
+      NOTES: ${{ needs.changelog.outputs.notes }}
+      CHANGELOG_BASE_TAG: ${{ needs.changelog.outputs.base_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -187,11 +233,16 @@ jobs:
             exit 1
           fi
           out="$RUNNER_TEMP/release"
+          old_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          if [ -n "$CHANGELOG_BASE_TAG" ] && [ "$CHANGELOG_BASE_TAG" != "$old_tag" ]; then
+            echo "::error::После генерации заметок вышел новый релиз. Запустите выпуск заново."
+            exit 1
+          fi
+          python3 -B scripts/release-changelog.py apply "$out/latest.json"
           openssl pkeyutl -sign -inkey "$key" -rawin \
             -in "$out/latest.json" -out "$out/latest.json.sig"
           openssl pkeyutl -verify -pubin -inkey crates/r2o-manager/release-public.pem \
             -rawin -in "$out/latest.json" -sigfile "$out/latest.json.sig"
-          old_tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
           old_catalog="$RUNNER_TEMP/previous-catalog.json"
           published="$RUNNER_TEMP/published-update-tags.txt"
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \

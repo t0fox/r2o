@@ -1,0 +1,20 @@
+[changelog]
+body = """
+{% for group, _ in commits | group_by(attribute="group") -%}
+- {{ group }}.
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = false
+filter_unconventional = false
+# Диапазон задаёт workflow. Теги внутри него не делят описание на выпуски.
+tag_pattern = "^$"
+commit_parsers = [
+  { message = '^[a-z]+\((telegram|tg)[^)]*\)', group = "Обновили прокси Telegram" },
+  { message = '^[a-z]+\((panel|ui)[^)]*\)', group = "Доработали веб-панель" },
+  { message = '^[a-z]+\((discovery|keenetic|openwrt|firewall|route|datapath|controller|dns|nfqueue|meta)[^)]*\)', group = "Доработали сетевые функции и совместимость с роутерами" },
+  { message = '^[a-z]+\((ci|release|installer|install|update|changelog|build)[^)]*\)', group = "Обновили сборку, установку или выпуск версий" },
+  { message = ".*", group = "Внесли прочие изменения в проект" },
+]
