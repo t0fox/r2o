@@ -580,7 +580,16 @@ fn atomic_save_replaces_the_file_and_leaves_no_temporary_file() {
     );
     let round_trip = Catalog::parse(written.as_bytes()).unwrap();
     assert!(round_trip.boxes.is_empty());
-    assert!(!dir.join("catalog.json.new").exists());
+    let invalid = Catalog {
+        boxes: vec![BoxRecord {
+            id: "x".repeat(40),
+            ..BoxRecord::default()
+        }],
+        ..Catalog::default()
+    };
+    assert!(invalid.save_atomic(&path, 1_788_765_237).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), written);
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
     fs::remove_dir_all(dir).unwrap();
 }
 

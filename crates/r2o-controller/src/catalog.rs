@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use time::format_description::well_known::Rfc3339;
@@ -19,6 +19,26 @@ const TTL_SLACK: u8 = 2;
 pub(crate) const VOLUME_SLACK: i64 = 4;
 pub const FINGERPRINT_METHOD: i32 = 2;
 static NEXT_DONOR_IMPORT: AtomicUsize = AtomicUsize::new(0);
+
+struct CatalogFileWriter<W> {
+    inner: W,
+    remaining: u64,
+}
+
+impl<W: Write> Write for CatalogFileWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(io::Error::other("catalog file exceeds 64 MiB"));
+        }
+        let written = self.inner.write(bytes)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Catalog {
@@ -509,6 +529,18 @@ impl Catalog {
     }
 
     fn serialize_json_at(&self, updated: i64, pretty: bool) -> Result<String, CatalogError> {
+        let mut bytes = Vec::with_capacity(128);
+        self.write_json_at(&mut bytes, updated, pretty)?;
+        String::from_utf8(bytes)
+            .map_err(|error| CatalogError::new(format!("serialize catalog: {error}")))
+    }
+
+    fn write_json_at(
+        &self,
+        mut writer: impl Write,
+        updated: i64,
+        pretty: bool,
+    ) -> Result<(), CatalogError> {
         self.validate()?;
         format_timestamp(updated)?;
         let mut rebuilt_domain_state = self.domain_state.clone();
@@ -543,14 +575,15 @@ impl Catalog {
             domain_groups_disabled_at,
             network_whitelist,
         };
-        let mut text = if pretty {
-            serde_json::to_string_pretty(&output)
+        if pretty {
+            serde_json::to_writer_pretty(&mut writer, &output)
         } else {
-            serde_json::to_string(&output)
+            serde_json::to_writer(&mut writer, &output)
         }
         .map_err(|error| CatalogError::new(format!("serialize catalog: {error}")))?;
-        text.push('\n');
-        Ok(text)
+        writer
+            .write_all(b"\n")
+            .map_err(|error| CatalogError::new(format!("write catalog: {error}")))
     }
 
     /// Сохранить полный снимок и синхронизировать файл и каталог до и после переименования.
@@ -575,23 +608,26 @@ impl Catalog {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
 
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+            .map_err(|error| CatalogError::new(format!("{}: {error}", temporary_path.display())))?;
         let result = (|| {
-            let content = self.serialize_json_at(updated, false)?;
-            if content.len() as u64 > MAX_CATALOG_BYTES {
-                return Err(CatalogError::new("catalog file exceeds 64 MiB"));
-            }
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary_path)
-                .map_err(|error| {
-                    CatalogError::new(format!("{}: {error}", temporary_path.display()))
-                })?;
-            file.write_all(content.as_bytes())
+            let mut writer = CatalogFileWriter {
+                inner: BufWriter::with_capacity(16 * 1024, file),
+                remaining: MAX_CATALOG_BYTES,
+            };
+            self.write_json_at(&mut writer, updated, false)?;
+            writer
+                .flush()
                 .map_err(|error| CatalogError::new(format!("write catalog: {error}")))?;
-            file.sync_all()
+            writer
+                .inner
+                .get_ref()
+                .sync_all()
                 .map_err(|error| CatalogError::new(format!("sync catalog: {error}")))?;
-            drop(file);
+            drop(writer);
             fs::rename(&temporary_path, path)
                 .map_err(|error| CatalogError::new(format!("replace catalog: {error}")))?;
             File::open(parent)
