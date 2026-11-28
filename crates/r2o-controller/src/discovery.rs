@@ -1,5 +1,7 @@
 //! Разбор событий и постоянное хранение измеренных результатов TCP-поиска.
 
+pub mod outcomes;
+
 use r2k_core::control::{
     HelloEvent, HttpPortalEvent, HttpResponseEvent, SHAPE_ECH_NO_TS, SHAPE_ECH_TCP, SHAPE_ECH_TS,
     SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, r2k_link_shape_tcp_base,
@@ -169,9 +171,12 @@ struct RankedOwnPlan {
     plan_successes: i32,
     lead: bool,
     tier: u8,
+    experience: u32,
     compatible_successes: i32,
     confirmed: i64,
 }
+
+const _: () = assert!(std::mem::size_of::<RankedOwnPlan>() <= 32);
 
 #[derive(Default)]
 struct SavedPlanPrograms<'a> {
@@ -248,7 +253,7 @@ pub fn own_first_plans(
     if limit == 0 {
         return Vec::new();
     }
-    let ranked = rank_own_plans(catalog, target, ech_replay, bound_plan_id);
+    let ranked = rank_own_plans(catalog, target, ech_replay, bound_plan_id, None);
     let mut programs = previously_offered_programs(
         ranked
             .iter()
@@ -274,6 +279,7 @@ fn rank_own_plans(
     target: &DiscoveryTarget,
     ech_replay: bool,
     bound_plan_id: Option<&str>,
+    experience: Option<&outcomes::Ranking>,
 ) -> Vec<RankedOwnPlan> {
     if is_ech_shape(target.shape) && !ech_replay
         || !matches!(
@@ -375,6 +381,7 @@ fn rank_own_plans(
                 plan_successes: plan.successes,
                 lead: bound_plan_id == Some(plan.id.as_str()),
                 tier,
+                experience: experience.map_or(0, |ranks| ranks.for_plan(&plan.id, &plan.text)),
                 compatible_successes,
                 confirmed,
             };
@@ -424,6 +431,7 @@ impl OwnPlanIndex {
 pub struct OwnFirstBatches<'a> {
     ready: VecDeque<OwnFirstPlan<'a>>,
     pending: Option<PendingOwnPlans<'a>>,
+    pub first_reordered: bool,
 }
 
 struct PendingOwnPlans<'a> {
@@ -449,11 +457,31 @@ impl<'a> OwnFirstBatches<'a> {
         tried: &[u64],
         seen: &[u64],
     ) -> Self {
+        Self::with_experience(
+            catalog,
+            target,
+            ech_replay,
+            bound_plan_id,
+            tried,
+            seen,
+            None,
+        )
+    }
+
+    pub fn with_experience(
+        catalog: &'a Catalog,
+        target: &DiscoveryTarget,
+        ech_replay: bool,
+        bound_plan_id: Option<&str>,
+        tried: &[u64],
+        seen: &[u64],
+        experience: Option<&outcomes::Ranking>,
+    ) -> Self {
         let limit = OWN_PLAN_SEEN_CAP.saturating_sub(seen.len());
         if limit == 0 {
             return Self::default();
         }
-        let mut ranked = rank_own_plans(catalog, target, ech_replay, bound_plan_id);
+        let mut ranked = rank_own_plans(catalog, target, ech_replay, bound_plan_id, experience);
         let mut programs = HashSet::new();
         if !tried.is_empty() || !seen.is_empty() {
             ranked.retain(|entry| {
@@ -467,6 +495,13 @@ impl<'a> OwnFirstBatches<'a> {
                 }
             });
         }
+        let first_reordered = experience.is_some_and(|ranks| !ranks.is_empty())
+            && ranked
+                .iter()
+                .min_by_key(|entry| entry.base_rank())
+                .is_some_and(|first| {
+                    ranked[0].index.get(catalog).1.text != first.index.get(catalog).1.text
+                });
         let mut ranked = ranked.into_iter();
         let ready: VecDeque<_> = ranked
             .by_ref()
@@ -485,6 +520,7 @@ impl<'a> OwnFirstBatches<'a> {
         let mut batches = Self {
             ready,
             pending: None,
+            first_reordered,
         };
         if limit > 0 && ranked.len() > 0 {
             let mut remaining = Vec::with_capacity(ranked.len());
@@ -797,7 +833,7 @@ pub(crate) fn r2o_box_id_for(
 }
 
 impl RankedOwnPlan {
-    fn rank(&self) -> impl Ord + use<> {
+    fn base_rank(&self) -> impl Ord + use<> {
         use std::cmp::Reverse;
         (
             Reverse(self.lead),
@@ -805,6 +841,16 @@ impl RankedOwnPlan {
             Reverse(self.compatible_successes),
             Reverse(self.plan_successes),
             Reverse(self.confirmed),
+        )
+    }
+
+    fn rank(&self) -> impl Ord + use<> {
+        use std::cmp::Reverse;
+        (
+            Reverse(self.lead),
+            self.tier,
+            Reverse(self.experience),
+            self.base_rank(),
         )
     }
 }
@@ -5514,6 +5560,7 @@ mod tests {
                 plan_successes: plan.successes,
                 lead,
                 tier,
+                experience: 0,
                 compatible_successes: 0,
                 confirmed,
             }

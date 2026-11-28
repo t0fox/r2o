@@ -803,6 +803,7 @@ pub fn run(
     let mut progress = |_: &str, _: usize, _: usize, _: usize| {};
     let classify_options = ClassifyOptions {
         repeats: options.repeats,
+        probe_limit: usize::MAX,
         timeout: options.timeout,
         write_gap: options.write_gap,
         long_gap: options.long_gap,

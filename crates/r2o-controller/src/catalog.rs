@@ -588,59 +588,83 @@ impl Catalog {
 
     /// Сохранить полный снимок и синхронизировать файл и каталог до и после переименования.
     pub fn save_atomic(&self, path: impl AsRef<Path>, updated: i64) -> Result<(), CatalogError> {
-        let path = path.as_ref();
-        let path_bytes = path.to_string_lossy().len();
-        if path_bytes > MAX_CATALOG_PATH_BYTES {
-            return Err(CatalogError::new("catalog path exceeds 255 bytes"));
-        }
-        let file_name = path
-            .file_name()
-            .ok_or_else(|| CatalogError::new("catalog path has no file name"))?;
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| CatalogError::new(format!("system clock: {error}")))?
-            .as_nanos();
-        let mut temporary_name = file_name.to_os_string();
-        temporary_name.push(format!(".new.{}.{}", std::process::id(), nonce));
-        let temporary_path: PathBuf = path.with_file_name(temporary_name);
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .map_err(|error| CatalogError::new(format!("{}: {error}", temporary_path.display())))?;
-        let result = (|| {
-            let mut writer = CatalogFileWriter {
-                inner: BufWriter::with_capacity(16 * 1024, file),
-                remaining: MAX_CATALOG_BYTES,
-            };
-            self.write_json_at(&mut writer, updated, false)?;
-            writer
-                .flush()
-                .map_err(|error| CatalogError::new(format!("write catalog: {error}")))?;
-            writer
-                .inner
-                .get_ref()
-                .sync_all()
-                .map_err(|error| CatalogError::new(format!("sync catalog: {error}")))?;
-            drop(writer);
-            fs::rename(&temporary_path, path)
-                .map_err(|error| CatalogError::new(format!("replace catalog: {error}")))?;
-            File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|error| CatalogError::new(format!("sync catalog directory: {error}")))?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-        }
-        result
+        write_atomic(
+            path.as_ref(),
+            16 * 1024,
+            MAX_CATALOG_BYTES,
+            false,
+            |writer| self.write_json_at(writer, updated, false),
+        )
     }
+}
 
+pub(crate) fn write_atomic(
+    path: &Path,
+    buffer: usize,
+    limit: u64,
+    private: bool,
+    write: impl FnOnce(&mut dyn Write) -> Result<(), CatalogError>,
+) -> Result<(), CatalogError> {
+    let path_bytes = path.to_string_lossy().len();
+    if path_bytes > MAX_CATALOG_PATH_BYTES {
+        return Err(CatalogError::new("catalog path exceeds 255 bytes"));
+    }
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| CatalogError::new("catalog path has no file name"))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| CatalogError::new(format!("system clock: {error}")))?
+        .as_nanos();
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(format!(".new.{}.{}", std::process::id(), nonce));
+    let temporary_path: PathBuf = path.with_file_name(temporary_name);
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    let file = options
+        .open(&temporary_path)
+        .map_err(|error| CatalogError::new(format!("{}: {error}", temporary_path.display())))?;
+    let result = (|| {
+        let mut writer = CatalogFileWriter {
+            inner: BufWriter::with_capacity(buffer, file),
+            remaining: limit,
+        };
+        write(&mut writer)?;
+        writer
+            .flush()
+            .map_err(|error| CatalogError::new(format!("write catalog: {error}")))?;
+        writer
+            .inner
+            .get_ref()
+            .sync_all()
+            .map_err(|error| CatalogError::new(format!("sync catalog: {error}")))?;
+        drop(writer);
+        fs::rename(&temporary_path, path)
+            .map_err(|error| CatalogError::new(format!("replace catalog: {error}")))?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| CatalogError::new(format!("sync catalog directory: {error}")))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+impl Catalog {
     pub fn match_fingerprint(&self, observed: &Fingerprint) -> Option<usize> {
         self.boxes
             .iter()

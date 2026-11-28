@@ -139,7 +139,7 @@ pub fn sweep_poisons(
         };
         let mut last_error = None;
         for _ in 0..options.repeats {
-            if is_cancelled(options) {
+            if is_cancelled(options) || result.probes >= options.probe_limit {
                 result.stopped = true;
                 add_observation(result, observation);
                 return Err(ProbeError::Local("context canceled".into()));
@@ -221,7 +221,7 @@ pub fn sweep_poisons(
         .into_iter()
         .filter(|_| options.only_poison.is_none())
     {
-        if is_cancelled(options) {
+        if is_cancelled(options) || result.probes >= options.probe_limit {
             result.stopped = true;
             break;
         }
@@ -275,7 +275,7 @@ pub fn sweep_poisons(
         };
         let mut local_error = false;
         for _ in 0..options.repeats {
-            if is_cancelled(options) {
+            if is_cancelled(options) || result.probes >= options.probe_limit {
                 result.stopped = true;
                 break;
             }
@@ -378,7 +378,7 @@ pub fn sweep_poisons(
         .into_iter()
         .filter(|poison| options.only_poison.is_none() && poison_selected(options, &poison.name))
     {
-        if is_cancelled(options) {
+        if is_cancelled(options) || result.probes >= options.probe_limit {
             result.stopped = true;
             break;
         }
@@ -398,7 +398,7 @@ pub fn sweep_poisons(
         };
         let mut local_error = false;
         for _ in 0..options.repeats {
-            if is_cancelled(options) {
+            if is_cancelled(options) || result.probes >= options.probe_limit {
                 result.stopped = true;
                 break;
             }
@@ -490,7 +490,7 @@ pub fn sweep_poisons(
         .iter()
         .filter(|poison| poison_selected(options, &poison.name))
     {
-        if is_cancelled(options) {
+        if is_cancelled(options) || result.probes >= options.probe_limit {
             result.stopped = true;
             break;
         }
@@ -516,7 +516,7 @@ pub fn sweep_poisons(
         };
         let mut local_error = false;
         for _ in 0..options.repeats {
-            if is_cancelled(options) {
+            if is_cancelled(options) || result.probes >= options.probe_limit {
                 result.stopped = true;
                 break;
             }
@@ -769,7 +769,7 @@ fn raw_recheck(
         error: None,
     };
     for _ in 0..options.repeats {
-        if is_cancelled(options) {
+        if is_cancelled(options) || result.probes >= options.probe_limit {
             result.stopped = true;
             observation.error = Some("context canceled".into());
             break;

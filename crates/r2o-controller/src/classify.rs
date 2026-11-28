@@ -1257,6 +1257,7 @@ pub struct UnplannablePoison {
 #[derive(Clone, Debug)]
 pub struct ClassifyOptions {
     pub repeats: usize,
+    pub probe_limit: usize,
     pub timeout: Duration,
     pub write_gap: Duration,
     pub long_gap: Duration,
@@ -1398,6 +1399,7 @@ impl Default for ClassifyOptions {
     fn default() -> Self {
         Self {
             repeats: 3,
+            probe_limit: usize::MAX,
             timeout: Duration::from_secs(6),
             write_gap: Duration::from_millis(60),
             long_gap: Duration::from_millis(700),
@@ -1889,7 +1891,7 @@ fn measure<B: ProbeBackend>(
         r2o_progress_seen_args(false, spec.name, result.probes, tally.pass, tally.fail);
     progress(spec.name, note_probes, note_pass, note_fail);
     for _ in 0..options.repeats {
-        if stopped(options) {
+        if stopped(options) || result.probes >= options.probe_limit {
             break;
         }
         result.probes += 1;
@@ -1915,7 +1917,7 @@ fn measure<B: ProbeBackend>(
             result.trace[raw_index].error = Some(message.clone());
             progress("transport:raw-connect", result.probes, 0, 1);
 
-            if stopped(options) {
+            if stopped(options) || result.probes >= options.probe_limit {
                 terminal_transport_failure = true;
             } else {
                 result.probes += 1;
@@ -1943,7 +1945,7 @@ fn measure<B: ProbeBackend>(
                         outcome = Err(error);
                         terminal_transport_failure = true;
                     }
-                    Ok(()) if stopped(options) => {
+                    Ok(()) if stopped(options) || result.probes >= options.probe_limit => {
                         terminal_transport_failure = true;
                     }
                     Ok(()) => {
@@ -2417,7 +2419,7 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             let mut observed = true;
             progress("neutral-ack", result.probes, 0, 0);
             for _ in 0..options.repeats {
-                if stopped(&options) {
+                if stopped(&options) || result.probes >= options.probe_limit {
                     observed = false;
                     break;
                 }

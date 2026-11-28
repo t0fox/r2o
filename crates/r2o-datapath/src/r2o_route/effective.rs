@@ -66,6 +66,25 @@ enum Lookup {
 }
 
 impl R2oRouteMonitor {
+    /// Snapshot of the marked local verifier route. Its source, gateway and
+    /// interface name distinguish uplinks without persisting a bare ifindex.
+    pub fn r2o_local_probe_route(
+        &mut self,
+        destination: IpAddr,
+        mark: u32,
+    ) -> Option<(String, Option<IpAddr>, IpAddr)> {
+        let Lookup::Route(path, Some(source)) =
+            self.r2o_effective_lookup(destination.into(), None, None, mark, 0)
+        else {
+            return None;
+        };
+        Some((
+            r2o_interface_name(path.interface)?,
+            path.gateway.map(Into::into),
+            source.into(),
+        ))
+    }
+
     pub fn r2o_check_effective_route(&mut self, query: R2oRouteCheck) -> R2oEffectiveRoute {
         let result = self.r2o_compare_paths(query);
         result.unwrap_or(R2oEffectiveRoute::Unavailable)

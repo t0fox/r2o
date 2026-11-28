@@ -29,6 +29,7 @@ pub struct Components {
     pub discovery_suspects: Option<u64>,
     pub discovery_confirmations: Option<u64>,
     pub discovery_client_unfit: Option<u64>,
+    pub discovery_probe_outcomes: Option<crate::discovery::outcomes::Diagnostics>,
     pub tcp_order_experiments: Option<u64>,
     pub tcp_order_probes: Option<u64>,
     pub tcp_order_confirmations: Option<u64>,
