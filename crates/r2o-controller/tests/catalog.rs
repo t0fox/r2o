@@ -8,6 +8,67 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn catalog_survives_a_save_by_the_pre_raw_controller() {
+    // Actual 24f2c1ac `--mark-recheck absent.invalid 4 1` output from a
+    // catalog with a RAW entry and ordinary address bindings. Set
+    // R2O_TEST_LEGACY_CONTROLLER to replay the round trip with that binary.
+    let legacy = include_bytes!("fixtures/raw_catalog_24f2c1ac.json");
+    let mut input: Value = serde_json::from_slice(legacy).unwrap();
+    let raw = &mut input["boxes"][0]["bindings"][0];
+    assert_eq!(raw["kind"], "raw");
+    assert!(!raw.as_object().unwrap().contains_key("raw_profile"));
+    raw["raw_profile"] =
+        "002802461fefa87bf93c26d96df00f304272b20d0fbd2692e15fc0f345cd0105964cdd".into();
+    let current = Catalog::parse(&serde_json::to_vec(&input).unwrap()).unwrap();
+    assert_eq!(current.boxes[0].bindings.len(), 1);
+
+    let dir = std::env::temp_dir().join(format!(
+        "r2o-catalog-legacy-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("catalog.json");
+    current.save_atomic(&path, 1_800_000_000).unwrap();
+    assert_eq!(Catalog::load(&path).unwrap(), current);
+
+    if let Some(old) = std::env::var_os("R2O_TEST_LEGACY_CONTROLLER") {
+        let output = Command::new(old)
+            .args(["--mark-recheck", "absent.invalid", "4", "1"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    } else {
+        fs::write(&path, legacy).unwrap();
+    }
+    let old: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(
+        !old["boxes"][0]["bindings"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("raw_profile")
+    );
+    let recovered = Catalog::load(&path).unwrap();
+    assert!(recovered.boxes[0].bindings.is_empty());
+    assert_eq!(recovered.boxes[1..], current.boxes[1..]);
+    recovered.save_atomic(&path, 1_800_000_001).unwrap();
+    assert_eq!(Catalog::load(&path).unwrap(), recovered);
+    fs::remove_dir_all(dir).unwrap();
+
+    // Recovery must not loosen validation of supplied RAW metadata.
+    input["boxes"][0]["bindings"][0]["raw_profile"] = "malformed".into();
+    assert!(Catalog::parse(&serde_json::to_vec(&input).unwrap()).is_err());
+}
+
+#[test]
 fn catalog_json_output_matches_c_fields() {
     let key = GroupKey {
         transport: 6,

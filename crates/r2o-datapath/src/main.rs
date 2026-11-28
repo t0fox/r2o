@@ -2406,6 +2406,7 @@ mod app {
                     None
                 }
             };
+            let raw_received = (opaque_flows.is_some() && received.is_some()).then(Instant::now);
             // NFQA_TIMESTAMP относится к skb, поэтому возраст включает участок до NFQUEUE.
             let received_wall = if received.is_some()
                 && (next_stats.is_some() || nfq_health_enabled || opaque_flows.is_some())
@@ -2570,7 +2571,12 @@ mod app {
                         let ok = trial
                             .zip(opaque_flows.as_mut())
                             .is_some_and(|(trial, opaque)| {
-                                opaque.arm(trial, Instant::now(), r2o_raw_wall_ns())
+                                opaque.arm(
+                                    trial,
+                                    Instant::now(),
+                                    udp_receive_seq,
+                                    r2o_raw_wall_ns(),
+                                )
                             });
                         Ack {
                             command: command.kind,
@@ -3870,11 +3876,16 @@ mod app {
                         && packet_mode == RuntimeMode::Apply
                         && matches!(decision, PacketDecision::Accept)
                         && synthetic.is_none()
-                        && let (Some(opaque), Some(peer), Some(bytes)) =
-                            (opaque_flows.as_mut(), control.as_mut(), original_from_queue)
+                        && let (Some(opaque), Some(peer), Some(bytes), Some(received), Some(id)) = (
+                            opaque_flows.as_mut(),
+                            control.as_mut(),
+                            original_from_queue,
+                            raw_received,
+                            packet.id,
+                        )
                         && peer.is_connected()
                     {
-                        use r2o_datapath::raw_discovery::Observation;
+                        use r2o_datapath::raw_discovery::{Observation, QueueReception};
                         let context = tcp_sessions.raw_context(bytes);
                         if let Some(udp_context) = udp_sessions.raw_context(bytes)
                             && let Some((sample, prior_reply)) = opaque.udp(bytes, udp_context, now)
@@ -3892,7 +3903,13 @@ mod app {
                                 })
                                 .is_some_and(|age| age < Duration::from_secs(2))
                         });
-                        match opaque.tcp(bytes, context, now, captured_ns) {
+                        let reception = QueueReception {
+                            id,
+                            batch: udp_receive_seq,
+                            received,
+                            kernel_ns: captured_ns,
+                        };
+                        match opaque.tcp(bytes, context, reception) {
                             Some(Observation::Measured(sample)) => peer.send_event(
                                 r2k_core::raw_flow::EVENT_RAW_MEASURED,
                                 &sample.encode(),
@@ -3901,16 +3918,15 @@ mod app {
                                 r2k_core::raw_flow::EVENT_RAW_RESULT,
                                 &report.encode(),
                             )?,
-                            Some(Observation::TimingUnavailable(endpoint)) => {
+                            Some(Observation::UnprovenAck(endpoint)) => {
                                 eprintln!(
-                                    "RAW TCP {endpoint}: inconclusive (просроченная или отсутствующая метка NFQUEUE)"
+                                    "RAW TCP {endpoint}: inconclusive (свежесть обратного ACK после отправки не подтверждена)"
                                 );
                             }
                             Some(Observation::Attempt(trial)) => {
                                 opaque_trial = Some(trial);
-                                let cap = raw
-                                    .as_ref()
-                                    .map_or(0, |raw| raw.tls_route_segment_cap(bytes));
+                                let route_maxlen =
+                                    raw.as_ref().map_or(0, |raw| raw.packet_route_maxlen(bytes));
                                 let mut packet = R2oConntrackPacket::new(bytes);
                                 if conntrack_gate.r2o_preflight_packet(
                                     &mut packet,
@@ -3922,7 +3938,7 @@ mod app {
                                         trial.plan,
                                         trial.sample.profile,
                                         bytes,
-                                        cap,
+                                        route_maxlen,
                                     );
                                     decision = guard_packet_decision(
                                         &mut conntrack_gate,

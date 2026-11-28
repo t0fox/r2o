@@ -293,6 +293,12 @@ jobs:
           R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
           R2OC_BIN="$GITHUB_WORKSPACE/target/release/r2o-controller"
           sh scripts/test-discord-discovery-nfq.sh
+      - name: Проверить RAW TCP Discovery через POSTROUTING и NFQUEUE
+        run: >-
+          sudo env
+          R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
+          R2OC_BIN="$GITHUB_WORKSPACE/target/release/r2o-controller"
+          sh scripts/test-raw-discovery-nfq.sh
       - name: Проверить правила nftables без применения
         run: sudo sh scripts/test-router-firewall.sh
 

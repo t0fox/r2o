@@ -11,7 +11,31 @@ pub enum Observation {
     Measured(Sample),
     Attempt(Trial),
     Confirmed(Report),
-    TimingUnavailable(std::net::SocketAddr),
+    UnprovenAck(std::net::SocketAddr),
+}
+
+#[derive(Clone, Copy)]
+pub struct QueueReception {
+    pub id: u32,
+    pub batch: u64,
+    pub received: Instant,
+    pub kernel_ns: Option<u64>,
+}
+
+impl QueueReception {
+    fn after(self, previous: Self) -> bool {
+        // NFQUEUE assigns packet IDs per queue. This comparison is only used
+        // inside one datapath epoch and a short-lived flow generation.
+        self.id.wrapping_sub(previous.id) as i32 > 0
+    }
+
+    fn since(self, previous: Self) -> Duration {
+        if let (Some(end), Some(start)) = (self.kernel_ns, previous.kernel_ns) {
+            Duration::from_nanos(end.saturating_sub(start))
+        } else {
+            self.received.saturating_duration_since(previous.received)
+        }
+    }
 }
 
 pub struct RawUdpContext {
@@ -35,15 +59,15 @@ enum Stage {
     Observing,
     Rebase(u32),
     Measured,
-    Armed(Trial, u64),
-    Sending(Trial),
-    Executed(Trial, u64, u64),
+    Armed(Trial, u64, u64),
+    Sending(Trial, QueueReception),
+    Executed(Trial, u64, QueueReception, u64),
 }
 
 struct Candidate {
     sample: Sample,
     server_seq: u32,
-    first_capture_ns: u64,
+    observed: QueueReception,
     expires: Instant,
     rebased: bool,
     stage: Stage,
@@ -55,7 +79,6 @@ pub struct RawDiscovery {
     active: Vec<Candidate>,
     udp: Vec<UdpObservation>,
     recent: VecDeque<(std::net::SocketAddr, u8, Profile, Instant)>,
-    timing_reported: bool,
 }
 
 impl RawDiscovery {
@@ -66,7 +89,6 @@ impl RawDiscovery {
             active: Vec::with_capacity(MAX_ACTIVE),
             udp: Vec::new(),
             recent: VecDeque::new(),
-            timing_reported: false,
         })
     }
 
@@ -84,7 +106,7 @@ impl RawDiscovery {
         self.active.retain(|entry| entry.sample.key != key);
     }
 
-    pub fn arm(&mut self, trial: Trial, now: Instant, at_ns: u64) -> bool {
+    pub fn arm(&mut self, trial: Trial, now: Instant, batch: u64, at_ns: u64) -> bool {
         self.expire(now);
         let Some(entry) = self
             .active
@@ -98,10 +120,12 @@ impl RawDiscovery {
         }
         match entry.stage {
             Stage::Measured => {
-                entry.stage = Stage::Armed(trial, at_ns);
+                entry.stage = Stage::Armed(trial, batch, at_ns);
                 true
             }
-            Stage::Armed(old, _) | Stage::Sending(old) | Stage::Executed(old, _, _) => old == trial,
+            Stage::Armed(old, ..) | Stage::Sending(old, _) | Stage::Executed(old, ..) => {
+                old == trial
+            }
             Stage::Observing | Stage::Rebase(_) => false,
         }
     }
@@ -114,15 +138,19 @@ impl RawDiscovery {
         at_ns: u64,
     ) -> Option<Report> {
         self.expire(now);
-        let index = self.active.iter().position(|entry| {
-            entry.sample == trial.sample
-                && matches!(entry.stage, Stage::Sending(sent) if sent == trial)
-        })?;
+        let (index, sent_from) =
+            self.active
+                .iter()
+                .enumerate()
+                .find_map(|(index, entry)| match entry.stage {
+                    Stage::Sending(sent, reception) if sent == trial => Some((index, reception)),
+                    _ => None,
+                })?;
         let Some(execution) = execution.filter(|_| at_ns != 0) else {
             self.active.swap_remove(index);
             return None;
         };
-        self.active[index].stage = Stage::Executed(trial, execution, at_ns);
+        self.active[index].stage = Stage::Executed(trial, execution, sent_from, at_ns);
         Some(Report {
             trial,
             execution,
@@ -134,9 +162,9 @@ impl RawDiscovery {
         &mut self,
         packet: &[u8],
         context: Option<RawTcpContext>,
-        now: Instant,
-        captured_ns: Option<u64>,
+        reception: QueueReception,
     ) -> Option<Observation> {
+        let now = reception.received;
         self.expire(now);
         let view = PacketView::parse(packet).filter(|view| view.fragment & 0x3fff == 0)?;
         let tcp = view.tcp_segment(packet)?;
@@ -182,10 +210,17 @@ impl RawDiscovery {
             // ACK can start a new sample within the original range.
             let entry = self.active.swap_remove(index);
             if acked == end
-                && let Stage::Executed(trial, execution, executed_ns) = entry.stage
-                && captured_ns.is_some_and(|captured| captured > executed_ns)
+                && let Stage::Executed(trial, execution, sent_from, executed_ns) = entry.stage
             {
                 let endpoint = trial.sample.server();
+                // Dequeue time cannot distinguish an ACK already waiting in
+                // NFQUEUE from an ACK received after the candidate was sent.
+                if reception.batch == sent_from.batch
+                    || !reception.after(sent_from)
+                    || !reception.kernel_ns.is_some_and(|stamp| stamp > executed_ns)
+                {
+                    return Some(Observation::UnprovenAck(endpoint));
+                }
                 self.recent.retain(|(address, transport, profile, _)| {
                     *address != endpoint || *transport != 6 || *profile != trial.sample.profile
                 });
@@ -211,14 +246,14 @@ impl RawDiscovery {
                 if tcp.sequence == next_seq
                     && tcp.acknowledgment == entry.server_seq
                     && payload.len() <= length as usize
-                    && let Some(captured_ns) = captured_ns
+                    && reception.after(entry.observed)
                     && let Some(profile) = Profile::of(payload, context.tcp_profile)
                 {
                     self.next_measurement = self.next_measurement.wrapping_add(1).max(1);
                     entry.sample.measurement = self.next_measurement;
                     entry.sample.seq = next_seq;
                     entry.sample.profile = profile;
-                    entry.first_capture_ns = captured_ns;
+                    entry.observed = reception;
                     entry.stage = Stage::Observing;
                 }
                 return None;
@@ -232,12 +267,11 @@ impl RawDiscovery {
             }
             return match entry.stage {
                 Stage::Observing
-                    if captured_ns.is_some_and(|captured| {
-                        Duration::from_nanos(captured.saturating_sub(entry.first_capture_ns))
-                            >= REPEAT_MIN
-                    }) =>
+                    if reception.after(entry.observed)
+                        && reception.since(entry.observed) >= REPEAT_MIN =>
                 {
                     let sample = entry.sample;
+                    entry.observed = reception;
                     entry.stage = Stage::Measured;
                     if self.remember(sample, now) {
                         Some(Observation::Measured(sample))
@@ -246,10 +280,12 @@ impl RawDiscovery {
                         None
                     }
                 }
-                Stage::Armed(trial, armed_ns)
-                    if captured_ns.is_some_and(|captured| captured > armed_ns) =>
+                Stage::Armed(trial, armed_batch, armed_ns)
+                    if reception.batch != armed_batch
+                        && reception.after(entry.observed)
+                        && reception.kernel_ns.is_none_or(|stamp| stamp > armed_ns) =>
                 {
-                    entry.stage = Stage::Sending(trial);
+                    entry.stage = Stage::Sending(trial, reception);
                     Some(Observation::Attempt(trial))
                 }
                 _ => None,
@@ -268,14 +304,6 @@ impl RawDiscovery {
         {
             return None;
         }
-        let Some(first_capture_ns) = captured_ns else {
-            return (!std::mem::replace(&mut self.timing_reported, true)).then_some(
-                Observation::TimingUnavailable(std::net::SocketAddr::new(
-                    view.dst.as_ip_addr(),
-                    tcp.destination_port,
-                )),
-            );
-        };
         let profile = Profile::of(payload, context.tcp_profile)?;
         self.next_measurement = self.next_measurement.wrapping_add(1).max(1);
         let sample = Sample {
@@ -290,7 +318,7 @@ impl RawDiscovery {
         self.active.push(Candidate {
             sample,
             server_seq: tcp.acknowledgment,
-            first_capture_ns,
+            observed: reception,
             expires: now + LEASE,
             rebased: false,
             stage: Stage::Observing,

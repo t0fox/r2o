@@ -413,6 +413,13 @@ impl Catalog {
             domain_state,
             network_whitelist: decoded.network_whitelist,
         };
+        // Schema 1 controllers predating RAW keep the binding kind but omit
+        // raw_profile on save. Its exact scope cannot be recovered.
+        for record in &mut catalog.boxes {
+            record
+                .bindings
+                .retain(|binding| binding.kind != "raw" || !binding.raw_profile.is_empty());
+        }
         catalog.validate()?;
         if let Some(state) = &mut catalog.domain_state {
             state.restore()?;

@@ -2,6 +2,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/nfq-test-ready.sh"
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT/target"}
 R2OD_BIN=${R2OD_BIN:-"$TARGET_DIR/release/r2o-datapath"}
@@ -177,16 +178,7 @@ ip netns exec "$NS" "$R2OD_BIN" \
     --mark "$VOICE_MARK" --control "$SOCKET_ROOT/datapath.sock" \
     --r2o-udp-reverse-visible >"$WORK/datapath.log" 2>&1 &
 DATAPATH_PID=$!
-datapath_attempt=0
-while [ ! -S "$SOCKET_ROOT/datapath.sock" ]; do
-    if ! kill -0 "$DATAPATH_PID" 2>/dev/null || [ "$datapath_attempt" -ge 100 ]; then
-        echo "r2o-datapath did not open its control socket" >&2
-        exit 1
-    fi
-    sleep 0.05
-    datapath_attempt=$((datapath_attempt + 1))
-done
-ip netns exec "$NS" cat /proc/net/netfilter/nfnetlink_queue >"$WORK/nfqueue.log"
+r2o_wait_nfq "$NS" "$DATAPATH_PID" "$QUEUE" "$SOCKET_ROOT/datapath.sock" "$WORK/nfqueue.log"
 
 ip netns exec "$NS" "$R2OC_BIN" --serve "$SOCKET_ROOT/datapath.sock" "$WORK/catalog.json" --discover --mark "$CONTROLLER_MARK" >"$WORK/controller.log" 2>&1 &
 CONTROLLER_PID=$!
@@ -310,15 +302,7 @@ ip netns exec "$NS" "$R2OD_BIN" \
     --mark "$VOICE_MARK" --control "$RESTARTED_SOCKET" \
     --r2o-udp-reverse-visible >"$WORK/datapath-restarted.log" 2>&1 &
 DATAPATH_PID=$!
-datapath_attempt=0
-while [ ! -S "$RESTARTED_SOCKET" ]; do
-    if ! kill -0 "$DATAPATH_PID" 2>/dev/null || [ "$datapath_attempt" -ge 100 ]; then
-        echo "restarted r2o-datapath did not open its control socket" >&2
-        exit 1
-    fi
-    sleep 0.05
-    datapath_attempt=$((datapath_attempt + 1))
-done
+r2o_wait_nfq "$NS" "$DATAPATH_PID" "$QUEUE" "$RESTARTED_SOCKET" "$WORK/nfqueue-restarted.log"
 
 "$R2OC_BIN" --apply-catalog "$RESTARTED_SOCKET" "$WORK/catalog.json" >"$WORK/reapply.log" 2>&1 || {
     echo "r2o-controller did not reapply the saved voice binding" >&2

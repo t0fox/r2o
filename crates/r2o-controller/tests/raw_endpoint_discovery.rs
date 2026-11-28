@@ -5,7 +5,7 @@ use r2o_controller::catalog::Catalog;
 use r2o_controller::r2o_resource_limit::R2oMeasurementGate;
 use r2o_controller::raw_discovery::{Trials, candidate, save_confirmed};
 use r2o_datapath::engine::{PacketDecision, TcpSessions, decide_raw_tcp_packet};
-use r2o_datapath::raw_discovery::{Observation, RawDiscovery};
+use r2o_datapath::raw_discovery::{Observation, QueueReception, RawDiscovery};
 use std::time::{Duration, Instant};
 
 const DATA: &[u8] = b"\x01opaque sample, faithfully retransmitted";
@@ -100,19 +100,34 @@ impl Harness {
     }
 
     fn feed_captured(&mut self, p: &[u8], step: u32, stamp: Option<u64>) -> Option<Observation> {
+        self.feed_queued(p, step, step, stamp)
+    }
+
+    fn feed_queued(
+        &mut self,
+        p: &[u8],
+        step: u32,
+        batch: u32,
+        stamp: Option<u64>,
+    ) -> Option<Observation> {
         self.sessions.r2o_observe_tcp_packet(p);
+        let received = self.start + TICK * step;
         self.raw.tcp(
             p,
             self.sessions.raw_context(p),
-            self.start + TICK * step,
-            stamp,
+            QueueReception {
+                id: step,
+                batch: u64::from(batch),
+                received,
+                kernel_ns: stamp,
+            },
         )
     }
 
     fn measure(&mut self, flow: Flow, seq: u32, step: u32, text: &[u8]) -> Sample {
         let p = flow.tcp(true, seq, 2001, 0x18, text);
-        assert!(self.feed(&p, step).is_none());
-        let Some(Observation::Measured(sample)) = self.feed(&p, step + 1) else {
+        assert!(self.feed_captured(&p, step, None).is_none());
+        let Some(Observation::Measured(sample)) = self.feed_captured(&p, step + 1, None) else {
             panic!("expected a measurement from the exact retransmission");
         };
         Sample::decode(&sample.encode()).unwrap()
@@ -128,8 +143,14 @@ impl Harness {
         let wire = read_frame(&mut wire.as_slice()).unwrap();
         let command = Trial::from_frame(&wire).unwrap();
         let now = self.start + TICK * step;
-        assert!(self.raw.arm(command, now, captured(step) + 1));
-        assert!(self.raw.arm(command, now, captured(step) + 2));
+        assert!(
+            self.raw
+                .arm(command, now, u64::from(step), captured(step) + 1)
+        );
+        assert!(
+            self.raw
+                .arm(command, now, u64::from(step), captured(step) + 2)
+        );
         let ack = encode_ack_for_trial(COMMAND_RAW_TRIAL, true, ACK_OK, Some(trial.token)).unwrap();
         let ack = decode_ack(&read_frame(&mut ack.as_slice()).unwrap()).unwrap();
         assert_eq!(ack.trial_id, Some(trial.token));
@@ -151,11 +172,17 @@ fn raw_tcp_measures_executes_and_reuses_an_atomic_endpoint_binding() {
     assert!(!own);
     let trial = h.install(sample, plan, 1);
     let sent = flow.tcp(true, 1001, 2001, 0x18, DATA);
+    assert!(h.feed_queued(&sent, 2, 1, None).is_none());
+    assert!(h.feed_queued(&sent, 1, 2, None).is_none());
     assert!(h.feed_captured(&sent, 2, Some(captured(1))).is_none());
-    let Some(Observation::Attempt(armed)) = h.feed(&sent, 2) else {
+    let Some(Observation::Attempt(armed)) = h.feed_captured(&sent, 2, None) else {
         panic!("trial did not apply")
     };
     assert_eq!(armed, trial);
+    assert!(matches!(
+        decide_raw_tcp_packet(plan, sample.profile, &sent, 40 + DATA.len() / 2 - 1),
+        PacketDecision::Accept
+    ));
     let PacketDecision::Transmit { packets, fate } =
         decide_raw_tcp_packet(plan, sample.profile, &sent, 1400)
     else {
@@ -300,6 +327,7 @@ fn raw_tcp_rejects_stale_range_rst_reused_tuple_and_expired_lease() {
         "different-bytes",
         "queued-ack",
         "undated-ack",
+        "same-batch-ack",
         "pre-execution",
     ] {
         let mut h = Harness::new();
@@ -308,13 +336,13 @@ fn raw_tcp_rejects_stale_range_rst_reused_tuple_and_expired_lease() {
         let trial = h.install(sample, [3; 16], 1);
         let mut old_epoch = trial;
         old_epoch.sample.epoch[0] ^= 1;
-        assert!(!h.raw.arm(old_epoch, h.start + TICK, captured(1)));
+        assert!(!h.raw.arm(old_epoch, h.start + TICK, 1, captured(1)));
         let sent = flow.tcp(true, 1001, 2001, 0x18, DATA);
         let end = 1001 + DATA.len() as u32;
         match close {
             "partial" => {
                 assert!(h.feed(&flow.tcp(false, 2001, 1009, 0x10, b""), 2).is_none());
-                assert!(!h.raw.arm(trial, h.start + 2 * TICK, captured(2)));
+                assert!(!h.raw.arm(trial, h.start + 2 * TICK, 2, captured(2)));
                 let new_sample = h.measure(flow, 1009, 3, &DATA[8..]);
                 assert_ne!(new_sample.measurement, sample.measurement);
                 assert_eq!(new_sample.seq, 1009);
@@ -339,7 +367,7 @@ fn raw_tcp_rejects_stale_range_rst_reused_tuple_and_expired_lease() {
                         .is_none()
                 );
             }
-            "queued-ack" | "undated-ack" => {
+            "queued-ack" | "undated-ack" | "same-batch-ack" => {
                 assert!(matches!(h.feed(&sent, 2), Some(Observation::Attempt(_))));
                 assert!(
                     h.raw
@@ -347,10 +375,15 @@ fn raw_tcp_rejects_stale_range_rst_reused_tuple_and_expired_lease() {
                         .is_some()
                 );
                 let ack = flow.tcp(false, 2001, end, 0x10, b"");
-                assert!(
-                    h.feed_captured(&ack, 3, (close == "queued-ack").then_some(captured(1)))
-                        .is_none()
-                );
+                let (batch, stamp) = match close {
+                    "queued-ack" => (3, Some(captured(1))),
+                    "same-batch-ack" => (2, Some(captured(3))),
+                    _ => (3, None),
+                };
+                assert!(matches!(
+                    h.feed_queued(&ack, 3, batch, stamp),
+                    Some(Observation::UnprovenAck(_))
+                ));
             }
             _ => {
                 assert!(h.feed(&flow.tcp(false, 2001, end, 0x10, b""), 2).is_none());

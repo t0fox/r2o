@@ -2730,7 +2730,7 @@ pub fn decide_raw_tcp_packet(
     plan_id: [u8; 16],
     profile: r2k_core::raw_flow::Profile,
     packet: &[u8],
-    segment_cap: usize,
+    route_maxlen: usize,
 ) -> PacketDecision {
     let Some(view) = PacketView::parse(packet).filter(|view| view.fragment & 0x3fff == 0) else {
         return PacketDecision::Accept;
@@ -2738,6 +2738,7 @@ pub fn decide_raw_tcp_packet(
     let Some(tcp) = view.tcp_segment(packet) else {
         return PacketDecision::Accept;
     };
+    let segment_cap = route_maxlen.saturating_sub(tcp.payload.start);
     let Some(payload) = packet.get(tcp.payload) else {
         return PacketDecision::Accept;
     };
