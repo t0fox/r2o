@@ -938,6 +938,12 @@ main { min-width: 0; }
   min-width: 4ch; text-align: right; color: var(--ink); font: 600 .74rem var(--mono);
   font-variant-numeric: tabular-nums;
 }
+.discovery-cpu-details {
+  display: flex; flex-wrap: wrap; gap: 4px 13px; margin: 5px 0 0;
+  color: var(--ink-2); font: .74rem var(--sans);
+}
+.discovery-cpu-details > div { display: flex; align-items: baseline; gap: 4px; }
+.discovery-cpu-details dd { margin: 0; }
 .discovery-gauge { display: block; height: 7px; overflow: hidden; border-radius: 3px; background: var(--line-strong); }
 .discovery-gauge > span {
   display: block; width: 100%; height: 100%; border-radius: inherit; background: var(--acc);

@@ -1188,6 +1188,27 @@ fn merge_live_snapshot(primary: &mut Value, extra: &Value) {
             }
         }
         merge_live_min(primary_measurements, extra, "free_pct");
+        merge_live_min(primary_measurements, extra, "scheduler_cpu_reserve_pct");
+        if let Some(explicit) = primary_measurements
+            .get("scheduler_cpu_reserve_pct")
+            .and_then(Value::as_u64)
+            && let Some(legacy) = primary_measurements.get("free_pct").and_then(Value::as_u64)
+        {
+            primary_measurements.insert(
+                "scheduler_cpu_reserve_pct".into(),
+                Value::from(explicit.min(legacy)),
+            );
+        }
+        for key in ["cpu_usage_pct", "busiest_core_usage_pct"] {
+            if primary_measurements
+                .get(key)
+                .and_then(Value::as_u64)
+                .is_none()
+                && let Some(value) = extra["measurements"][key].as_u64()
+            {
+                primary_measurements.insert(key.into(), Value::from(value));
+            }
+        }
         merge_live_min(primary_measurements, extra, "mem_avail_mb");
         merge_live_max(primary_measurements, extra, "cores");
         merge_live_max(primary_measurements, extra, "mem_total_mb");

@@ -207,7 +207,8 @@ async function main() {
     confirms: 0,
     probes_used: 3,
     client_unfit: 0,
-    measurements: { active: 1, limit: 2, queued: 0, free_pct: 96, cores: 2 },
+    measurements: { active: 1, limit: 2, queued: 0, cpu_usage_pct: 48,
+      busiest_core_usage_pct: 100, scheduler_cpu_reserve_pct: 7, free_pct: 7, cores: 4 },
   }));
   const liveState = JSON.parse(fs.readFileSync(livePath, "utf8"));
   liveState.searches.push(
@@ -456,22 +457,27 @@ esac
       document.querySelector('#discovery-cpu-label').textContent,
       document.querySelector('#discovery-cpu-value').textContent,
       document.querySelector('#discovery-cpu .discovery-gauge').getBoundingClientRect().width > 100];
-  })()`), [1, "1 / 2", 2, "Нагрузка CPU", "4%", true]);
+  })()`), [1, "1 / 2", 2, "Общая нагрузка CPU", "48%", true]);
   const measurements = liveState.measurements;
   const nextSlot = "document.querySelectorAll('.discovery-slot-fill')[1]";
   const slotAnimating = `${nextSlot}.getAnimations().some(animation => animation.playState === 'running')`;
   const metricReading = "document.querySelectorAll('#overview-metrics .metric-value')[1].firstElementChild";
   const readingAnimating = `${metricReading}.getAnimations().some(animation => animation.playState === 'running')`;
-  const updateActiveSlots = async (active, limit = measurements.limit, free_pct = measurements.free_pct) => {
-    liveState.measurements = { ...measurements, active, limit, free_pct };
+  const updateActiveSlots = async (active, limit = measurements.limit, cpu = {}) => {
+    liveState.measurements = { ...measurements, active, limit, ...cpu };
     fs.writeFileSync(livePath, JSON.stringify(liveState));
     await evaluate("document.dispatchEvent(new Event('visibilitychange'))");
   };
-  await updateActiveSlots(measurements.active, measurements.limit, null);
-  await waitFor(() => evaluate("document.querySelector('#discovery-cpu-value').textContent === '—' && document.querySelector('#discovery-cpu').offsetHeight > 0"), "при отсутствии замера строка CPU остаётся видимой");
-  await updateActiveSlots(measurements.active, measurements.limit, 100);
+  await updateActiveSlots(measurements.active, measurements.limit, {
+    cpu_usage_pct: undefined, busiest_core_usage_pct: undefined, scheduler_cpu_reserve_pct: undefined, free_pct: 92,
+  });
+  await waitFor(() => evaluate(`document.querySelector('#discovery-cpu-value').textContent === '—'
+    && document.querySelector('#discovery-cpu-core').textContent === '—'
+    && document.querySelector('#discovery-cpu-reserve').textContent === '92%'
+    && document.querySelector('#discovery-cpu').offsetHeight > 0`), "из старого снимка читается только резерв CPU");
+  await updateActiveSlots(measurements.active, measurements.limit, { cpu_usage_pct: 0 });
   await waitFor(() => evaluate("document.querySelector('#discovery-cpu-value').textContent === '0%' && document.querySelector('#discovery-cpu-fill').style.transform === 'scaleX(0)'"), "реальный нулевой замер отличается от отсутствия данных");
-  await updateActiveSlots(measurements.active, measurements.limit, 29);
+  await updateActiveSlots(measurements.active, measurements.limit, { cpu_usage_pct: 71 });
   await waitFor(() => evaluate("document.querySelector('#discovery-cpu-value').textContent === '71%' && document.querySelector('#discovery-cpu-fill').style.transform === 'scaleX(0.71)'"), "процент и длина шкалы CPU совпадают");
   await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   await evaluate(`window.initialDiscoverySlot = ${nextSlot}`);
@@ -904,8 +910,10 @@ esac
   assert.deepEqual(await evaluate(`[
     document.querySelector("#discovery-cpu-label").textContent,
     document.querySelector("#discovery-cpu-value").textContent,
-    document.querySelector("#discovery-cpu-fill").style.transform
-  ]`), ["Нагрузка CPU", "4%", "scaleX(0.04)"], "сводка показывает загрузку CPU, соответствующую 96% свободного времени");
+    document.querySelector("#discovery-cpu-fill").style.transform,
+    document.querySelector("#discovery-cpu-core").textContent,
+    document.querySelector("#discovery-cpu-reserve").textContent
+  ]`), ["Общая нагрузка CPU", "48%", "scaleX(0.48)", "100%", "7%"], "общая загрузка, ядро и резерв отображаются раздельно");
   await waitFor(() => evaluate("document.querySelector('.bindings tr[data-enabled] .t')?.textContent === 'Голос Discord'"), "голосовая привязка в коробке");
   assert.equal(await evaluate("document.querySelectorAll('.bindings .proof-note').length"), 0, "голосовая привязка не добавляет заметку о RTP, которой нет в d2o");
   assert.equal(await evaluate("[...document.querySelectorAll('.search-plan-details')].some(plan => !plan.hidden)"), true, "карточка Discovery раскрывает сведения о плане");

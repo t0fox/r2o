@@ -165,11 +165,15 @@
                 </figcaption>
                 <div class="discovery-slots" id="discovery-slots" role="img" aria-label="Загрузка слотов неизвестна"></div>
               </figure>
-              <div class="discovery-cpu" id="discovery-cpu" title="Нет свежего замера CPU">
-                <span id="discovery-cpu-label">Нагрузка CPU</span>
+              <div class="discovery-cpu" id="discovery-cpu">
+                <span id="discovery-cpu-label">Общая нагрузка CPU</span>
                 <span class="discovery-gauge" aria-hidden="true"><span id="discovery-cpu-fill"></span></span>
                 <span id="discovery-cpu-value" class="discovery-cpu-value">—</span>
               </div>
+              <dl class="discovery-cpu-details">
+                <div><dt>Самое загруженное ядро</dt><dd id="discovery-cpu-core" class="discovery-cpu-value">—</dd></div>
+                <div><dt title="Сглаженная оценка свободного CPU для допуска новых замеров">Резерв планировщика</dt><dd id="discovery-cpu-reserve" class="discovery-cpu-value">—</dd></div>
+              </dl>
             </div>
           </div>
           <div class="overview-metrics" id="overview-metrics" aria-label="Показатели Discovery"></div>

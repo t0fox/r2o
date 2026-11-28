@@ -84,6 +84,12 @@ struct R2oCpuCounters {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct R2oCpuCoreCounters {
+    usage: Option<R2oCpuCounters>,
+    scheduler: R2oCpuCounters,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct R2oMemoryStats {
     available_kb: u64,
     total_kb: u64,
@@ -98,24 +104,38 @@ struct R2oConntrackStats {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct R2oResourceReading {
     cpu: Option<R2oCpuCounters>,
-    cpu_cores: Vec<(u32, R2oCpuCounters)>,
+    cpu_cores: Vec<(u32, R2oCpuCoreCounters)>,
     memory: Option<R2oMemoryStats>,
     conntrack: Option<R2oConntrackStats>,
 }
 
 fn r2o_parse_cpu_stat(line: &str) -> Option<R2oCpuCounters> {
-    r2o_parse_cpu_counters(line.strip_prefix("cpu ")?.as_bytes(), true)
+    let (total, idle, _) = r2o_parse_cpu_counters(line.strip_prefix("cpu ")?.as_bytes())?;
+    Some(R2oCpuCounters {
+        busy: total.checked_sub(idle)?,
+        total,
+    })
 }
 
-fn r2o_parse_cpu_core(line: &str) -> Option<(u32, R2oCpuCounters)> {
+fn r2o_parse_cpu_core(line: &str) -> Option<(u32, R2oCpuCoreCounters)> {
     let (core, counters) = line.strip_prefix("cpu")?.split_once(' ')?;
+    let (total, idle, nice) = r2o_parse_cpu_counters(counters.as_bytes())?;
     Some((
         core.parse().ok()?,
-        r2o_parse_cpu_counters(counters.as_bytes(), false)?,
+        R2oCpuCoreCounters {
+            usage: total
+                .checked_sub(idle)
+                .map(|busy| R2oCpuCounters { busy, total }),
+            // Работу с пониженным приоритетом может вытеснить обработчик пакетов.
+            scheduler: R2oCpuCounters {
+                busy: total.checked_sub(idle.wrapping_add(nice))?,
+                total,
+            },
+        },
     ))
 }
 
-fn r2o_parse_cpu_counters(bytes: &[u8], include_nice: bool) -> Option<R2oCpuCounters> {
+fn r2o_parse_cpu_counters(bytes: &[u8]) -> Option<(u64, u64, u64)> {
     let mut position = 0;
     let mut values = [0_u64; 8];
     let mut count = 0;
@@ -143,15 +163,7 @@ fn r2o_parse_cpu_counters(bytes: &[u8], include_nice: bool) -> Option<R2oCpuCoun
     let total = values[..count]
         .iter()
         .fold(0_u64, |sum, value| sum.wrapping_add(*value));
-    let mut idle = values[3].wrapping_add(values[4]);
-    if !include_nice {
-        // Работу с пониженным приоритетом может вытеснить обработчик пакетов.
-        idle = idle.wrapping_add(values[1]);
-    }
-    Some(R2oCpuCounters {
-        busy: total.checked_sub(idle)?,
-        total,
-    })
+    Some((total, values[3].wrapping_add(values[4]), values[1]))
 }
 
 fn r2o_cpu_free(previous: R2oCpuCounters, current: R2oCpuCounters) -> Option<u64> {
@@ -159,6 +171,10 @@ fn r2o_cpu_free(previous: R2oCpuCounters, current: R2oCpuCounters) -> Option<u64
     let busy = current.busy.checked_sub(previous.busy)?;
     (total != 0 && busy <= total)
         .then(|| 1_000_000 - (u128::from(busy) * 1_000_000 / u128::from(total)) as u64)
+}
+
+fn r2o_cpu_percent(fraction: u64) -> u64 {
+    (fraction.saturating_add(5_000) / 10_000).min(100)
 }
 
 fn r2o_meminfo_field(text: &str, key: &str) -> Option<u64> {
@@ -248,8 +264,10 @@ struct R2oAdaptiveLimit {
     res_seq: u64,
     limit_seq: u64,
     cpu_previous: Option<R2oCpuCounters>,
-    cpu_cores_previous: Vec<(u32, R2oCpuCounters)>,
+    cpu_cores_previous: Vec<(u32, R2oCpuCoreCounters)>,
     cpu_free_u: Option<u64>,
+    cpu_usage_pct: Option<u64>,
+    busiest_core_usage_pct: Option<u64>,
     cpu_try_ms: Option<u64>,
     memory: Option<R2oMemoryStats>,
     conntrack: Option<R2oConntrackStats>,
@@ -274,6 +292,8 @@ impl R2oAdaptiveLimit {
             cpu_previous: None,
             cpu_cores_previous: Vec::new(),
             cpu_free_u: None,
+            cpu_usage_pct: None,
+            busiest_core_usage_pct: None,
             cpu_try_ms: None,
             memory: None,
             conntrack: None,
@@ -308,22 +328,37 @@ impl R2oAdaptiveLimit {
         self.conntrack = reading.conntrack.filter(|stats| stats.max > 0);
 
         // Linux перечисляет CPU по номерам; при hotplug сравниваем только тот же CPU.
-        let core_free = reading
-            .cpu_cores
-            .iter()
-            .filter_map(|&(id, current)| {
-                let index = self
-                    .cpu_cores_previous
-                    .binary_search_by_key(&id, |&(id, _)| id)
-                    .ok()?;
-                r2o_cpu_free(self.cpu_cores_previous[index].1, current)
-            })
-            .min();
-        let instant_free = self
+        let mut core_free: Option<u64> = None;
+        let mut busiest_core_free: Option<u64> = None;
+        for &(id, current) in &reading.cpu_cores {
+            let Ok(index) = self
+                .cpu_cores_previous
+                .binary_search_by_key(&id, |&(id, _)| id)
+            else {
+                continue;
+            };
+            let previous = self.cpu_cores_previous[index].1;
+            if let Some(free) = r2o_cpu_free(previous.scheduler, current.scheduler) {
+                core_free = Some(core_free.map_or(free, |minimum| minimum.min(free)));
+            }
+            if let Some(free) = previous
+                .usage
+                .zip(current.usage)
+                .and_then(|(previous, current)| r2o_cpu_free(previous, current))
+            {
+                busiest_core_free =
+                    Some(busiest_core_free.map_or(free, |minimum| minimum.min(free)));
+            }
+        }
+        let aggregate_free = self
             .cpu_previous
             .zip(reading.cpu)
-            .and_then(|(previous, current)| r2o_cpu_free(previous, current))
-            .map(|aggregate| core_free.map_or(aggregate, |core| aggregate.min(core)));
+            .and_then(|(previous, current)| r2o_cpu_free(previous, current));
+        self.cpu_usage_pct = aggregate_free.map(|free| r2o_cpu_percent(1_000_000 - free));
+        self.busiest_core_usage_pct =
+            busiest_core_free.map(|free| r2o_cpu_percent(1_000_000 - free));
+        let instant_free =
+            aggregate_free.map(|aggregate| core_free.map_or(aggregate, |core| aggregate.min(core)));
         self.cpu_previous = reading.cpu;
         self.cpu_cores_previous = reading.cpu_cores;
         self.cpu_free_u = instant_free.map(|instant| match self.cpu_free_u {
@@ -417,20 +452,15 @@ impl R2oAdaptiveLimit {
             .conntrack
             .map(|stats| format!("{} %", r2o_conntrack_percent(stats)))
             .unwrap_or_else(|| "нет данных".into());
-        let cpu_label = if core_free.is_some() {
-            "запас CPU с учётом самого занятого ядра"
-        } else {
-            "процессор свободен"
-        };
         Some(format!(
-            "замеров {active} из {}, {}, {cpu_label} {} %, память доступна {} МБ из {}, conntrack {conntrack}",
+            "замеров {active} из {}, {}, резерв CPU планировщика {} %, память доступна {} МБ из {}, conntrack {conntrack}",
             self.limit,
             if reason.is_empty() {
                 "запас по всем ресурсам"
             } else {
                 &reason
             },
-            (cpu_free + 5000) / 10_000,
+            r2o_cpu_percent(cpu_free),
             memory.available_kb / 1024,
             memory.total_kb / 1024,
         ))
@@ -650,7 +680,9 @@ pub struct R2oMeasurementSnapshot {
     pub limit: usize,
     pub queued: usize,
     pub cores: Option<u32>,
-    pub free_pct: Option<u64>,
+    pub cpu_usage_pct: Option<u64>,
+    pub busiest_core_usage_pct: Option<u64>,
+    pub scheduler_cpu_reserve_pct: Option<u64>,
     pub mem_avail_mb: Option<u64>,
     pub mem_total_mb: Option<u64>,
     pub conntrack_pct: Option<u64>,
@@ -781,10 +813,9 @@ impl R2oMeasurementGate {
             cores: std::thread::available_parallelism()
                 .ok()
                 .and_then(|cores| u32::try_from(cores.get()).ok()),
-            free_pct: state
-                .adaptive
-                .cpu_free_u
-                .map(|free| (free.saturating_add(5_000) / 10_000).min(100)),
+            cpu_usage_pct: state.adaptive.cpu_usage_pct,
+            busiest_core_usage_pct: state.adaptive.busiest_core_usage_pct,
+            scheduler_cpu_reserve_pct: state.adaptive.cpu_free_u.map(r2o_cpu_percent),
             mem_avail_mb: memory.map(|memory| memory.available_kb / 1024),
             mem_total_mb: memory.map(|memory| memory.total_kb / 1024),
             conntrack_pct: state.adaptive.conntrack.map(r2o_conntrack_percent),
@@ -1611,22 +1642,13 @@ mod tests {
                 busy: 100 * scale,
                 total: 200 * scale,
             }),
-            cpu_cores: vec![
-                (
-                    0,
-                    R2oCpuCounters {
-                        busy: 0,
-                        total: 100 * scale,
-                    },
-                ),
-                (
-                    1,
-                    R2oCpuCounters {
-                        busy: 100 * scale,
-                        total: 100 * scale,
-                    },
-                ),
-            ],
+            cpu_cores: [
+                format!("cpu0 0 0 0 {}", 100 * scale),
+                format!("cpu1 {} 0 0 0", 100 * scale),
+            ]
+            .iter()
+            .map(|line| super::r2o_parse_cpu_core(line).unwrap())
+            .collect(),
             memory: Some(R2oMemoryStats {
                 available_kb: 400_000,
                 total_kb: 512_000,
@@ -1637,6 +1659,8 @@ mod tests {
         limit.r2o_sample(1_000, reading(2), 2, 1);
         assert_eq!(limit.limit(), 1);
         assert_eq!(limit.cpu_free_u, Some(0));
+        assert_eq!(limit.cpu_usage_pct, Some(50));
+        assert_eq!(limit.busiest_core_usage_pct, Some(100));
 
         let mut hotplug = reading(3);
         hotplug.cpu_cores = ["cpu1 0 0 10 15", "cpu7 0 0 30 45"]
@@ -1644,9 +1668,11 @@ mod tests {
             .map(|line| super::r2o_parse_cpu_core(line).unwrap())
             .collect();
         assert_eq!(hotplug.cpu_cores[0].0, 1);
-        assert_eq!(hotplug.cpu_cores[1].1.total, 75);
+        assert_eq!(hotplug.cpu_cores[1].1.scheduler.total, 75);
         limit.r2o_sample(61_000, hotplug, 1, 1);
         assert_eq!(limit.limit(), 2);
+        assert_eq!(limit.cpu_usage_pct, Some(50));
+        assert_eq!(limit.busiest_core_usage_pct, None);
 
         let background_only = |scale| {
             let mut sample = reading(scale);
@@ -1658,6 +1684,73 @@ mod tests {
         limit.r2o_sample(0, background_only(1), 0, 0);
         limit.r2o_sample(1_000, background_only(2), 2, 1);
         assert_eq!(limit.limit(), 3);
+        assert_eq!(limit.cpu_usage_pct, Some(50));
+        assert_eq!(limit.busiest_core_usage_pct, Some(100));
+        assert_eq!(limit.cpu_free_u, Some(500_000));
+    }
+
+    #[test]
+    fn slot_limit_compares_skewed_and_balanced_cpu_at_equal_aggregate_load() {
+        let sample = |load: [u64; 4], tick: u64, include_cores: bool| {
+            let busy: u64 = load.iter().sum::<u64>() * tick;
+            let cpu = r2o_parse_cpu_stat(&format!("cpu {busy} 0 0 {}", 400 * tick - busy));
+            let cpu_cores = load
+                .into_iter()
+                .enumerate()
+                .filter(|_| include_cores)
+                .map(|(id, usage)| {
+                    super::r2o_parse_cpu_core(&format!(
+                        "cpu{id} {} 0 0 {}",
+                        usage * tick,
+                        (100 - usage) * tick,
+                    ))
+                    .unwrap()
+                })
+                .collect();
+            R2oResourceReading {
+                cpu,
+                cpu_cores,
+                memory: Some(R2oMemoryStats {
+                    available_kb: 400_000,
+                    total_kb: 512_000,
+                }),
+                conntrack: Some(R2oConntrackStats {
+                    count: 10,
+                    max: 100,
+                }),
+            }
+        };
+        let run = |load, include_cores| {
+            let mut limit = R2oAdaptiveLimit::new(4);
+            for tick in 1..=4 {
+                limit.r2o_sample(
+                    tick * 1_000,
+                    sample(load, tick, include_cores),
+                    limit.limit(),
+                    1,
+                );
+            }
+            (
+                limit.limit(),
+                limit.cpu_usage_pct,
+                limit.busiest_core_usage_pct,
+                limit.cpu_free_u.map(super::r2o_cpu_percent),
+            )
+        };
+        assert_eq!(
+            run([100, 30, 30, 30], true),
+            (1, Some(48), Some(100), Some(0))
+        );
+        assert_eq!(
+            run([47, 47, 48, 48], true),
+            (4, Some(48), Some(48), Some(52))
+        );
+        assert_eq!(run([100, 30, 30, 30], false), (4, Some(48), None, Some(53)));
+        assert_eq!(
+            run([90, 90, 90, 90], true),
+            (1, Some(90), Some(90), Some(10))
+        );
+        assert_eq!(run([90, 90, 90, 90], false), (1, Some(90), None, Some(10)));
     }
 
     #[test]

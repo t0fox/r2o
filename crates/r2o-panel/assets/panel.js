@@ -2151,11 +2151,16 @@
   }
 
   App.prototype.renderDiscoveryMetrics = function (m) {
-    var doc = this.doc, root = this.$("overview-metrics"), cpu = this.$("discovery-cpu");
+    var doc = this.doc, root = this.$("overview-metrics");
     var meas = m && m.k.measurements || {};
-    var limit = num(meas.limit), active = num(meas.active), free = num(meas.free_pct);
+    var limit = num(meas.limit), active = num(meas.active);
+    function percent(value) {
+      return num(value) !== null && value >= 0 && value <= 100 ? Math.round(value) : null;
+    }
+    var used = percent(meas.cpu_usage_pct), busiest = percent(meas.busiest_core_usage_pct);
+    var reserve = percent(meas.scheduler_cpu_reserve_pct ?? meas.free_pct);
     var values = m ? [m.hunting, active, m.queued.length, num(m.k.confirms), num(m.k.probes_used), num(m.k.client_unfit)] : [];
-    var key = JSON.stringify([values, limit, free]);
+    var key = JSON.stringify([values, limit, used, busiest, reserve]);
     if (!root.children.length) {
       [["Поиски"], ["Замеры"], ["Очередь"], ["Подтверждения", "families"], ["Зонды", "diagnostics"], ["План не подошёл", "diagnostics"]]
         .forEach(function (item, index) {
@@ -2193,13 +2198,12 @@
     });
 
     this.renderDiscoverySlots(active, limit);
-    var used = free === null ? null : Math.round(Math.max(0, Math.min(100, 100 - free)));
-    var cpuValue = this.$("discovery-cpu-value");
-    var valueText = used === null ? "—" : used + "%";
-    var cpuTitle = used === null ? "Нет свежего замера CPU"
-      : "По самому загруженному ядру, если доступны данные по ядрам.";
-    if (cpuValue.textContent !== valueText) cpuValue.textContent = valueText;
-    if (cpu.title !== cpuTitle) cpu.title = cpuTitle;
+    [["discovery-cpu-value", used], ["discovery-cpu-core", busiest], ["discovery-cpu-reserve", reserve]]
+      .forEach(function (reading) {
+        var node = doc.getElementById(reading[0]);
+        var valueText = reading[1] === null ? "—" : reading[1] + "%";
+        if (node.textContent !== valueText) node.textContent = valueText;
+      });
     this.$("discovery-cpu-fill").style.transform = "scaleX(" + (used ?? 0) / 100 + ")";
   };
 

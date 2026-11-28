@@ -1261,12 +1261,12 @@ fn status_merges_independent_controller_live_snapshots() {
     fs::write(&controller_pid, format!("{}\n", std::process::id())).unwrap();
     fs::write(
         &live4,
-        r#"{"linked":true,"catalog_at":"catalog.json","boxes":[],"groups":[],"searches":[{"target":"v4.example","family":4,"transport":6,"ip":"192.0.2.4","port":443,"phase":"проверка"}],"measurements":{"active":2,"queued":1,"limit":4,"cores":2,"free_pct":90},"autopick":{"datapath_events":12,"suspect_events":3,"target":"v4.example"},"targets":0,"confirms":0,"probes_used":7,"client_unfit":1}"#,
+        r#"{"linked":true,"catalog_at":"catalog.json","boxes":[],"groups":[],"searches":[{"target":"v4.example","family":4,"transport":6,"ip":"192.0.2.4","port":443,"phase":"проверка"}],"measurements":{"active":2,"queued":1,"limit":4,"cores":2,"free_pct":90,"cpu_usage_pct":48,"busiest_core_usage_pct":null,"scheduler_cpu_reserve_pct":90},"autopick":{"datapath_events":12,"suspect_events":3,"target":"v4.example"},"targets":0,"confirms":0,"probes_used":7,"client_unfit":1}"#,
     )
     .unwrap();
     fs::write(
         &live6,
-        r#"{"linked":true,"catalog_at":"catalog.json","boxes":[{"id":"box6"}],"groups":[{"suffix":"ipv6.example"}],"searches":[{"target":"v6.example","family":6,"transport":6,"ip":"2001:db8::6","port":443,"phase":"кандидат"}],"measurements":{"active":1,"queued":0,"limit":2,"cores":2,"free_pct":88},"autopick":{"datapath_events":8,"suspect_events":2,"target":"v6.example"},"targets":1,"confirms":1,"probes_used":5,"client_unfit":2}"#,
+        r#"{"linked":true,"catalog_at":"catalog.json","boxes":[{"id":"box6"}],"groups":[{"suffix":"ipv6.example"}],"searches":[{"target":"v6.example","family":6,"transport":6,"ip":"2001:db8::6","port":443,"phase":"кандидат"}],"measurements":{"active":1,"queued":0,"limit":2,"cores":2,"free_pct":88,"cpu_usage_pct":74,"busiest_core_usage_pct":100,"scheduler_cpu_reserve_pct":88},"autopick":{"datapath_events":8,"suspect_events":2,"target":"v6.example"},"targets":1,"confirms":1,"probes_used":5,"client_unfit":2}"#,
     )
     .unwrap();
     let connection = |family, ip, state, checked| {
@@ -1335,6 +1335,9 @@ fn status_merges_independent_controller_live_snapshots() {
     assert_eq!(knowledge["measurements"]["active"], 3);
     assert_eq!(knowledge["measurements"]["queued"], 1);
     assert_eq!(knowledge["measurements"]["limit"], 6);
+    assert_eq!(knowledge["measurements"]["cpu_usage_pct"], 48);
+    assert_eq!(knowledge["measurements"]["busiest_core_usage_pct"], 100);
+    assert_eq!(knowledge["measurements"]["scheduler_cpu_reserve_pct"], 88);
     assert_eq!(knowledge["probes_used"], 12);
     assert_eq!(knowledge["client_unfit"], 3);
     assert_eq!(knowledge["autopick"]["datapath_events"], 20);
