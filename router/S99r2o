@@ -819,6 +819,9 @@ meta_dns_scheduler_stop() {
 
 meta_protection_enable() {
     prepare_dirs || return 1
+    if ! meta_protection_enabled; then
+        rm -f "${R2O_INSTAGRAM_SCHED_STATE:-$ROOT/state/instagram-dns-last-success}" || return 1
+    fi
     if [ ! -f "$META_ENABLED" ]; then
         [ ! -e "$META_ENABLED" ] || return 1
         meta_marker=$(mktemp "$STATE/.meta-protection.XXXXXX") || return 1

@@ -21,7 +21,10 @@ use dnsmasq::DnsmasqHosts;
 
 const MAX_HOST_ADDRESSES: usize = 2;
 const MAX_PROBE_CANDIDATES: usize = 8;
+const REFRESH_BUDGET: Duration = Duration::from_secs(180);
+const RESOLVE_BUDGET: Duration = Duration::from_secs(60);
 type DnsAnswers = BTreeMap<String, Vec<IpAddr>>;
+type TlsChecks = BTreeMap<(String, IpAddr), Result<Option<u16>, String>>;
 
 type NetFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type PinPair = (String, String);
@@ -30,11 +33,15 @@ struct ProbePolicy<'a> {
     attempts: usize,
     retry_delay: Duration,
     log: &'a Path,
+    deadline: tokio::time::Instant,
 }
 
 pub trait MetaNetwork: Send + Sync {
     fn includes_host(&self, _host: &str) -> bool {
         true
+    }
+    fn ordered_hosts(&self) -> Vec<String> {
+        Vec::new()
     }
     fn resolve<'a>(&'a self) -> NetFuture<'a, Result<BTreeMap<String, Vec<IpAddr>>, String>>;
     fn verify<'a>(&'a self, host: &'a str, address: IpAddr) -> NetFuture<'a, bool>;
@@ -60,9 +67,12 @@ pub struct DirectMetaNetwork {
     prefixes: Vec<(IpAddr, u8)>,
     tls: std::sync::OnceLock<Result<MetaTls, String>>,
     candidates: std::sync::Mutex<BTreeMap<(String, IpAddr), String>>,
-    checks: std::sync::Mutex<BTreeMap<(String, IpAddr), Result<Option<u16>, String>>>,
+    checks: std::sync::Mutex<TlsChecks>,
     cert_names: std::sync::Mutex<BTreeSet<String>>,
     local_dns: std::sync::Mutex<BTreeMap<String, &'static str>>,
+    saved: DnsAnswers,
+    attempted: std::sync::Mutex<BTreeSet<String>>,
+    deadline: tokio::time::Instant,
 }
 
 impl DirectMetaNetwork {
@@ -76,7 +86,44 @@ impl DirectMetaNetwork {
             checks: Default::default(),
             cert_names: Default::default(),
             local_dns: Default::default(),
+            saved: Default::default(),
+            attempted: Default::default(),
+            deadline: tokio::time::Instant::now() + REFRESH_BUDGET,
         }
+    }
+
+    fn seed_knowledge(&mut self, knowledge: &Knowledge) {
+        for host in &self.hosts {
+            let Some(entry) = knowledge.hosts.get(host) else {
+                continue;
+            };
+            let mut addresses: Vec<_> = entry
+                .addresses
+                .iter()
+                .filter(|address| address.verified_at != 0)
+                .collect();
+            addresses.sort_unstable_by_key(|address| std::cmp::Reverse(address.verified_at));
+            let mut saved = Vec::new();
+            for address in addresses {
+                if !saved.contains(&address.ip)
+                    && saved
+                        .iter()
+                        .filter(|ip: &&IpAddr| ip.is_ipv6() == address.ip.is_ipv6())
+                        .count()
+                        < MAX_PROBE_CANDIDATES
+                {
+                    saved.push(address.ip);
+                }
+            }
+            if !saved.is_empty() {
+                self.saved.insert(host.clone(), saved);
+            }
+        }
+    }
+
+    fn accepts_resolver_candidate(&self, address: IpAddr) -> bool {
+        crate::cf_proxy_doh::is_usable_edge_ip(&address)
+            && (self.prefixes.is_empty() || is_meta_ip(&self.prefixes, address))
     }
 }
 
@@ -84,24 +131,67 @@ impl MetaNetwork for DirectMetaNetwork {
     fn includes_host(&self, host: &str) -> bool {
         self.hosts.iter().any(|name| name == host)
     }
+    fn ordered_hosts(&self) -> Vec<String> {
+        self.hosts.clone()
+    }
 
     fn resolve<'a>(&'a self) -> NetFuture<'a, Result<DnsAnswers, String>> {
         Box::pin(async move {
-            let tls = doh_tls(None)?;
-            let replies: Vec<_> = stream::iter(self.hosts.clone())
+            let deadline = self
+                .deadline
+                .min(tokio::time::Instant::now() + RESOLVE_BUDGET - Duration::from_secs(1));
+            let lookup_deadline = deadline
+                .min(tokio::time::Instant::now() + RESOLVE_BUDGET - Duration::from_secs(10));
+            let tls = doh_tls(None).ok();
+            let mut results = self.saved.clone();
+            {
+                let mut candidates = self.candidates.lock().expect("поток Meta DNS");
+                for (host, addresses) in &results {
+                    for address in addresses {
+                        candidates.insert((host.clone(), *address), "сохранённый адрес".into());
+                    }
+                }
+            }
+            let replies = stream::iter(self.hosts.clone())
                 .map(|host| {
                     let tls = &tls;
                     async move {
+                        if tokio::time::Instant::now() >= lookup_deadline {
+                            return None;
+                        }
+                        self.attempted
+                            .lock()
+                            .expect("поток Meta DNS")
+                            .insert(host.clone());
+                        let mut addresses: Vec<_> = self
+                            .saved
+                            .get(&host)
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|ip| (ip, "сохранённый адрес"))
+                            .collect();
+                        // A saved address is useful after reboot without any external DNS,
+                        // but an old failed address must not prevent trying another source.
+                        for (address, _) in &addresses {
+                            if is_meta_ip(&self.prefixes, *address)
+                                && self.verify(&host, *address).await
+                            {
+                                return Some((host, addresses));
+                            }
+                        }
+                        addresses.clear();
                         let lookup_name = host.clone();
                         let system = tokio::time::timeout(
                             Duration::from_millis(750),
                             tokio::net::lookup_host((lookup_name.as_str(), 443)),
-                        );
-                        let (addresses, local) =
-                            tokio::join!(protected_address_lookup(&host, tls), system);
+                        )
+                        .await;
+                        let local = system.map(|reply| {
+                            reply.map(|ips| ips.take(16).map(|ip| ip.ip()).collect::<Vec<_>>())
+                        });
                         let diagnosis = match local {
-                            Ok(Ok(ips)) if !self.prefixes.is_empty() => {
-                                let ips: Vec<_> = ips.take(16).map(|ip| ip.ip()).collect();
+                            Ok(Ok(ref ips)) if !self.prefixes.is_empty() => {
                                 if ips.is_empty() {
                                     "нет адресов"
                                 } else if !ips.iter().any(|ip| is_meta_ip(&self.prefixes, *ip)) {
@@ -117,42 +207,110 @@ impl MetaNetwork for DirectMetaNetwork {
                             .lock()
                             .expect("поток локального DNS")
                             .insert(host.clone(), diagnosis);
-                        (host, addresses)
+                        if let Ok(Ok(ips)) = local {
+                            for ip in ips.into_iter().filter(|ip| {
+                                crate::cf_proxy_doh::is_usable_edge_ip(ip)
+                                    && is_meta_ip(&self.prefixes, *ip)
+                            }) {
+                                if !addresses.iter().any(|(known, _)| *known == ip)
+                                    && addresses
+                                        .iter()
+                                        .filter(|(known, _)| known.is_ipv6() == ip.is_ipv6())
+                                        .count()
+                                        < MAX_PROBE_CANDIDATES
+                                {
+                                    addresses.push((ip, "системный DNS"));
+                                }
+                            }
+                        }
+                        {
+                            let mut candidates = self.candidates.lock().expect("поток Meta DNS");
+                            for (ip, source) in &addresses {
+                                candidates.insert((host.clone(), *ip), (*source).into());
+                            }
+                        }
+                        for (address, source) in &addresses {
+                            if *source == "системный DNS" && self.verify(&host, *address).await
+                            {
+                                return Some((host, addresses));
+                            }
+                        }
+                        addresses.clear();
+                        if let Some(tls) = tls {
+                            for (ip, source) in protected_address_lookup(&host, tls).await {
+                                if self.accepts_resolver_candidate(ip)
+                                    && !addresses.iter().any(|(known, _)| *known == ip)
+                                    && addresses
+                                        .iter()
+                                        .filter(|(known, _)| known.is_ipv6() == ip.is_ipv6())
+                                        .count()
+                                        < MAX_PROBE_CANDIDATES
+                                {
+                                    addresses.push((ip, source));
+                                }
+                            }
+                        }
+                        Some((host, addresses))
                     }
                 })
-                .buffer_unordered(2)
-                .collect()
-                .await;
-            let missing: Vec<_> = replies
-                .iter()
-                .filter(|(_, ips)| {
-                    ips.is_empty()
-                        || (!self.prefixes.is_empty()
-                            && !ips.iter().any(|(ip, _)| is_meta_ip(&self.prefixes, *ip)))
-                })
-                .map(|(name, _)| name.clone())
-                .take(8)
-                .collect();
-            let fallback = controller_dns_fallback(&missing).await;
-            let mut candidates = self.candidates.lock().expect("поток Meta DNS");
-            let mut results = DnsAnswers::new();
-            for (host, addresses) in replies {
+                .buffer_unordered(2);
+            futures_util::pin_mut!(replies);
+            while let Ok(Some(reply)) =
+                tokio::time::timeout_at(lookup_deadline, replies.next()).await
+            {
+                let Some((host, addresses)) = reply else {
+                    break;
+                };
+                let mut candidates = self.candidates.lock().expect("поток Meta DNS");
                 for (ip, provider) in &addresses {
                     candidates
                         .entry((host.clone(), *ip))
                         .or_insert_with(|| (*provider).into());
                 }
-                let mut ips: Vec<_> = addresses.into_iter().map(|(ip, _)| ip).collect();
-                for (ip, provider) in fallback.get(&host).into_iter().flatten() {
-                    if crate::cf_proxy_doh::is_usable_edge_ip(ip) && !ips.contains(ip) {
-                        candidates.insert((host.clone(), *ip), provider.clone());
-                        ips.push(*ip);
+                results.insert(host, addresses.into_iter().map(|(ip, _)| ip).collect());
+            }
+            let missing: Vec<_> = {
+                let checks = self.checks.lock().expect("поток Meta TLS");
+                self.attempted
+                    .lock()
+                    .expect("поток Meta DNS")
+                    .iter()
+                    .filter(|host| {
+                        results.get(*host).is_none_or(|ips| {
+                            !ips.iter().any(|ip| {
+                                self.accepts_resolver_candidate(*ip)
+                                    && checks
+                                        .get(&((*host).clone(), *ip))
+                                        .is_none_or(Result::is_ok)
+                            })
+                        })
+                    })
+                    .take(8)
+                    .cloned()
+                    .collect()
+            };
+            let fallback = tokio::time::timeout_at(deadline, controller_dns_fallback(&missing))
+                .await
+                .unwrap_or_default();
+            let mut candidates = self.candidates.lock().expect("поток Meta DNS");
+            for (host, addresses) in fallback {
+                let ips = results.entry(host.clone()).or_default();
+                for (ip, provider) in addresses {
+                    if self.accepts_resolver_candidate(ip)
+                        && !ips.contains(&ip)
+                        && ips
+                            .iter()
+                            .filter(|known| known.is_ipv6() == ip.is_ipv6())
+                            .count()
+                            < MAX_PROBE_CANDIDATES
+                    {
+                        candidates.insert((host.clone(), ip), provider);
+                        ips.push(ip);
                     }
                 }
-                results.insert(host, ips);
             }
             if results.values().all(Vec::is_empty) {
-                return Err("защищённые резолверы не вернули адресов Meta".into());
+                return Err("источники DNS и сохранённые адреса Meta недоступны".into());
             }
             Ok(results)
         })
@@ -160,6 +318,21 @@ impl MetaNetwork for DirectMetaNetwork {
 
     fn verify<'a>(&'a self, host: &'a str, address: IpAddr) -> NetFuture<'a, bool> {
         Box::pin(async move {
+            if let Some(result) = self
+                .checks
+                .lock()
+                .expect("поток Meta TLS")
+                .get(&(host.to_owned(), address))
+            {
+                return result.is_ok();
+            }
+            if tokio::time::Instant::now() >= self.deadline {
+                return false;
+            }
+            self.attempted
+                .lock()
+                .expect("поток Meta DNS")
+                .insert(host.to_owned());
             let result = match self
                 .tls
                 .get_or_init(|| MetaTls::new(self.ca_bundle.as_deref()))
@@ -372,6 +545,7 @@ pub struct MetaDnsManager<N, D> {
     probe_retry_delay: Duration,
     resolve_attempts: usize,
     resolve_retry_delay: Duration,
+    deadline: tokio::time::Instant,
 }
 
 impl<N: MetaNetwork> MetaDnsManager<N, SystemNdm> {
@@ -406,6 +580,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
                 0,
                 120,
             )),
+            deadline: tokio::time::Instant::now() + REFRESH_BUDGET,
         }
     }
 
@@ -414,26 +589,6 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             Some(dnsmasq) => dnsmasq.records(),
             None => read_manifest(&self.paths.manifest),
         }
-    }
-
-    fn remove_dead_pins(
-        &mut self,
-        initial_config: Option<String>,
-        prior: &[(String, IpAddr)],
-        dead: &[(String, IpAddr)],
-    ) -> Result<(), String> {
-        if let Some(dnsmasq) = &self.dnsmasq {
-            return dnsmasq.publish(&openwrt_pins(prior, dead, &BTreeMap::new()));
-        }
-        let mut view = NdmView::new(&mut self.ndm);
-        view.config = initial_config;
-        drop_dead_pins(
-            &mut view,
-            &self.paths.manifest,
-            &self.paths.log,
-            prior,
-            dead,
-        )
     }
 
     pub async fn refresh(&mut self) -> Result<(), String> {
@@ -459,37 +614,65 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             }
             Some(config)
         };
+        let order: BTreeMap<_, _> = self
+            .network
+            .ordered_hosts()
+            .into_iter()
+            .enumerate()
+            .map(|(index, host)| (host, index))
+            .collect();
+        let mut prior_checks: Vec<_> = prior
+            .iter()
+            .filter(|(host, address)| {
+                is_managed_host(host)
+                    && self.network.includes_host(host)
+                    && (self.dnsmasq.is_some()
+                        || initial_config
+                            .as_deref()
+                            .is_some_and(|config| config_has_pair(config, host, *address)))
+            })
+            .collect();
+        prior_checks
+            .sort_unstable_by_key(|(host, _)| order.get(host).copied().unwrap_or(usize::MAX));
+        let prior_deadline = self
+            .deadline
+            .min(tokio::time::Instant::now() + RESOLVE_BUDGET);
         let mut dead = Vec::new();
-        let mut alive = 0_usize;
-        for (host, address) in &prior {
-            if !is_managed_host(host) || !self.network.includes_host(host) {
-                continue;
-            }
-            if self.dnsmasq.is_none()
-                && !initial_config
-                    .as_deref()
-                    .is_some_and(|config| config_has_pair(config, host, *address))
+        let mut retained_verified = BTreeMap::<String, Vec<IpAddr>>::new();
+        {
+            let manager = &*self;
+            let prior_checks = stream::iter(prior_checks)
+                .map(|(host, address)| async move {
+                    let verified = is_meta_ip(&manager.meta_ranges, *address)
+                        && verify_with_retry(
+                            &manager.network,
+                            host,
+                            *address,
+                            manager.probe_attempts,
+                            manager.probe_retry_delay,
+                            &manager.paths.log,
+                            prior_deadline,
+                        )
+                        .await;
+                    (host, address, verified)
+                })
+                .buffered(4);
+            futures_util::pin_mut!(prior_checks);
+            while let Ok(Some((host, address, verified))) =
+                tokio::time::timeout_at(prior_deadline, prior_checks.next()).await
             {
-                continue;
-            }
-            if is_meta_ip(&self.meta_ranges, *address)
-                && verify_with_retry(
-                    &self.network,
-                    host,
-                    *address,
-                    self.probe_attempts,
-                    self.probe_retry_delay,
-                    &self.paths.log,
-                )
-                .await
-            {
-                alive += 1;
-            } else {
-                dead.push((host.clone(), *address));
-                append_log(
-                    &self.paths.log,
-                    &format!("своя запись не прошла TLS-проверку: {host} {address}"),
-                );
+                if verified {
+                    retained_verified
+                        .entry(host.clone())
+                        .or_default()
+                        .push(*address);
+                } else {
+                    dead.push((host.clone(), *address));
+                    append_log(
+                        &self.paths.log,
+                        &format!("своя запись не прошла TLS-проверку: {host} {address}"),
+                    );
+                }
             }
         }
 
@@ -498,34 +681,35 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             self.resolve_attempts,
             self.resolve_retry_delay,
             &self.paths.log,
+            self.deadline
+                .min(tokio::time::Instant::now() + RESOLVE_BUDGET),
         )
         .await
         {
             Ok(answers) => answers,
             Err(error) => {
-                if !dead.is_empty() && alive > 0 {
-                    self.remove_dead_pins(initial_config, &prior, &dead)?;
-                    append_log(
-                        &self.paths.log,
-                        "прямые DNS-службы недоступны; сняты только локально подтверждённые мёртвые записи",
-                    );
-                } else if !dead.is_empty() {
-                    append_log(
-                        &self.paths.log,
-                        "прямые DNS-службы недоступны, а свои записи не прошли проверку; DNS оставлен без изменений",
-                    );
-                } else {
-                    append_log(
-                        &self.paths.log,
-                        "прямые DNS-службы недоступны; текущие DNS-записи не изменены",
-                    );
-                }
-                return Err(error);
+                append_log(
+                    &self.paths.log,
+                    &format!(
+                        "DNS недоступен ({error}); проверяем сохранённые адреса и адреса семейства"
+                    ),
+                );
+                BTreeMap::new()
             }
         };
 
         let mut filtered = BTreeMap::<String, Vec<IpAddr>>::new();
-        for (host, ips) in &answers {
+        let mut ordered_answers: Vec<_> = answers.iter().collect();
+        ordered_answers
+            .sort_unstable_by_key(|(host, _)| order.get(*host).copied().unwrap_or(usize::MAX));
+        for (host, ips) in ordered_answers {
+            if tokio::time::Instant::now() >= self.deadline {
+                append_log(
+                    &self.paths.log,
+                    "Достигнут бюджет обновления Meta; непроверенные имена отложены, прежние DNS-записи сохранены",
+                );
+                break;
+            }
             if !is_managed_host(host) {
                 continue;
             }
@@ -545,6 +729,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
                         manager.probe_attempts,
                         manager.probe_retry_delay,
                         &manager.paths.log,
+                        manager.deadline,
                     )
                     .await
                     .then_some(address)
@@ -562,6 +747,19 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
             }
         }
 
+        // A DNS outage does not invalidate a previously installed address that
+        // just passed its own TLS check. Keep it eligible for family fallback.
+        for (host, addresses) in retained_verified {
+            let fresh = filtered.entry(host).or_default();
+            let fresh_v4 = fresh.iter().any(IpAddr::is_ipv4);
+            let fresh_v6 = fresh.iter().any(IpAddr::is_ipv6);
+            for address in addresses {
+                if (address.is_ipv4() && !fresh_v4) || (address.is_ipv6() && !fresh_v6) {
+                    fresh.push(address);
+                }
+            }
+        }
+
         apply_family_fallback(
             &self.network,
             &self.meta_ranges,
@@ -569,6 +767,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
                 attempts: self.probe_attempts,
                 retry_delay: self.probe_retry_delay,
                 log: &self.paths.log,
+                deadline: self.deadline,
             },
             &answers,
             &prior,
@@ -577,9 +776,6 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
         )
         .await;
         if filtered.is_empty() {
-            if !dead.is_empty() && alive > 0 {
-                self.remove_dead_pins(initial_config, &prior, &dead)?;
-            }
             append_log(
                 &self.paths.log,
                 "нет адресов Meta с доступным TLS и подходящим сертификатом; остальные DNS-записи не изменены",
@@ -600,18 +796,11 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
                 filtered.retain(|host, _| !legacy.contains(host));
                 prior.retain(|(host, _)| !legacy.contains(host));
             }
-            dnsmasq.publish(&openwrt_pins(&prior, &dead, &filtered))?;
+            dnsmasq.publish(&openwrt_pins(&prior, &filtered))?;
             return self.mark_success();
         }
         let mut view = NdmView::new(&mut self.ndm);
         view.config = initial_config;
-        drop_dead_pins(
-            &mut view,
-            &self.paths.manifest,
-            &self.paths.log,
-            &prior,
-            &dead,
-        )?;
         let mut next = BTreeSet::<PinPair>::new();
         for (host, address) in read_manifest(&self.paths.manifest)? {
             if is_managed_host(&host) && view.exists(&host, address)? {
@@ -620,6 +809,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
         }
 
         let mut add_failed = false;
+        let mut published = DnsAnswers::new();
         for (host, addresses) in &filtered {
             // На Keenetic не меняем имя, для которого есть пользовательская запись.
             if view.ndm.requires_exclusive_hostname()
@@ -633,16 +823,20 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
                     continue;
                 }
                 if view.exists(host, *address)? {
+                    published.entry(host.clone()).or_default().push(*address);
                     continue;
                 }
                 let pair = (host.clone(), address.to_string());
                 next.insert(pair.clone());
                 write_manifest(&self.paths.manifest, &next)?;
                 match view.add(host, *address) {
-                    Ok(()) => append_log(
-                        &self.paths.log,
-                        &format!("добавлена R2O-запись {host} {address}"),
-                    ),
+                    Ok(()) => {
+                        published.entry(host.clone()).or_default().push(*address);
+                        append_log(
+                            &self.paths.log,
+                            &format!("добавлена R2O-запись {host} {address}"),
+                        );
+                    }
                     Err(error) => {
                         next.remove(&pair);
                         write_manifest(&self.paths.manifest, &next)?;
@@ -661,7 +855,7 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
         }
 
         for (host, address) in read_manifest(&self.paths.manifest)? {
-            let Some(fresh) = filtered.get(&host) else {
+            let Some(fresh) = published.get(&host) else {
                 continue;
             };
             if fresh.contains(&address) || !fresh.iter().any(|ip| ip.is_ipv6() == address.is_ipv6())
@@ -760,21 +954,15 @@ impl<N: MetaNetwork, D: Ndm> MetaDnsManager<N, D> {
     }
 }
 
-fn openwrt_pins(
-    prior: &[(String, IpAddr)],
-    dead: &[(String, IpAddr)],
-    fresh: &DnsAnswers,
-) -> BTreeSet<PinPair> {
-    let dead: BTreeSet<_> = dead.iter().collect();
+fn openwrt_pins(prior: &[(String, IpAddr)], fresh: &DnsAnswers) -> BTreeSet<PinPair> {
     prior
         .iter()
         .filter(|pair| {
             let (host, address) = pair;
-            !dead.contains(pair)
-                && fresh.get(host).is_none_or(|addresses| {
-                    addresses.contains(address)
-                        || !addresses.iter().any(|ip| ip.is_ipv6() == address.is_ipv6())
-                })
+            fresh.get(host).is_none_or(|addresses| {
+                addresses.contains(address)
+                    || !addresses.iter().any(|ip| ip.is_ipv6() == address.is_ipv6())
+            })
         })
         .map(|(host, address)| (host.clone(), address.to_string()))
         .chain(fresh.iter().flat_map(|(host, addresses)| {
@@ -790,10 +978,14 @@ async fn resolve_with_retry<N: MetaNetwork>(
     attempts: usize,
     retry_delay: Duration,
     log: &Path,
+    deadline: tokio::time::Instant,
 ) -> Result<BTreeMap<String, Vec<IpAddr>>, String> {
     let mut last_error = None;
     for attempt in 1..=attempts {
-        match network.resolve().await {
+        let reply = tokio::time::timeout_at(deadline, network.resolve())
+            .await
+            .unwrap_or_else(|_| Err("достигнут бюджет получения адресов Meta".into()));
+        match reply {
             Ok(answers) => return Ok(answers),
             Err(error) => {
                 last_error = Some(error);
@@ -801,8 +993,13 @@ async fn resolve_with_retry<N: MetaNetwork>(
                     log,
                     &format!("прямой DNS-запрос: попытка {attempt}/{attempts} не удалась"),
                 );
-                if attempt < attempts {
-                    sleep(retry_delay).await;
+                if attempt < attempts
+                    && (tokio::time::Instant::now() >= deadline
+                        || tokio::time::timeout_at(deadline, sleep(retry_delay))
+                            .await
+                            .is_err())
+                {
+                    break;
                 }
             }
         }
@@ -817,9 +1014,16 @@ async fn verify_with_retry<N: MetaNetwork>(
     attempts: usize,
     retry_delay: Duration,
     log: &Path,
+    deadline: tokio::time::Instant,
 ) -> bool {
     for attempt in 1..=attempts {
-        if network.verify(host, address).await {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        if tokio::time::timeout_at(deadline, network.verify(host, address))
+            .await
+            .unwrap_or(false)
+        {
             return true;
         }
         if attempt < attempts {
@@ -827,7 +1031,12 @@ async fn verify_with_retry<N: MetaNetwork>(
                 log,
                 &format!("повтор TLS-пробы {attempt}/{attempts}: {host} {address}"),
             );
-            sleep(retry_delay).await;
+            if tokio::time::timeout_at(deadline, sleep(retry_delay))
+                .await
+                .is_err()
+            {
+                return false;
+            }
         }
     }
     false
@@ -842,23 +1051,24 @@ async fn apply_family_fallback<N: MetaNetwork>(
     dead: &[(String, IpAddr)],
     filtered: &mut BTreeMap<String, Vec<IpAddr>>,
 ) {
-    for host in META_HOSTS {
-        if !network.includes_host(host) || filtered.contains_key(*host) {
+    let mut hosts = network.ordered_hosts();
+    if hosts.is_empty() {
+        hosts = META_HOSTS.iter().map(|host| (*host).to_owned()).collect();
+    }
+    for host in &hosts {
+        if tokio::time::Instant::now() >= policy.deadline {
+            break;
+        }
+        if !network.includes_host(host) || filtered.contains_key(host) {
             continue;
         }
         let Some(family) = meta_family(host) else {
             continue;
         };
-        let answered: BTreeSet<_> = answers.get(*host).into_iter().flatten().copied().collect();
+        let answered: BTreeSet<_> = answers.get(host).into_iter().flatten().copied().collect();
         let mut candidates = Vec::new();
-        for sibling in META_HOSTS {
-            if let Some(addresses) = filtered.get(*sibling) {
-                candidates.extend(
-                    addresses
-                        .iter()
-                        .map(|address| ((*sibling).to_string(), *address)),
-                );
-            }
+        for (sibling, addresses) in filtered.iter() {
+            candidates.extend(addresses.iter().map(|address| (sibling.clone(), *address)));
         }
         candidates.extend(
             prior
@@ -891,6 +1101,7 @@ async fn apply_family_fallback<N: MetaNetwork>(
                 policy.attempts,
                 policy.retry_delay,
                 policy.log,
+                policy.deadline,
             )
             .await
             {
@@ -907,7 +1118,7 @@ async fn apply_family_fallback<N: MetaNetwork>(
             }
         }
         if !verified.is_empty() {
-            filtered.insert((*host).to_string(), verified);
+            filtered.insert(host.clone(), verified);
         }
     }
 }
@@ -951,37 +1162,6 @@ fn configured_host_addresses<'a>(
             .then(|| address.parse().ok())
             .flatten()
     })
-}
-
-fn drop_dead_pins<D: Ndm>(
-    view: &mut NdmView<'_, D>,
-    manifest_path: &Path,
-    log: &Path,
-    prior: &[(String, IpAddr)],
-    dead: &[(String, IpAddr)],
-) -> Result<(), String> {
-    if dead.is_empty() {
-        return Ok(());
-    }
-    for (host, address) in dead {
-        if view.exists(host, *address)? {
-            view.remove(host, *address)?;
-            append_log(
-                log,
-                &format!(
-                    "удалена недоступная R2O-запись {host} {address}; имя снова разрешается обычным DNS"
-                ),
-            );
-        }
-    }
-    let dead_set: BTreeSet<_> = dead.iter().cloned().collect();
-    let remaining: BTreeSet<_> = prior
-        .iter()
-        .filter(|pair| !dead_set.contains(*pair))
-        .map(|(host, address)| (host.clone(), address.to_string()))
-        .collect();
-    view.save_if_changed()?;
-    write_manifest(manifest_path, &remaining)
 }
 
 struct NdmView<'a, D> {
@@ -1104,6 +1284,16 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
         !is_disabled_host(&disabled, host)
     });
     if network.hosts.is_empty() {
+        if manager
+            .dnsmasq
+            .as_ref()
+            .is_some_and(DnsmasqHosts::notification_pending)
+        {
+            let error = format!("{PENDING_APPLY_ERROR}снятие прежних записей не завершено");
+            knowledge.error = Some(error.clone());
+            knowledge.persist(&state)?;
+            return Err(error);
+        }
         return knowledge.persist(&state);
     }
 
@@ -1118,6 +1308,7 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
             network.prefixes = parse_meta_ranges(&body)?;
         }
     }
+    network.seed_knowledge(&knowledge);
     let ranges = network.prefixes.clone();
     manager.probe_attempts = 1;
     manager.resolve_attempts = 1;
@@ -1126,12 +1317,40 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
         manager.paths.meta_ranges = manager.paths.r2o_dir.join("files/meta-ranges.txt");
     }
     let result = manager.refresh().await;
+    let pending = manager
+        .dnsmasq
+        .as_ref()
+        .is_some_and(DnsmasqHosts::notification_pending);
+    let result = if pending {
+        Err(format!(
+            "{PENDING_APPLY_ERROR}{}",
+            result
+                .err()
+                .unwrap_or_else(|| "ожидается отправка сигнала dnsmasq".into())
+        ))
+    } else {
+        result
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_secs();
     let mut recovery = Vec::new();
-    let pins: BTreeSet<_> = manager.pins()?.into_iter().collect();
+    let pins: BTreeSet<_> = if pending {
+        knowledge
+            .hosts
+            .iter()
+            .flat_map(|(host, entry)| {
+                entry
+                    .addresses
+                    .iter()
+                    .filter(|address| address.pinned)
+                    .map(|address| (host.clone(), address.ip))
+            })
+            .collect()
+    } else {
+        manager.pins()?.into_iter().collect()
+    };
     let candidates = manager
         .network
         .candidates
@@ -1143,6 +1362,11 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
         .local_dns
         .into_inner()
         .expect("поток локального DNS");
+    let attempted = manager
+        .network
+        .attempted
+        .into_inner()
+        .expect("поток Meta DNS");
     for name in manager
         .network
         .cert_names
@@ -1153,6 +1377,9 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
     }
 
     for host in manager.network.hosts {
+        if !attempted.contains(&host) {
+            continue;
+        }
         let ips: BTreeSet<_> = candidates
             .keys()
             .chain(checks.keys())
@@ -1163,7 +1390,10 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
         let mut verified_now = false;
         let mut last_failure = None;
         entry.local_dns = local_dns.get(&host).copied().unwrap_or_default().into();
-        entry.dns_addresses = candidates.keys().filter(|(name, _)| *name == host).count();
+        entry.dns_addresses = candidates
+            .iter()
+            .filter(|((name, _), source)| *name == host && source.as_str() != "сохранённый адрес")
+            .count();
         for ip in ips {
             let key = (host.clone(), ip);
             let resolver = candidates
@@ -1229,12 +1459,14 @@ async fn refresh_knowledge(force: bool) -> Result<(), String> {
         });
         entry.addresses.truncate(12);
         entry.checked_at = now;
-        entry.last_failure = if entry.dns_addresses == 0 {
-            Some("защищённый DNS не вернул адреса".into())
-        } else if !verified_now {
-            last_failure.or_else(|| result.as_ref().err().cloned())
-        } else {
+        entry.last_failure = if verified_now {
             None
+        } else {
+            last_failure
+                .or_else(|| result.as_ref().err().cloned())
+                .or_else(|| {
+                    (entry.dns_addresses == 0).then(|| "источники DNS не вернули адреса".into())
+                })
         };
     }
     for (host, entry) in &mut knowledge.hosts {
@@ -1304,6 +1536,13 @@ pub fn set_product_from_env(product: &str, mode: &str) -> Result<(), String> {
                 }
                 knowledge.persist(&state)?;
                 std::fs::remove_file(marker).map_err(|error| error.to_string())?;
+                match std::fs::remove_file(&paths.success_mark) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("не удалось запланировать проверку Meta: {error}"));
+                    }
+                }
             }
             Ok(())
         }
@@ -1318,11 +1557,40 @@ pub fn set_product_from_env(product: &str, mode: &str) -> Result<(), String> {
     }
 }
 
+const PENDING_APPLY_ERROR: &str = "Meta DNS ожидает применения: ";
+
+fn reconcile_pin_status(state: &Path, pins: &[(String, IpAddr)]) -> Result<(), String> {
+    let mut knowledge = Knowledge::load(state);
+    let pins: BTreeSet<_> = pins.iter().collect();
+    let mut changed = false;
+    for (host, entry) in &mut knowledge.hosts {
+        for address in &mut entry.addresses {
+            let pinned = pins.contains(&(host.clone(), address.ip));
+            changed |= address.pinned != pinned;
+            address.pinned = pinned;
+        }
+    }
+    if knowledge
+        .error
+        .as_deref()
+        .is_some_and(|error| error.starts_with(PENDING_APPLY_ERROR))
+    {
+        knowledge.error = None;
+        changed = true;
+    }
+    if changed {
+        knowledge.persist(state)
+    } else {
+        Ok(())
+    }
+}
+
 pub async fn run_scheduler() -> Result<(), String> {
     let paths = MetaDnsPaths::from_env();
     let (state, _) = state_dirs(&paths);
     let openwrt = !command_exists("ndmc") && Path::new("/etc/init.d/dnsmasq").is_file();
     let dnsmasq = openwrt.then(DnsmasqHosts::default);
+    let mut reconcile_pins = true;
     let mut scheduler = MetaDnsScheduler::from_env();
     let mut lists = crate::list_update::ListUpdater::from_env();
     let meta_disabled = std::env::var("R2O_META_DNS_DISABLED").as_deref() == Ok("1");
@@ -1337,14 +1605,23 @@ pub async fn run_scheduler() -> Result<(), String> {
     loop {
         let cycle = async {
             if protection_enabled(&state) && !meta_disabled {
-                if let Some(dnsmasq) = &dnsmasq
-                    && dnsmasq.notification_pending()
-                    && let Ok(_lock) = state_lock(&state)
-                    && let Err(error) = dnsmasq.resume()
-                {
-                    append_log(&scheduler.log, &error);
+                if let Some(dnsmasq) = &dnsmasq {
+                    reconcile_pins |= dnsmasq.notification_pending();
+                    if reconcile_pins && let Ok(_lock) = state_lock(&state) {
+                        match dnsmasq
+                            .resume()
+                            .and_then(|()| reconcile_pin_status(&state, &dnsmasq.records()?))
+                        {
+                            Ok(()) => reconcile_pins = false,
+                            Err(error) => append_log(&scheduler.log, &error),
+                        }
+                    }
                 }
-                if let Err(error) = scheduler.tick().await {
+                let restore = should_restore_hosts(
+                    dnsmasq.as_ref().is_some_and(DnsmasqHosts::needs_refresh),
+                    &state,
+                );
+                if let Err(error) = scheduler.tick(restore).await {
                     append_log(&scheduler.log, &error);
                 }
             }
@@ -1355,6 +1632,10 @@ pub async fn run_scheduler() -> Result<(), String> {
             _ = cycle => {},
         }
     }
+}
+
+fn should_restore_hosts(hosts_missing: bool, state: &Path) -> bool {
+    hosts_missing && r2k_core::meta::disabled_products(state).len() < r2k_core::meta::PRODUCTS.len()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1404,15 +1685,41 @@ impl MetaDnsScheduler {
         }
     }
 
-    async fn tick(&mut self) -> Result<(), String> {
-        if self.explicit_run_at.is_none() {
-            return refresh_knowledge(false).await;
-        }
-        let clock = local_clock()?;
+    async fn tick(&mut self, restore: bool) -> Result<(), String> {
+        self.tick_with_refresh(local_clock()?, restore, || refresh_knowledge(true))
+            .await
+    }
+
+    async fn tick_with_refresh<F, Fut>(
+        &mut self,
+        clock: Clock,
+        restore: bool,
+        refresh: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), String>>,
+    {
         let offset = self.refresh_offset()?;
         let run_at = self.run_at(offset);
-        let attempt = read_attempt(&self.attempt);
-        if !should_run(&self.state, &attempt, &clock, &run_at, self.retry_after) {
+        if !valid_hhmm(&run_at) {
+            return Err("R2O_INSTAGRAM_REFRESH_AT должен содержать время HHMM".into());
+        }
+        let mut attempt = read_attempt(&self.attempt);
+        // При переводе часов назад переносим начало ожидания один раз: иначе
+        // старый epoch может блокировать восстановление до синхронизации NTP.
+        if attempt.failures != 0 && attempt.last_epoch > clock.epoch {
+            attempt.last_epoch = clock.epoch;
+            attempt.last_day = Some(clock.day.clone());
+            write_attempt(&self.attempt, &attempt)?;
+        }
+        // Неудача не становится новой попыткой из-за полуночи или потери /tmp.
+        if clock.epoch.saturating_sub(attempt.last_epoch)
+            < backoff_after(attempt.failures, self.retry_after)
+        {
+            return Ok(());
+        }
+        if !restore && !should_run(&self.state, &attempt, &clock, &run_at, self.retry_after) {
             return Ok(());
         }
 
@@ -1422,8 +1729,16 @@ impl MetaDnsScheduler {
             failures: attempt.failures.saturating_add(1),
         };
         write_attempt(&self.attempt, &next)?;
-        append_log(&self.log, "обновление DNS Instagram/WhatsApp: старт");
-        match refresh_knowledge(false).await {
+        append_log(&self.log, "обновление DNS Meta: старт");
+        // Даже пустой проход (например, все продукты отключены) завершает
+        // суточную задачу. Отметка не зависит от наличия изменений в hosts.
+        let result = refresh().await.and_then(|()| {
+            atomic_write(
+                &self.state,
+                format!("{}\n{}\n", clock.day, clock.epoch).as_bytes(),
+            )
+        });
+        match result {
             Ok(()) => {
                 write_attempt(
                     &self.attempt,
@@ -1434,9 +1749,7 @@ impl MetaDnsScheduler {
                 )?;
                 append_log(
                     &self.log,
-                    &format!(
-                        "DNS Instagram/WhatsApp обновлён; следующий запуск после {run_at} завтра"
-                    ),
+                    &format!("DNS Meta проверен; следующий запуск после {run_at} завтра"),
                 );
             }
             Err(error) => {
@@ -2219,10 +2532,11 @@ esac
         ndm.records.insert(("instagram.com".into(), old_owned));
         ndm.records.insert(("instagram.com".into(), old_user));
         std::fs::write(&paths.manifest, format!("instagram.com {old_owned}\n")).unwrap();
-        let network = FakeNetwork::with_answers(BTreeMap::from([answer(
+        let mut network = FakeNetwork::with_answers(BTreeMap::from([answer(
             "instagram.com",
             &["157.240.9.180"],
         )]));
+        network.rejected.insert(("instagram.com".into(), old_owned));
         let mut manager = manager(network, ndm, paths.clone());
 
         manager.refresh().await.unwrap();
@@ -2259,7 +2573,7 @@ esac
     }
 
     #[tokio::test]
-    async fn failed_add_keeps_previous_working_pins_and_does_not_retire_them() {
+    async fn failed_add_keeps_previous_pin_even_when_its_fresh_probe_failed() {
         let paths = paths("add-failure");
         let old_edge = "157.240.9.170".parse().unwrap();
         let new_edge = "157.240.9.180".parse().unwrap();
@@ -2269,10 +2583,11 @@ esac
         };
         ndm.records.insert(("instagram.com".into(), old_edge));
         std::fs::write(&paths.manifest, format!("instagram.com {old_edge}\n")).unwrap();
-        let network = FakeNetwork::with_answers(BTreeMap::from([answer(
+        let mut network = FakeNetwork::with_answers(BTreeMap::from([answer(
             "instagram.com",
             &["157.240.9.180"],
         )]));
+        network.rejected.insert(("instagram.com".into(), old_edge));
         let mut manager = manager(network, ndm, paths.clone());
 
         assert!(manager.refresh().await.is_err());
@@ -2293,11 +2608,18 @@ esac
                 .unwrap()
                 .contains(&old_edge.to_string())
         );
+        assert!(
+            manager
+                .ndm
+                .mutations
+                .iter()
+                .all(|operation| !operation.starts_with("remove "))
+        );
         let _ = std::fs::remove_dir_all(paths.r2o_dir);
     }
 
     #[tokio::test]
-    async fn unavailable_relay_removes_dead_pins_only_when_another_owned_pin_is_alive() {
+    async fn resolver_outage_keeps_inconclusive_pins_when_another_owned_pin_is_alive() {
         let paths = paths("heal");
         let dead = "157.240.9.170".parse().unwrap();
         let alive = "57.144.245.32".parse().unwrap();
@@ -2315,9 +2637,9 @@ esac
         network.verified.insert(("web.whatsapp.com".into(), alive));
         let mut manager = manager(network, ndm, paths.clone());
 
-        assert!(manager.refresh().await.is_err());
+        manager.refresh().await.unwrap();
         assert!(
-            !manager
+            manager
                 .ndm
                 .records
                 .contains(&("instagram.com".into(), dead))
@@ -2330,10 +2652,235 @@ esac
         );
         assert_eq!(
             std::fs::read_to_string(&paths.manifest).unwrap(),
-            format!("web.whatsapp.com {alive}\n")
+            format!("instagram.com {dead}\nweb.whatsapp.com {alive}\n")
         );
-        assert_eq!(manager.ndm.saves, 1);
+        assert_eq!(manager.ndm.saves, 0);
+        assert!(manager.ndm.mutations.is_empty());
         let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
+    #[tokio::test]
+    async fn every_resolver_can_fail_and_family_fallback_still_requires_exact_tls() {
+        let paths = paths("offline-family-fallback");
+        let edge: IpAddr = "57.144.245.32".parse().unwrap();
+        let mut network = FakeNetwork::with_answers(BTreeMap::new());
+        *network.answers.lock().unwrap() = Err("all resolvers unavailable".into());
+        network.default_verified = false;
+        network.verified.extend([
+            ("web.whatsapp.com".into(), edge),
+            ("static.whatsapp.net".into(), edge),
+        ]);
+        let mut ndm = FakeNdm::default();
+        ndm.records.insert(("web.whatsapp.com".into(), edge));
+        std::fs::write(&paths.manifest, format!("web.whatsapp.com {edge}\n")).unwrap();
+        let mut manager = manager(network, ndm, paths.clone());
+
+        manager.refresh().await.unwrap();
+
+        assert_eq!(
+            manager.ndm.records,
+            BTreeSet::from([
+                ("web.whatsapp.com".into(), edge),
+                ("static.whatsapp.net".into(), edge),
+            ])
+        );
+        let probes = manager.network.probes.lock().unwrap();
+        assert!(probes.contains(&("static.whatsapp.net".into(), edge)));
+        assert!(
+            !probes
+                .iter()
+                .any(|(host, _)| meta_family(host) != Some("whatsapp"))
+        );
+        assert!(
+            manager
+                .ndm
+                .mutations
+                .iter()
+                .all(|operation| operation.starts_with("add "))
+        );
+        let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
+    #[tokio::test]
+    async fn failed_checks_without_replacement_keep_all_owned_pins() {
+        let paths = paths("offline-no-replacement");
+        let edge: IpAddr = "157.240.9.170".parse().unwrap();
+        let mut network = FakeNetwork::with_answers(BTreeMap::new());
+        *network.answers.lock().unwrap() = Err("all resolvers unavailable".into());
+        network.default_verified = false;
+        let mut ndm = FakeNdm::default();
+        ndm.records.insert(("instagram.com".into(), edge));
+        let manifest = format!("instagram.com {edge}\n");
+        std::fs::write(&paths.manifest, &manifest).unwrap();
+        let mut manager = manager(network, ndm, paths.clone());
+
+        assert!(manager.refresh().await.is_err());
+
+        assert_eq!(
+            manager.ndm.records,
+            BTreeSet::from([("instagram.com".into(), edge)])
+        );
+        assert!(manager.ndm.mutations.is_empty());
+        assert_eq!(std::fs::read_to_string(&paths.manifest).unwrap(), manifest);
+        assert!(!paths.success_mark.exists());
+        let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
+    #[test]
+    fn partial_publication_only_replaces_the_verified_hostname_and_ip_family() {
+        let old_v4 = "157.240.9.170".parse().unwrap();
+        let new_v4 = "157.240.9.180".parse().unwrap();
+        let v6 = "2a03:2880:f001:face::2".parse().unwrap();
+        let whatsapp = "57.144.245.32".parse().unwrap();
+        let prior = vec![
+            ("instagram.com".into(), old_v4),
+            ("instagram.com".into(), v6),
+            ("web.whatsapp.com".into(), whatsapp),
+        ];
+        let published = openwrt_pins(
+            &prior,
+            &BTreeMap::from([("instagram.com".into(), vec![new_v4])]),
+        );
+        assert_eq!(
+            published,
+            BTreeSet::from([
+                ("instagram.com".into(), new_v4.to_string()),
+                ("instagram.com".into(), v6.to_string()),
+                ("web.whatsapp.com".into(), whatsapp.to_string()),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_deadline_stops_pending_probes_and_never_removes_pins() {
+        struct StalledNetwork(AtomicUsize);
+        impl MetaNetwork for StalledNetwork {
+            fn resolve<'a>(&'a self) -> NetFuture<'a, Result<DnsAnswers, String>> {
+                Box::pin(std::future::pending())
+            }
+            fn verify<'a>(&'a self, _: &'a str, _: IpAddr) -> NetFuture<'a, bool> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Box::pin(std::future::pending())
+            }
+        }
+        let paths = paths("bounded-refresh");
+        let edge: IpAddr = "157.240.9.170".parse().unwrap();
+        let manifest = format!("instagram.com {edge}\n");
+        std::fs::write(&paths.manifest, &manifest).unwrap();
+        let mut ndm = FakeNdm::default();
+        ndm.records.insert(("instagram.com".into(), edge));
+        let mut manager =
+            MetaDnsManager::new(StalledNetwork(AtomicUsize::new(0)), ndm, paths.clone());
+        manager.deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+        let result = tokio::time::timeout(Duration::from_secs(1), manager.refresh()).await;
+        assert!(result.unwrap().is_err());
+        assert_eq!(manager.network.0.load(Ordering::Relaxed), 1);
+        assert!(manager.ndm.mutations.is_empty());
+        assert_eq!(std::fs::read_to_string(&paths.manifest).unwrap(), manifest);
+        let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
+    #[tokio::test]
+    async fn verified_persistent_candidates_restore_missing_pins_without_dns() {
+        let paths = paths("restore-saved-addresses");
+        let state = paths.r2o_dir.join("state");
+        let host = "web.whatsapp.com";
+        let edge: IpAddr = "57.144.245.32".parse().unwrap();
+        let unverified: IpAddr = "57.144.245.33".parse().unwrap();
+        let mut knowledge = Knowledge::default();
+        knowledge.add_host(host, "bootstrap", 0);
+        knowledge.hosts.get_mut(host).unwrap().addresses = vec![
+            Address {
+                ip: edge,
+                asn: Some(32934),
+                resolver: "old resolver".into(),
+                checked_at: 50,
+                verified_at: 50,
+                result: "TLS подтверждён".into(),
+                pinned: true,
+            },
+            Address {
+                ip: unverified,
+                asn: Some(32934),
+                resolver: "old resolver".into(),
+                checked_at: 50,
+                verified_at: 0,
+                result: "TLS: тайм-аут".into(),
+                pinned: false,
+            },
+        ];
+        knowledge.persist(&state).unwrap();
+        let mut network = DirectMetaNetwork::new(None);
+        network.hosts = vec![host.into()];
+        network.prefixes = parse_meta_ranges("57.144.0.0/14").unwrap();
+        network.seed_knowledge(&Knowledge::load(&state));
+        assert_eq!(network.saved[host], [edge]);
+        // Stub the exact-host verifier's successful result for this refresh.
+        network
+            .checks
+            .lock()
+            .unwrap()
+            .insert((host.into(), edge), Ok(Some(200)));
+        let mut manager = MetaDnsManager::new(network, FakeNdm::default(), paths.clone());
+        assert!(!paths.manifest.exists());
+
+        manager.refresh().await.unwrap();
+
+        assert_eq!(manager.ndm.records, BTreeSet::from([(host.into(), edge)]));
+        assert!(manager.network.local_dns.lock().unwrap().is_empty());
+        assert_eq!(
+            manager.network.candidates.lock().unwrap()[&(host.into(), edge)],
+            "сохранённый адрес"
+        );
+        assert_eq!(
+            read_manifest(&paths.manifest).unwrap(),
+            [(host.into(), edge)]
+        );
+        let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
+    #[test]
+    fn persistent_candidates_are_bounded_per_ip_family() {
+        let host = "web.whatsapp.com";
+        let mut knowledge = Knowledge::default();
+        knowledge.add_host(host, "bootstrap", 0);
+        for index in 1..=20 {
+            let ip: IpAddr = format!("157.240.0.{index}").parse().unwrap();
+            knowledge
+                .hosts
+                .get_mut(host)
+                .unwrap()
+                .addresses
+                .push(Address {
+                    ip,
+                    asn: Some(32934),
+                    resolver: String::new(),
+                    checked_at: index,
+                    verified_at: index,
+                    result: String::new(),
+                    pinned: false,
+                });
+        }
+        let mut network = DirectMetaNetwork::new(None);
+        network.hosts = vec![host.into()];
+        network.seed_knowledge(&knowledge);
+        assert_eq!(network.saved[host].len(), MAX_PROBE_CANDIDATES);
+        assert_eq!(
+            network.saved[host][0],
+            "157.240.0.20".parse::<IpAddr>().unwrap()
+        );
+        assert!(!network.saved[host].contains(&"157.240.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn resolver_cli_can_collect_candidates_without_a_prefix_database() {
+        let mut network = DirectMetaNetwork::new(None);
+        let candidate = "157.240.9.174".parse().unwrap();
+        assert!(network.accepts_resolver_candidate(candidate));
+        assert!(!network.accepts_resolver_candidate("127.0.0.1".parse().unwrap()));
+        network.prefixes = parse_meta_ranges("157.240.0.0/16").unwrap();
+        assert!(network.accepts_resolver_candidate(candidate));
+        assert!(!network.accepts_resolver_candidate("8.8.8.8".parse().unwrap()));
     }
 
     #[tokio::test]
@@ -2505,6 +3052,8 @@ esac
             host.into(),
             vec![outside, wrong_tls, edge],
         )]));
+        network.default_verified = false;
+        network.verified.insert((host.into(), edge));
         network.rejected.insert((host.into(), wrong_tls));
         let mut manager = manager(network, FakeNdm::default(), paths.clone());
         manager.refresh().await.unwrap();
@@ -2551,6 +3100,36 @@ esac
         std::fs::remove_dir_all(paths.r2o_dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn skipped_replacement_never_retires_an_old_owned_pin() {
+        let paths = paths("skipped-replacement");
+        let host = "www.facebook.com";
+        let old: IpAddr = "157.240.9.170".parse().unwrap();
+        let user: IpAddr = "203.0.113.5".parse().unwrap();
+        let records = BTreeSet::from([(host.into(), old), (host.into(), user)]);
+        let ndm = FakeNdm {
+            records: records.clone(),
+            exclusive_hostname: true,
+            ..FakeNdm::default()
+        };
+        let mut network =
+            FakeNetwork::with_answers(BTreeMap::from([answer(host, &["157.240.9.180"])]));
+        network.default_verified = false;
+        network
+            .verified
+            .insert((host.into(), "157.240.9.180".parse().unwrap()));
+        let manifest = format!("{host} {old}\n");
+        std::fs::write(&paths.manifest, &manifest).unwrap();
+        let mut manager = manager(network, ndm, paths.clone());
+
+        manager.refresh().await.unwrap();
+
+        assert_eq!(manager.ndm.records, records);
+        assert_eq!(std::fs::read_to_string(&paths.manifest).unwrap(), manifest);
+        assert!(manager.ndm.mutations.is_empty());
+        let _ = std::fs::remove_dir_all(paths.r2o_dir);
+    }
+
     #[test]
     fn persistent_disable_marker_survives_reload_and_lock_is_exclusive() {
         let paths = paths("disabled");
@@ -2568,6 +3147,284 @@ esac
         assert!(!protection_enabled(&state));
         std::fs::remove_file(state.join("meta-protection.disabled")).unwrap();
         assert!(protection_enabled(&state));
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
+    }
+
+    #[test]
+    fn resumed_publication_reconciles_pin_status_and_only_clears_its_pending_error() {
+        let paths = paths("scheduler-pin-status");
+        let state = paths.r2o_dir.join("state");
+        let host = "instagram.com";
+        let old: IpAddr = "157.240.1.1".parse().unwrap();
+        let new: IpAddr = "157.240.1.2".parse().unwrap();
+        let mut knowledge = Knowledge::default();
+        knowledge.add_host(host, "bootstrap", 0);
+        knowledge.hosts.get_mut(host).unwrap().addresses = [old, new]
+            .into_iter()
+            .map(|ip| Address {
+                ip,
+                asn: Some(32934),
+                resolver: "saved".into(),
+                checked_at: 100,
+                verified_at: 100,
+                result: "TLS подтверждён".into(),
+                pinned: ip == old,
+            })
+            .collect();
+        knowledge.error = Some(format!("{PENDING_APPLY_ERROR}ubus unavailable"));
+        knowledge.persist(&state).unwrap();
+
+        reconcile_pin_status(&state, &[(host.into(), new)]).unwrap();
+        let mut knowledge = Knowledge::load(&state);
+        assert_eq!(knowledge.error, None);
+        assert!(!knowledge.hosts[host].addresses[0].pinned);
+        assert!(knowledge.hosts[host].addresses[1].pinned);
+        assert_eq!(knowledge.hosts[host].addresses[0].verified_at, 100);
+
+        knowledge.error = Some("TLS verification failed".into());
+        knowledge.persist(&state).unwrap();
+        reconcile_pin_status(&state, &[]).unwrap();
+        let knowledge = Knowledge::load(&state);
+        assert_eq!(knowledge.error.as_deref(), Some("TLS verification failed"));
+        assert!(
+            knowledge.hosts[host]
+                .addresses
+                .iter()
+                .all(|address| !address.pinned)
+        );
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
+    }
+
+    fn test_scheduler(paths: &MetaDnsPaths) -> MetaDnsScheduler {
+        let scheduler = MetaDnsScheduler {
+            state: paths.success_mark.clone(),
+            attempt: paths.r2o_dir.join("attempt"),
+            offset: paths.r2o_dir.join("offset"),
+            log: paths.log.clone(),
+            interval: Duration::from_secs(60),
+            retry_after: 1800,
+            explicit_run_at: None,
+        };
+        scheduler.store_offset(60).unwrap();
+        scheduler
+    }
+
+    #[tokio::test]
+    async fn default_scheduler_runs_once_then_waits_for_the_next_local_slot() {
+        let paths = paths("scheduler-default-daily");
+        let mut scheduler = test_scheduler(&paths);
+        let runs = std::cell::Cell::new(0);
+        let refresh = || async {
+            runs.set(runs.get() + 1);
+            Ok(())
+        };
+        let first = Clock {
+            day: "2026-11-28".into(),
+            hhmm: "1200".into(),
+            epoch: 100_000,
+        };
+        // Initial use, including a successful batch without any changed pins.
+        scheduler
+            .tick_with_refresh(first.clone(), false, refresh)
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 1);
+        assert_eq!(
+            read_success_day(&scheduler.state).as_deref(),
+            Some("2026-11-28")
+        );
+
+        // Restarting the scheduler does not discard the daily success marker.
+        let mut scheduler = test_scheduler(&paths);
+        scheduler
+            .tick_with_refresh(
+                Clock {
+                    epoch: first.epoch + 60,
+                    ..first.clone()
+                },
+                false,
+                refresh,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 1);
+        let tomorrow = Clock {
+            day: "2026-11-29".into(),
+            hhmm: "0159".into(),
+            epoch: first.epoch + 50_340,
+        };
+        scheduler
+            .tick_with_refresh(tomorrow.clone(), false, refresh)
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 1);
+        scheduler
+            .tick_with_refresh(
+                Clock {
+                    hhmm: "0200".into(),
+                    epoch: tomorrow.epoch + 60,
+                    ..tomorrow
+                },
+                false,
+                refresh,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 2);
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
+    }
+
+    #[test]
+    fn all_products_disabled_do_not_request_empty_runtime_restore_every_tick() {
+        let paths = paths("scheduler-empty-restore");
+        let state = paths.r2o_dir.join("state");
+        assert!(should_restore_hosts(true, &state));
+        assert!(!should_restore_hosts(false, &state));
+        for product in r2k_core::meta::PRODUCTS {
+            atomic_write(
+                &r2k_core::meta::product_marker(&state, product).unwrap(),
+                b"0\n",
+            )
+            .unwrap();
+        }
+        assert!(!should_restore_hosts(true, &state));
+        std::fs::remove_file(r2k_core::meta::product_marker(&state, "instagram").unwrap()).unwrap();
+        assert!(should_restore_hosts(true, &state));
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_runtime_hosts_can_be_restored_after_success_today() {
+        let paths = paths("scheduler-restore");
+        let mut scheduler = test_scheduler(&paths);
+        std::fs::write(&scheduler.state, "2026-11-28\n").unwrap();
+        let clock = Clock {
+            day: "2026-11-28".into(),
+            hhmm: "1200".into(),
+            epoch: 100_000,
+        };
+        let runs = std::cell::Cell::new(0);
+        let refresh = || async {
+            runs.set(runs.get() + 1);
+            Ok(())
+        };
+        scheduler
+            .tick_with_refresh(clock.clone(), false, refresh)
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 0);
+        scheduler
+            .tick_with_refresh(clock, true, refresh)
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 1);
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn meta_backoff_survives_midnight_and_missing_runtime_hosts() {
+        let paths = paths("scheduler-cross-midnight");
+        let mut scheduler = test_scheduler(&paths);
+        std::fs::write(&scheduler.state, "2026-11-26\n").unwrap();
+        let clock = Clock {
+            day: "2026-11-28".into(),
+            hhmm: "2359".into(),
+            epoch: 200_000,
+        };
+        write_attempt(
+            &scheduler.attempt,
+            &Attempt {
+                last_epoch: clock.epoch - 86_400,
+                last_day: Some("2026-11-27".into()),
+                failures: 6,
+            },
+        )
+        .unwrap();
+        scheduler
+            .tick_with_refresh(clock.clone(), false, || async {
+                Err("network unavailable".into())
+            })
+            .await
+            .unwrap();
+        assert_eq!(read_attempt(&scheduler.attempt).failures, 7);
+        let tomorrow = Clock {
+            day: "2026-11-29".into(),
+            hhmm: "0200".into(),
+            epoch: clock.epoch + 7260,
+        };
+        let runs = std::cell::Cell::new(0);
+        let refresh = || async {
+            runs.set(runs.get() + 1);
+            Ok(())
+        };
+        scheduler
+            .tick_with_refresh(tomorrow.clone(), false, refresh)
+            .await
+            .unwrap();
+        scheduler
+            .tick_with_refresh(tomorrow.clone(), true, refresh)
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 0);
+        scheduler
+            .tick_with_refresh(
+                Clock {
+                    hhmm: "2359".into(),
+                    epoch: clock.epoch + 86_400,
+                    ..tomorrow
+                },
+                true,
+                refresh,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 1);
+        assert_eq!(read_attempt(&scheduler.attempt).failures, 0);
+        std::fs::remove_dir_all(paths.r2o_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn meta_backoff_rebases_once_when_router_clock_moves_backwards() {
+        let paths = paths("scheduler-clock-rollback");
+        let mut scheduler = test_scheduler(&paths);
+        let clock = Clock {
+            day: "2026-11-28".into(),
+            hhmm: "1200".into(),
+            epoch: 100_000,
+        };
+        write_attempt(
+            &scheduler.attempt,
+            &Attempt {
+                last_epoch: clock.epoch + 86_400,
+                last_day: Some("2026-11-29".into()),
+                failures: 1,
+            },
+        )
+        .unwrap();
+        let runs = std::cell::Cell::new(0);
+        let refresh = || async {
+            runs.set(runs.get() + 1);
+            Ok(())
+        };
+        scheduler
+            .tick_with_refresh(clock.clone(), true, refresh)
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 0);
+        assert_eq!(read_attempt(&scheduler.attempt).last_epoch, clock.epoch);
+        scheduler
+            .tick_with_refresh(
+                Clock {
+                    hhmm: "1230".into(),
+                    epoch: clock.epoch + 1800,
+                    ..clock
+                },
+                true,
+                refresh,
+            )
+            .await
+            .unwrap();
+        assert_eq!(runs.get(), 1);
         std::fs::remove_dir_all(paths.r2o_dir).unwrap();
     }
 
