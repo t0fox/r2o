@@ -1472,7 +1472,12 @@ fn command_fds_cloexec() -> std::io::Result<()> {
     // Keep Rust's exec-status pipe open until exec succeeds. The old-kernel
     // path also uses only syscalls and stack storage in the forked child.
     let result = unsafe {
-        libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, libc::CLOSE_RANGE_CLOEXEC)
+        libc::syscall(
+            libc::SYS_close_range,
+            3_u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
     };
     if result == 0 {
         Ok(())
@@ -4304,7 +4309,9 @@ mod tests {
         let mut command = Command::new("sh");
         command.args(["-c", &marker]);
         unsafe { command.pre_exec(command_fds_cloexec_from_proc) };
-        let status = command.status().expect("command with old kernel FD handling");
+        let status = command
+            .status()
+            .expect("command with old kernel FD handling");
         assert!(
             !status.success(),
             "old kernel path inherited fd {inherited}: {status:?}"
