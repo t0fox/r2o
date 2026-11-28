@@ -31306,6 +31306,7 @@ impl ControlClient {
                 self.remember_applied_event(event);
             }
         }
+        let mut poll_ready_socket = timeout.is_zero();
         loop {
             let queued = self.pending_events.len();
             for _ in 0..queued {
@@ -31325,12 +31326,13 @@ impl ControlClient {
                 }
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
+            if remaining.is_zero() && !std::mem::take(&mut poll_ready_socket) {
                 return Ok(events);
             }
             let wait = remaining.min(std::time::Duration::from_millis(100));
             let frame = match self.input.read(&mut self.socket, wait)? {
                 ControlRead::Frame(frame) => frame,
+                ControlRead::Pending if timeout.is_zero() => return Ok(events),
                 ControlRead::Pending => continue,
                 ControlRead::Closed => {
                     return Err("соединение с датапатом закрыто во время проверки APPLIED".into());
