@@ -1408,6 +1408,79 @@ fn emit_plan_packets(
     Ok(())
 }
 
+fn command_fds_cloexec_from_proc() -> std::io::Result<()> {
+    use std::io::Error;
+
+    let directory = unsafe {
+        libc::open(
+            c"/proc/self/fd".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if directory < 0 {
+        return Err(Error::last_os_error());
+    }
+    let result = (|| {
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = unsafe {
+                libc::syscall(
+                    libc::SYS_getdents64,
+                    directory,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                )
+            };
+            if count == 0 {
+                return Ok(());
+            }
+            if count < 0 {
+                let error = Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            let mut entries = &buffer[..count as usize];
+            // linux_dirent64: ino (8), off (8), reclen (2), type (1), name.
+            while entries.len() >= 20 {
+                let length = u16::from_ne_bytes([entries[16], entries[17]]) as usize;
+                if !(20..=entries.len()).contains(&length) {
+                    break;
+                }
+                let name = entries[19..length].split(|&byte| byte == 0).next();
+                let fd = name
+                    .and_then(|name| std::str::from_utf8(name).ok())
+                    .and_then(|name| name.parse::<libc::c_int>().ok());
+                if let Some(fd) = fd.filter(|&fd| fd >= 3)
+                    && unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+                {
+                    return Err(Error::last_os_error());
+                }
+                entries = &entries[length..];
+            }
+            if !entries.is_empty() {
+                return Err(Error::from_raw_os_error(libc::EIO));
+            }
+        }
+    })();
+    unsafe { libc::close(directory) };
+    result
+}
+
+fn command_fds_cloexec() -> std::io::Result<()> {
+    // Keep Rust's exec-status pipe open until exec succeeds. The old-kernel
+    // path also uses only syscalls and stack storage in the forked child.
+    let result = unsafe {
+        libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, libc::CLOSE_RANGE_CLOEXEC)
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        command_fds_cloexec_from_proc()
+    }
+}
+
 fn run_command(program: &str, args: &[String]) -> Result<std::process::ExitStatus, String> {
     use std::os::unix::process::CommandExt;
 
@@ -1420,21 +1493,8 @@ fn run_command(program: &str, args: &[String]) -> Result<std::process::ExitStatu
     // C `raw_rule_system`: своя группа процессов, чтобы по сроку убить и sh,
     // и iptables/nft, а не оставить потомка ждать замок xtables.
     command.process_group(0);
-    // C `raw_rule_system` закрывает fd 3+ перед execl: правило не должно
-    // унаследовать NFQUEUE, сокеты зондов и журналы d2kc.
     unsafe {
-        command.pre_exec(|| {
-            let max = libc::sysconf(libc::_SC_OPEN_MAX);
-            let max = if max < 0 || max > 65_536 {
-                65_536
-            } else {
-                max as libc::c_int
-            };
-            for fd in 3..max {
-                libc::close(fd);
-            }
-            Ok(())
-        });
+        command.pre_exec(command_fds_cloexec);
     }
     let mut child = command
         .spawn()
@@ -4225,28 +4285,31 @@ mod tests {
 
     #[test]
     fn run_command_closes_inherited_fds_like_c() {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::net::UnixStream;
+        use super::command_fds_cloexec_from_proc;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
 
-        let (left, right) = UnixStream::pair().expect("unix stream pair");
-        let inherited = left.as_raw_fd();
+        let file = std::fs::File::open("/dev/null").expect("file to inherit");
+        let inherited = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 64) };
+        assert!(inherited >= 64);
+        let _descriptor = unsafe { OwnedFd::from_raw_fd(inherited) };
         let marker = format!("test -e /dev/fd/{inherited}");
-        let status = run_command("sh", &["-c".to_owned(), marker]).expect("command");
+        let status = run_command("sh", &["-c".to_owned(), marker.clone()]).expect("command");
         assert!(
             !status.success(),
             "raw rule child inherited fd {inherited}: {status:?}"
         );
 
-        let visible = right.as_raw_fd();
-        let status = run_command(
-            "sh",
-            &["-c".to_owned(), format!("test -e /dev/fd/{visible}")],
-        )
-        .expect("command");
+        let mut command = Command::new("sh");
+        command.args(["-c", &marker]);
+        unsafe { command.pre_exec(command_fds_cloexec_from_proc) };
+        let status = command.status().expect("command with old kernel FD handling");
         assert!(
             !status.success(),
-            "raw rule child inherited peer fd {visible}: {status:?}"
+            "old kernel path inherited fd {inherited}: {status:?}"
         );
+        assert!(run_command("/no-such-r2o-firewall-command", &[]).is_err());
     }
 
     #[test]
