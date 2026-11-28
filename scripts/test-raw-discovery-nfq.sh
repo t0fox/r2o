@@ -89,8 +89,10 @@ for ns in "$ROUTER" "$CLIENT" "$SERVER"; do
     ip netns add "$ns"
     ip -n "$ns" link set lo up
 done
-ip link add r0c netns "$ROUTER" type veth peer name c0 netns "$CLIENT"
-ip link add r0s netns "$ROUTER" type veth peer name s0 netns "$SERVER"
+ip link add r0c address 02:00:00:00:00:01 netns "$ROUTER" type veth \
+    peer name c0 address 02:00:00:00:00:02 netns "$CLIENT"
+ip link add r0s address 02:00:00:00:00:03 netns "$ROUTER" type veth \
+    peer name s0 address 02:00:00:00:00:04 netns "$SERVER"
 add_address() {
     if [ "$AF" = 6 ]; then
         ip -n "$1" -6 addr add "$2/$PREFIX" dev "$3" nodad
@@ -110,6 +112,14 @@ ip -n "$CLIENT" "-$AF" route add default via "$ROUTER_CLIENT" dev c0
 ip -n "$SERVER" "-$AF" route add default via "$ROUTER_SERVER" dev s0
 ip -n "$ROUTER" "-$AF" route add default via "$SERVER_IP" dev r0s
 ip netns exec "$ROUTER" sysctl -qw "$FORWARDING=1"
+if [ "$AF" = 6 ]; then
+    # Resolve the fixed peers before TCP starts so IPv6 neighbor discovery
+    # does not inflate the handshake RTT and the ensuing retransmission timers.
+    ip -n "$CLIENT" -6 neigh add "$ROUTER_CLIENT" lladdr 02:00:00:00:00:01 nud permanent dev c0
+    ip -n "$ROUTER" -6 neigh add "$CLIENT_IP" lladdr 02:00:00:00:00:02 nud permanent dev r0c
+    ip -n "$SERVER" -6 neigh add "$ROUTER_SERVER" lladdr 02:00:00:00:00:03 nud permanent dev s0
+    ip -n "$ROUTER" -6 neigh add "$SERVER_IP" lladdr 02:00:00:00:00:04 nud permanent dev r0s
+fi
 # Keep a real propagation interval between the send and the peer's ACK.
 ip netns exec "$ROUTER" tc qdisc add dev r0s root netem delay 20ms
 
