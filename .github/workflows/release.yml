@@ -11,6 +11,10 @@ on:
         description: Проверить без публикации. На других ветках проверяются только заметки.
         type: boolean
         default: false
+      changelog_base:
+        description: Предыдущий тег для повторной проверки описания. Только с validate_only.
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -64,9 +68,10 @@ jobs:
     name: Заметки выпуска
     if: github.ref == 'refs/heads/main' || inputs.validate_only
     runs-on: ubuntu-24.04
-    timeout-minutes: 22
+    timeout-minutes: 30
     outputs:
       notes: ${{ steps.notes.outputs.notes }}
+      body: ${{ steps.notes.outputs.body }}
       base_tag: ${{ steps.base.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,16 +84,25 @@ jobs:
         if: inputs.notes == ''
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE_TAG_OVERRIDE: ${{ inputs.changelog_base }}
+          VALIDATE_ONLY: ${{ inputs.validate_only }}
         run: |
           set -euo pipefail
-          tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          if [ -n "$BASE_TAG_OVERRIDE" ]; then
+            test "$VALIDATE_ONLY" = true
+            tag="$BASE_TAG_OVERRIDE"
+          else
+            tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          fi
           git check-ref-format "refs/tags/$tag"
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
           key=$(python3 -B scripts/release-changelog.py cache-key)
           printf 'cache_key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+          model_needed=$(python3 -B scripts/release-changelog.py needs-model "$tag" "$GITHUB_SHA")
+          printf 'needs_model=%s\n' "$model_needed" >> "$GITHUB_OUTPUT"
       - name: Восстановить кеш модели
         id: model-cache
-        if: inputs.notes == ''
+        if: inputs.notes == '' && steps.base.outputs.needs_model == 'true'
         continue-on-error: true
         timeout-minutes: 3
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -103,7 +117,16 @@ jobs:
           MANUAL_NOTES: ${{ inputs.notes }}
           BASE_TAG: ${{ steps.base.outputs.tag }}
           MODEL_PATH: ${{ runner.temp }}/r2o-changelog/Qwen3-4B-Q4_K_M.gguf
+          CHANGELOG_ARTIFACT_DIR: ${{ runner.temp }}/r2o-release-notes
         run: python3 -B scripts/release-changelog.py generate "$BASE_TAG" "$GITHUB_SHA" "$MODEL_PATH"
+      - name: Сохранить описание и проверку покрытия изменений
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/r2o-release-notes/*
+          if-no-files-found: error
+          retention-days: 7
       - name: Сохранить проверенную модель в кеш
         if: steps.notes.outputs.model_verified == 'true' && steps.model-cache.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -203,6 +226,7 @@ jobs:
       SHA: ${{ needs.plan.outputs.sha }}
       R2O_R2_PUBLIC_URL: ${{ vars.R2O_R2_PUBLIC_URL }}
       NOTES: ${{ needs.changelog.outputs.notes }}
+      RELEASE_BODY: ${{ needs.changelog.outputs.body }}
       CHANGELOG_BASE_TAG: ${{ needs.changelog.outputs.base_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -274,12 +298,12 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/release"
           notes="$RUNNER_TEMP/notes.txt"
-          printf '%s\n' "$NOTES" > "$notes"
+          printf '%s\n' "$RELEASE_BODY" > "$notes"
           # gh release create/edit шлёт устаревшие preview Accept-заголовки и
           # получает 403 от GitHub API. Создаём и публикуем выпуск напрямую.
           response=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
             -f tag_name="$RELEASE_ID" -F draft=true -F prerelease=false \
-            -f target_commitish="$SHA" -f name="$TITLE" -f body="$NOTES")
+            -f target_commitish="$SHA" -f name="$TITLE" -f body="$RELEASE_BODY")
           release_id=$(printf '%s' "$response" | python3 -c \
             'import json,sys; print(json.load(sys.stdin)["id"])')
           for asset in "$out"/r2o-*.tar.gz "$out"/latest.json* "$out"/catalog.json*; do

@@ -44,7 +44,10 @@ jobs:
       - name: Проверить передачу артефактов из CI в Release
         run: python3 -B scripts/test-ci-release-artifacts.py
       - name: Проверить формирование заметок выпуска
-        run: python3 -B scripts/test-release-changelog.py
+        run: |
+          python3 -B scripts/release_notes.py check
+          python3 -B scripts/test-release-notes.py
+          python3 -B scripts/test-release-changelog.py
       - name: Проверить закреплённые суммы установщика
         run: python3 -B scripts/bootstrap-pins.py
       - name: Проверить форматирование Rust

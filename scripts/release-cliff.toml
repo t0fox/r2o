@@ -1,7 +1,7 @@
 [changelog]
 body = """
-{% for group, _ in commits | group_by(attribute="group") -%}
-- {{ group }}.
+{% for commit in commits -%}
+- {{ commit.message | split(pat="\n") | first }} ({{ commit.id | truncate(length=7, end="") }}).
 {% endfor %}
 """
 trim = true
@@ -13,9 +13,4 @@ filter_unconventional = false
 tag_pattern = "^$"
 commit_parsers = [
   { message = '^(?:(?:ci|docs|style|test)(?:\(|!:|:)|[a-z]+\((?:release|changelog|ci|build)\)!?:)', skip = true },
-  { message = '^[a-z]+\((telegram|tg)[^)]*\)', group = "Обновили прокси Telegram" },
-  { message = '^[a-z]+\((panel|ui)[^)]*\)', group = "Доработали веб-панель" },
-  { message = '^[a-z]+\((discovery|keenetic|openwrt|firewall|route|datapath|controller|dns|nfqueue|meta)[^)]*\)', group = "Доработали сетевые функции и совместимость с роутерами" },
-  { message = '^[a-z]+\((installer|install|update)[^)]*\)', group = "Обновили установку и обновление R2O" },
-  { message = ".*", group = "Внесли прочие изменения в проект" },
 ]
