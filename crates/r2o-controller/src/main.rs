@@ -10477,6 +10477,26 @@ struct R2oCandidateTrialEvidence {
 }
 
 #[cfg(unix)]
+fn r2o_own_plan_failed(
+    result: &Result<r2o_controller::fetch::FetchResult, String>,
+    evidence: R2oCandidateTrialEvidence,
+) -> bool {
+    // A trial with APPLIED is still only an attempt if the peer's result is
+    // ambiguous. Only a complete, authenticated rejection persists as failed.
+    evidence.transport_established
+        && !evidence.local_limit
+        && !evidence.layered_rx_handled
+        && evidence.dropped_before == evidence.dropped_after
+        && result.as_ref().is_ok_and(|fetch| {
+            fetch.tls.is_some()
+                && fetch.peer_name_ok == Some(true)
+                && fetch.complete
+                && !fetch.cloudflare_challenge
+                && fetch.http_outcome == r2o_controller::fetch::R2oFetchHttpOutcome::Blocked
+        })
+}
+
+#[cfg(unix)]
 fn r2o_props_send_command(
     commands: &dyn HttpSearchCommandSink,
     command: Vec<u8>,
@@ -18245,19 +18265,27 @@ impl DiscoveryWorker {
             } else {
                 None
             };
-            let mut first_own_batch = candidate_catalog
-                .as_deref()
-                .filter(|_| geneva_midpoint.is_none())
-                .map(|catalog| {
-                    r2o_controller::discovery::own_first_plans(
-                        catalog,
-                        &target,
-                        ech_replay,
-                        own_bound_plan_id.as_deref(),
-                        &own_tried,
-                        &own_seen,
-                    )
-                });
+            let prepare_own_batches = |tried: &[u64], seen: &[u64]| {
+                candidate_catalog.as_deref().map_or_else(
+                    r2o_controller::discovery::OwnFirstBatches::default,
+                    |catalog| {
+                        r2o_controller::discovery::OwnFirstBatches::new(
+                            catalog,
+                            &target,
+                            ech_replay,
+                            own_bound_plan_id.as_deref(),
+                            tried,
+                            seen,
+                        )
+                    },
+                )
+            };
+            let mut own_batches = geneva_midpoint
+                .is_none()
+                .then(|| prepare_own_batches(&own_tried, &own_seen));
+            let mut first_own_batch = own_batches
+                .as_mut()
+                .map(r2o_controller::discovery::OwnFirstBatches::next_batch);
             if let Some(catalog) = candidate_catalog.as_deref()
                 && (geneva_midpoint.is_some()
                     || first_own_batch
@@ -18334,14 +18362,9 @@ impl DiscoveryWorker {
                             break;
                         }
                         let batch = first_own_batch.take().unwrap_or_else(|| {
-                            r2o_controller::discovery::own_first_plans(
-                                catalog,
-                                &target,
-                                ech_replay,
-                                own_bound_plan_id.as_deref(),
-                                &own_tried,
-                                &own_seen,
-                            )
+                            own_batches
+                                .get_or_insert_with(|| prepare_own_batches(&own_tried, &own_seen))
+                                .next_batch()
                         });
                         if batch.is_empty() {
                             break;
@@ -18355,9 +18378,8 @@ impl DiscoveryWorker {
                                 .entry(task_key.clone())
                                 .or_default();
                             for candidate in &batch {
-                                let key = r2o_controller::r2o_fallback::tried_key(&candidate.text);
-                                own_seen.push(key);
-                                R2oOwnPlanHistory::remember(&mut history.offered, key);
+                                own_seen.push(candidate.key);
+                                R2oOwnPlanHistory::remember(&mut history.offered, candidate.key);
                             }
                         }
                         for candidate in batch {
@@ -18367,7 +18389,8 @@ impl DiscoveryWorker {
                             {
                                 break;
                             }
-                            let label = r2o_discovery_plan_candidate(&candidate.text);
+                            let text = candidate.plan.text.as_str();
+                            let label = r2o_discovery_plan_candidate(text);
                             runner_searches
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -18382,7 +18405,7 @@ impl DiscoveryWorker {
                             r2o_discovery_record_plan_progress(
                                 &runner_searches,
                                 &target,
-                                &candidate.text,
+                                text,
                                 "свой план каталога",
                                 "проверяется на пробном потоке",
                                 "ожидается точное подтверждение datapath",
@@ -18408,7 +18431,7 @@ impl DiscoveryWorker {
                             let (result, applied, attempts, candidate_evidence) =
                                 r2o_run_discovery_candidate_trial_with_progress(
                                     &target,
-                                    &candidate.text,
+                                    text,
                                     &probe_path,
                                     mark,
                                     confirm_mark,
@@ -18442,8 +18465,7 @@ impl DiscoveryWorker {
                                 );
                             own_probes = own_probes.saturating_add(attempts);
                             if applied && attempts > 0 {
-                                own_tried
-                                    .push(r2o_controller::r2o_fallback::tried_key(&candidate.text));
+                                own_tried.push(candidate.key);
                             }
                             let candidate_verified = !candidate_evidence.layered_rx_handled
                                 && r2o_family_recovery_decision(&result, applied)
@@ -18451,10 +18473,9 @@ impl DiscoveryWorker {
                             if !candidate_verified
                                 && applied
                                 && attempts > 0
-                                && !candidate_evidence.local_limit
-                                && candidate_evidence.dropped_before
-                                    == candidate_evidence.dropped_after
                                 && !cancel.load(Ordering::Relaxed)
+                                && r2o_discovery_trial_time_available(runner_started.elapsed())
+                                && r2o_own_plan_failed(&result, candidate_evidence)
                             {
                                 let mut searches = runner_searches
                                     .lock()
@@ -18463,10 +18484,7 @@ impl DiscoveryWorker {
                                     .own_plan_history
                                     .entry(task_key.clone())
                                     .or_default();
-                                R2oOwnPlanHistory::remember(
-                                    &mut history.failed,
-                                    r2o_controller::r2o_fallback::tried_key(&candidate.text),
-                                );
+                                R2oOwnPlanHistory::remember(&mut history.failed, candidate.key);
                             }
                             let cloudflare_challenge = result
                                 .as_ref()
@@ -18505,7 +18523,7 @@ impl DiscoveryWorker {
                             r2o_discovery_record_plan_progress(
                                 &runner_searches,
                                 &target,
-                                &candidate.text,
+                                text,
                                 "свой план каталога",
                                 &application,
                                 &last_result,
@@ -18515,7 +18533,7 @@ impl DiscoveryWorker {
                                 // PASSED-бюджета не подтверждается; поиск
                                 // продолжается следующими кандидатами.
                                 if own_bound_plan_id.as_deref()
-                                    == r2o_catalog_plan_id(&candidate.text).as_deref()
+                                    == r2o_catalog_plan_id(text).as_deref()
                                     && r2o_budget_mark_from_result(&result)
                                         != R2O_D2K_CAT_BUDGET_PASSED
                                 {
@@ -18546,7 +18564,7 @@ impl DiscoveryWorker {
                                     );
                                 return DiscoveryOutcome {
                                     target: target.clone(),
-                                    plan_text: Some(candidate.text),
+                                    plan_text: Some(text.to_owned()),
                                     detail: format!(
                                         "база не проходит: 0 из {} — подтверждён свой план коробки {}",
                                         seed_whole.as_ref().map_or(0, |seed| seed.repeats),
@@ -18567,7 +18585,7 @@ impl DiscoveryWorker {
                                         .map(|config| config.origin_name.clone())
                                         .filter(|name| name != &target.host),
                                     volume_fingerprint: None,
-                                    volume_box_id: Some(candidate.box_id),
+                                    volume_box_id: Some(candidate.box_id.to_owned()),
                                     retry_after: None,
                                 };
                             }
@@ -18664,6 +18682,8 @@ group_block_proven: false,
                     target.host
                 );
             }
+            drop(own_batches);
+            drop(first_own_batch);
             drop(progress);
             let progress_searches = Arc::clone(&runner_searches);
             let progress_target = target.clone();
@@ -55592,6 +55612,37 @@ mod tests {
             budget_note: None,
             r2o_resources: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn own_plan_history_requires_a_definitive_peer_result() {
+        use r2o_controller::fetch::R2oFetchHttpOutcome;
+
+        let evidence = super::R2oCandidateTrialEvidence {
+            transport_established: true,
+            ..Default::default()
+        };
+        let mut fetch = r2o_test_fetch_result();
+        fetch.peer_name_ok = Some(true);
+        fetch.http_outcome = R2oFetchHttpOutcome::Blocked;
+        assert!(super::r2o_own_plan_failed(&Ok(fetch.clone()), evidence));
+        assert!(!super::r2o_own_plan_failed(
+            &Err("неполная проба".into()),
+            evidence
+        ));
+        assert!(!super::r2o_own_plan_failed(
+            &Ok(fetch.clone()),
+            super::R2oCandidateTrialEvidence {
+                dropped_after: 1,
+                ..evidence
+            }
+        ));
+        fetch.complete = false;
+        assert!(!super::r2o_own_plan_failed(&Ok(fetch.clone()), evidence));
+        fetch.complete = true;
+        fetch.cloudflare_challenge = true;
+        assert!(!super::r2o_own_plan_failed(&Ok(fetch), evidence));
     }
 
     #[cfg(unix)]

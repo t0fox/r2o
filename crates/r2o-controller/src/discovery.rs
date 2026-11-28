@@ -6,8 +6,9 @@ use r2k_core::control::{
     r2k_link_shape_tcp_profile,
 };
 use r2k_core::plan::Plan as RuntimePlan;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::num::NonZeroU64;
 
 use crate::catalog::{
     Binding, BoxRecord, Catalog, DomainObservation, DomainState, Fingerprint, GroupKey, Plan,
@@ -163,9 +164,9 @@ fn newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
     })
 }
 
-struct RankedOwnPlan<'a> {
-    box_id: &'a str,
-    plan: &'a Plan,
+struct RankedOwnPlan {
+    index: OwnPlanIndex,
+    plan_successes: i32,
     lead: bool,
     tier: u8,
     compatible_successes: i32,
@@ -231,7 +232,10 @@ pub fn own_first_result_action(
     }
 }
 
-/// Select the next donor-sized batch of already-confirmed plans.
+const OWN_PLAN_BATCH: usize = 8;
+const OWN_PLAN_SEEN_CAP: usize = 256;
+
+/// Select one batch for callers that do not continue on the same snapshot.
 pub fn own_first_plans(
     catalog: &Catalog,
     target: &DiscoveryTarget,
@@ -240,9 +244,37 @@ pub fn own_first_plans(
     tried: &[u64],
     seen: &[u64],
 ) -> Vec<OwnPlanCandidate> {
-    const BATCH: usize = 8;
-    const SEEN_CAP: usize = 256;
+    let limit = OWN_PLAN_BATCH.min(OWN_PLAN_SEEN_CAP.saturating_sub(seen.len()));
+    if limit == 0 {
+        return Vec::new();
+    }
+    let ranked = rank_own_plans(catalog, target, ech_replay, bound_plan_id);
+    let mut programs = previously_offered_programs(
+        ranked
+            .iter()
+            .map(|entry| entry.index.get(catalog).1.text.as_str()),
+        tried,
+        seen,
+    );
+    ranked
+        .into_iter()
+        .map(|entry| entry.index.get(catalog))
+        .filter(|(_, plan)| programs.insert(&plan.text))
+        .take(limit)
+        .map(|(box_id, plan)| OwnPlanCandidate {
+            box_id: box_id.to_owned(),
+            plan_id: plan.id.clone(),
+            text: plan.text.clone(),
+        })
+        .collect()
+}
 
+fn rank_own_plans(
+    catalog: &Catalog,
+    target: &DiscoveryTarget,
+    ech_replay: bool,
+    bound_plan_id: Option<&str>,
+) -> Vec<RankedOwnPlan> {
     if is_ech_shape(target.shape) && !ech_replay
         || !matches!(
             target.shape,
@@ -253,7 +285,6 @@ pub fn own_first_plans(
                 | SHAPE_ECH_TS
                 | SHAPE_QUIC
         )
-        || seen.len() >= SEEN_CAP
     {
         return Vec::new();
     }
@@ -279,7 +310,7 @@ pub fn own_first_plans(
     let target_transport = if quic { 17 } else { 6 };
     let mut ranked = Vec::<RankedOwnPlan>::new();
     let mut ranked_by_text = HashMap::new();
-    for box_record in &catalog.boxes {
+    for (box_index, box_record) in catalog.boxes.iter().enumerate() {
         let mut best_by_plan = HashMap::<&str, (u8, i32, i64)>::new();
         for binding in &box_record.bindings {
             let transport = if binding.transport == 0 {
@@ -331,7 +362,7 @@ pub fn own_first_plans(
                 best.2 = best.2.max(binding.confirmed);
             }
         }
-        for plan in &box_record.plans {
+        for (plan_index, plan) in box_record.plans.iter().enumerate() {
             if !plan.enabled || plan.proto != plan_proto || plan.text.len() >= 4096 {
                 continue;
             }
@@ -340,8 +371,8 @@ pub fn own_first_plans(
                 continue;
             };
             let candidate = RankedOwnPlan {
-                box_id: &box_record.id,
-                plan,
+                index: OwnPlanIndex::new(box_index, plan_index),
+                plan_successes: plan.successes,
                 lead: bound_plan_id == Some(plan.id.as_str()),
                 tier,
                 compatible_successes,
@@ -359,21 +390,220 @@ pub fn own_first_plans(
         }
     }
     ranked.sort_by(|left, right| left.rank().cmp(&right.rank()));
-    let mut programs = previously_offered_programs(
-        ranked.iter().map(|entry| entry.plan.text.as_str()),
-        tried,
-        seen,
-    );
     ranked
-        .into_iter()
-        .filter(|entry| programs.insert(&entry.plan.text))
-        .take(BATCH.min(SEEN_CAP - seen.len()))
-        .map(|entry| OwnPlanCandidate {
-            box_id: entry.box_id.to_owned(),
-            plan_id: entry.plan.id.clone(),
-            text: entry.plan.text.clone(),
-        })
-        .collect()
+}
+
+pub struct OwnFirstPlan<'a> {
+    pub box_id: &'a str,
+    pub plan: &'a Plan,
+    pub key: u64,
+}
+
+/// Two 32-bit indexes, leaving zero available as an empty slot. Counts in
+/// a catalog bounded by the on-disk size limit fit in either index.
+#[derive(Clone, Copy)]
+struct OwnPlanIndex(NonZeroU64);
+
+impl OwnPlanIndex {
+    fn new(box_index: usize, plan_index: usize) -> Self {
+        let box_index = u32::try_from(box_index + 1).expect("catalog box index");
+        let plan_index = u32::try_from(plan_index).expect("catalog plan index");
+        Self(NonZeroU64::new(u64::from(box_index) << 32 | u64::from(plan_index)).unwrap())
+    }
+
+    fn get(self, catalog: &Catalog) -> (&str, &Plan) {
+        let index = self.0.get();
+        let record = &catalog.boxes[(index >> 32) as usize - 1];
+        (&record.id, &record.plans[index as u32 as usize])
+    }
+}
+
+/// Selection for one search on an immutable snapshot. Each offered batch is
+/// consumed in full, including when its network trials stop early.
+#[derive(Default)]
+pub struct OwnFirstBatches<'a> {
+    ready: VecDeque<OwnFirstPlan<'a>>,
+    pending: Option<PendingOwnPlans<'a>>,
+}
+
+struct PendingOwnPlans<'a> {
+    catalog: &'a Catalog,
+    ranked: Vec<Option<OwnPlanIndex>>,
+    programs: HashSet<Vec<u8>>,
+    aliases: Option<HashMap<u64, Vec<usize>>>,
+    previous_keys: [u64; OWN_PLAN_BATCH],
+    next: usize,
+    limit: usize,
+}
+
+impl<'a> OwnFirstBatches<'a> {
+    // Bound the state held across network trials. An oversized selection
+    // resolves the remaining batches to references without truncating the rank.
+    const DEFERRED_BYTES: usize = 128 * 1024;
+
+    pub fn new(
+        catalog: &'a Catalog,
+        target: &DiscoveryTarget,
+        ech_replay: bool,
+        bound_plan_id: Option<&str>,
+        tried: &[u64],
+        seen: &[u64],
+    ) -> Self {
+        let limit = OWN_PLAN_SEEN_CAP.saturating_sub(seen.len());
+        if limit == 0 {
+            return Self::default();
+        }
+        let mut ranked = rank_own_plans(catalog, target, ech_replay, bound_plan_id);
+        let mut programs = HashSet::new();
+        if !tried.is_empty() || !seen.is_empty() {
+            ranked.retain(|entry| {
+                let text = &entry.index.get(catalog).1.text;
+                let key = crate::r2o_fallback::tried_key(text);
+                if tried.contains(&key) || seen.contains(&key) {
+                    programs.extend(fixed_split_program(text));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        let mut ranked = ranked.into_iter();
+        let ready: VecDeque<_> = ranked
+            .by_ref()
+            .map(|entry| entry.index.get(catalog))
+            .filter(|(_, plan)| {
+                fixed_split_program(&plan.text).is_none_or(|wire| programs.insert(wire))
+            })
+            .take(OWN_PLAN_BATCH.min(limit))
+            .map(|(box_id, plan)| OwnFirstPlan {
+                box_id,
+                plan,
+                key: crate::r2o_fallback::tried_key(&plan.text),
+            })
+            .collect();
+        let limit = limit - ready.len();
+        let mut batches = Self {
+            ready,
+            pending: None,
+        };
+        if limit > 0 && ranked.len() > 0 {
+            let mut remaining = Vec::with_capacity(ranked.len());
+            remaining.extend(ranked.map(|entry| Some(entry.index)));
+            batches.defer(PendingOwnPlans {
+                catalog,
+                ranked: remaining,
+                programs,
+                aliases: None,
+                previous_keys: std::array::from_fn(|index| batches.ready[index].key),
+                next: 0,
+                limit,
+            });
+        }
+        batches
+    }
+
+    pub fn next_batch(&mut self) -> Vec<OwnFirstPlan<'a>> {
+        if self.ready.is_empty()
+            && let Some(mut pending) = self.pending.take()
+        {
+            pending.take_batch(&mut self.ready);
+            self.defer(pending);
+        }
+        let len = OWN_PLAN_BATCH.min(self.ready.len());
+        self.ready.drain(..len).collect()
+    }
+
+    fn defer(&mut self, mut pending: PendingOwnPlans<'a>) {
+        if pending.limit == 0 {
+            return;
+        }
+        if pending.deferred_bytes() <= Self::DEFERRED_BYTES {
+            self.pending = Some(pending);
+        } else {
+            while pending.limit > 0 {
+                pending.take_batch(&mut self.ready);
+            }
+        }
+    }
+}
+
+impl<'a> PendingOwnPlans<'a> {
+    fn deferred_bytes(&self) -> usize {
+        self.ranked.capacity() * std::mem::size_of::<Option<OwnPlanIndex>>()
+            + self.programs.capacity() * (std::mem::size_of::<Vec<u8>>() + 8)
+            + self.programs.iter().map(Vec::capacity).sum::<usize>()
+            + self.aliases.as_ref().map_or(0, |aliases| {
+                aliases.capacity() * (std::mem::size_of::<(u64, Vec<usize>)>() + 8)
+                    + aliases
+                        .values()
+                        .map(|indices| indices.capacity() * std::mem::size_of::<usize>())
+                        .sum::<usize>()
+            })
+    }
+
+    fn seed_plan(&mut self, index: usize) {
+        if let Some(entry) = self.ranked[index].take() {
+            let (_, plan) = entry.get(self.catalog);
+            self.programs.extend(fixed_split_program(&plan.text));
+        }
+    }
+
+    fn index_aliases(&mut self) -> HashMap<u64, Vec<usize>> {
+        // tried_key normalizes the header (and can collide). At each batch
+        // boundary the old selector seeded all remaining plans with those keys,
+        // including aliases below as-yet unoffered plans. Singletons can match
+        // the first batch, but cannot match a different plan in the tail.
+        let mut positions = HashMap::with_capacity(self.ranked.len());
+        let mut aliases: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (index, &entry) in self.ranked.iter().enumerate() {
+            let (_, plan) = entry.expect("unvisited plan").get(self.catalog);
+            let key = crate::r2o_fallback::tried_key(&plan.text);
+            if let Some(previous) = positions.insert(key, index) {
+                aliases.entry(key).or_default().push(previous);
+            }
+        }
+        for (key, indices) in &mut aliases {
+            indices.push(positions.remove(key).expect("ranked alias"));
+        }
+        for key in self.previous_keys {
+            if let Some(index) = positions.remove(&key) {
+                self.seed_plan(index);
+            }
+        }
+        aliases
+    }
+
+    fn take_batch(&mut self, ready: &mut VecDeque<OwnFirstPlan<'a>>) {
+        let mut aliases = self.aliases.take().unwrap_or_else(|| self.index_aliases());
+        for key in self.previous_keys {
+            if let Some(indices) = aliases.remove(&key) {
+                indices.into_iter().for_each(|index| self.seed_plan(index));
+            }
+        }
+        self.aliases = Some(aliases);
+
+        let mut offered = 0;
+        let batch_size = OWN_PLAN_BATCH.min(self.limit);
+        while offered < batch_size && self.next < self.ranked.len() {
+            let entry = self.ranked[self.next]
+                .take()
+                .map(|entry| entry.get(self.catalog));
+            self.next += 1;
+            if let Some((box_id, plan)) = entry
+                && fixed_split_program(&plan.text).is_none_or(|wire| self.programs.insert(wire))
+            {
+                let key = crate::r2o_fallback::tried_key(&plan.text);
+                ready.push_back(OwnFirstPlan { box_id, plan, key });
+                self.previous_keys[offered] = key;
+                offered += 1;
+            }
+        }
+        self.limit = if self.next == self.ranked.len() {
+            0
+        } else {
+            self.limit - offered
+        };
+    }
 }
 
 fn previously_offered_programs<'a>(
@@ -566,20 +796,20 @@ pub(crate) fn r2o_box_id_for(
     box_id
 }
 
-impl RankedOwnPlan<'_> {
+impl RankedOwnPlan {
     fn rank(&self) -> impl Ord + use<> {
         use std::cmp::Reverse;
         (
             Reverse(self.lead),
             self.tier,
             Reverse(self.compatible_successes),
-            Reverse(self.plan.successes),
+            Reverse(self.plan_successes),
             Reverse(self.confirmed),
         )
     }
 }
 
-fn own_rank_before(left: &RankedOwnPlan<'_>, right: &RankedOwnPlan<'_>) -> bool {
+fn own_rank_before(left: &RankedOwnPlan, right: &RankedOwnPlan) -> bool {
     left.rank() < right.rank()
 }
 
@@ -2420,6 +2650,8 @@ pub(crate) fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::catalog::{Binding, BoxRecord, Catalog, Plan};
+
     use super::{
         DiscoveryTarget, OwnFirstResultAction, SHAPE_QUIC, exact_key, has_covering_binding,
         known_plans, newer_name_binding, own_first_bound_plan_id, own_first_plans,
@@ -2974,6 +3206,252 @@ mod tests {
         assert!(
             seen.len() >= 8,
             "the fixture exercises multiple donor batches"
+        );
+    }
+
+    fn save_own_candidate(record: &mut BoxRecord, text: String, successes: i32) -> &mut Binding {
+        let id = format!("plan-{}", record.plans.len());
+        record.plans.push(Plan {
+            id: id.clone(),
+            proto: "tls".into(),
+            text,
+            enabled: true,
+            ..Plan::default()
+        });
+        record.bindings.push(Binding {
+            kind: "name".into(),
+            target: "saved.example".into(),
+            plan_id: id,
+            level: 3,
+            enabled: true,
+            transport: 6,
+            family: 4,
+            shape: SHAPE_MODERN,
+            successes,
+            ..Binding::default()
+        });
+        record.bindings.last_mut().unwrap()
+    }
+
+    // Repeated calls to the original one-batch selector are the oracle. Tried
+    // can grow only from the current batch, which is already recorded as seen.
+    fn compare_own_batches(
+        catalog: &Catalog,
+        target: &DiscoveryTarget,
+        ech_replay: bool,
+        bound: Option<&str>,
+        initial_tried: &[u64],
+        initial_seen: &[u64],
+        stop_after: Option<usize>,
+    ) -> Vec<String> {
+        use crate::r2o_fallback::tried_key;
+
+        let mut prepared = super::OwnFirstBatches::new(
+            catalog,
+            target,
+            ech_replay,
+            bound,
+            initial_tried,
+            initial_seen,
+        );
+        let mut seen = initial_seen.to_vec();
+        let mut tried = initial_tried.to_vec();
+        let mut reference_seen = seen.clone();
+        let mut reference_tried = tried.clone();
+        let mut offered = Vec::new();
+        let mut attempts = 0;
+        loop {
+            let expected = own_first_plans(
+                catalog,
+                target,
+                ech_replay,
+                bound,
+                &reference_tried,
+                &reference_seen,
+            );
+            let actual = prepared.next_batch();
+            assert_eq!(actual.len(), expected.len());
+            if expected.is_empty() {
+                break;
+            }
+            for (actual, expected) in actual.iter().zip(&expected) {
+                assert_eq!(actual.box_id, expected.box_id);
+                assert_eq!(actual.plan.id, expected.plan_id);
+                assert_eq!(actual.plan.text, expected.text);
+                assert_eq!(actual.key, tried_key(&expected.text));
+                seen.push(actual.key);
+                reference_seen.push(tried_key(&expected.text));
+                offered.push(actual.plan.text.clone());
+            }
+            assert_eq!(seen, reference_seen);
+            for (actual, expected) in actual.iter().zip(&expected) {
+                if stop_after == Some(attempts) {
+                    // An early success or cancellation leaves the suffix of
+                    // an offered batch in seen, without adding it to tried.
+                    assert!(attempts < offered.len());
+                    assert_eq!(tried, reference_tried);
+                    return offered;
+                }
+                if attempts % 3 == 1 {
+                    tried.push(actual.key);
+                    reference_tried.push(tried_key(&expected.text));
+                }
+                attempts += 1;
+            }
+            assert_eq!(tried, reference_tried);
+        }
+        offered
+    }
+
+    #[test]
+    fn prepared_own_batches_match_history_aliases_and_batch_boundaries() {
+        use crate::r2o_fallback::tried_key;
+        let target = DiscoveryTarget {
+            tcp_profile: 0,
+            host: "new.example".into(),
+            endpoint: "192.0.2.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut record = BoxRecord::default();
+        for index in 0..520 {
+            save_own_candidate(
+                &mut record,
+                format!("# alias {index}\nr2o-plan 1 10\nproto tcp tls\nsplit payload_start 3\n"),
+                4000 - index,
+            );
+        }
+        for (rank, comment, header) in [
+            (3200, "r2o-plan", "d2k-plan"),
+            (3199, "d2k-plan", "r2o-plan"),
+            (8, "d2k-plan", "d2k-plan"),
+        ] {
+            save_own_candidate(
+                &mut record,
+                format!("# {comment}\n{header} 1 10\nproto tcp tls\nsplit payload_start bogus\n"),
+                rank,
+            );
+        }
+        for index in 4..300 {
+            save_own_candidate(
+                &mut record,
+                format!("r2o-plan 1 10\nproto tcp tls\nsplit payload_start {index}\n"),
+                3000 - index,
+            );
+        }
+        let duplicate = record.plans[0].text.clone();
+        save_own_candidate(&mut record, duplicate, 1);
+        let mut catalog = Catalog {
+            boxes: vec![record],
+            ..Catalog::default()
+        };
+        let offered = compare_own_batches(&catalog, &target, false, None, &[], &[], None);
+        assert_eq!(offered.len(), 256);
+        assert_eq!(
+            offered.iter().filter(|text| text.contains("bogus")).count(),
+            2
+        );
+        assert_eq!(
+            offered
+                .iter()
+                .filter(|text| text.starts_with("# alias"))
+                .count(),
+            1
+        );
+
+        let seen = [tried_key(&offered[0])];
+        let tried = [tried_key(&offered[1])];
+        let lead = catalog.boxes[0].plans[540].id.clone();
+        let next = compare_own_batches(
+            &catalog,
+            &target,
+            false,
+            Some(&lead),
+            &tried,
+            &seen,
+            Some(2),
+        );
+        assert_eq!(next.len(), 8);
+        assert_eq!(next[0], catalog.boxes[0].plans[540].text);
+        assert!(
+            !next
+                .iter()
+                .any(|text| text.contains("bogus") || text.starts_with("# alias"))
+        );
+
+        let short_history = vec![0; 254];
+        assert_eq!(
+            compare_own_batches(&catalog, &target, false, None, &[], &short_history, None).len(),
+            2
+        );
+        // Exercise the eager path above the retained rank budget.
+        let overflow = super::OwnFirstBatches::DEFERRED_BYTES
+            / std::mem::size_of::<Option<super::OwnPlanIndex>>();
+        for index in 0..overflow {
+            save_own_candidate(&mut catalog.boxes[0], format!("# other {index}\n"), 1);
+        }
+        assert_eq!(
+            compare_own_batches(&catalog, &target, false, None, &[], &[], None),
+            offered
+        );
+    }
+
+    #[test]
+    fn prepared_own_batches_are_scoped_to_snapshot_profile_and_binding_kind() {
+        use r2k_core::control::{SHAPE_ECH_TCP, SHAPE_QUIC};
+        let mut target = DiscoveryTarget {
+            tcp_profile: 2,
+            host: "new.example".into(),
+            endpoint: "192.0.2.10:443".into(),
+            family: 6,
+            shape: SHAPE_ECH_TCP,
+        };
+        let mut record = BoxRecord::default();
+        for index in 0..52 {
+            let binding = save_own_candidate(&mut record, format!("# plan {index}\n"), 100 + index);
+            binding.shape = SHAPE_ECH_TCP;
+            binding.family = 6;
+            binding.tcp_profile = 2;
+            binding.ech_origin = "witness.example".into();
+            match index % 6 {
+                0 => binding.kind = "tcpord".into(),
+                1 => binding.kind = "raw".into(),
+                2 => binding.family = 4,
+                3 => binding.tcp_profile = 1,
+                4 => binding.recheck_since = Some(0),
+                _ => {}
+            }
+        }
+        let mut catalog = Catalog {
+            boxes: vec![record],
+            ..Catalog::default()
+        };
+        let offered = compare_own_batches(&catalog, &target, true, None, &[], &[], None);
+        assert_eq!(offered.len(), 8);
+        assert!(offered.iter().all(|text| {
+            text.trim()
+                .rsplit_once(' ')
+                .unwrap()
+                .1
+                .parse::<usize>()
+                .unwrap()
+                % 6
+                == 5
+        }));
+        assert!(compare_own_batches(&catalog, &target, false, None, &[], &[], None).is_empty());
+
+        let snapshot = catalog.clone();
+        target.shape = SHAPE_QUIC;
+        let binding = save_own_candidate(&mut catalog.boxes[0], "# fresh QUIC\n".into(), 1000);
+        binding.shape = SHAPE_QUIC;
+        binding.transport = 17;
+        binding.family = 6;
+        binding.verified_by = 1;
+        catalog.boxes[0].plans.last_mut().unwrap().proto = "quic".into();
+        assert!(compare_own_batches(&snapshot, &target, false, None, &[], &[], None).is_empty());
+        assert_eq!(
+            compare_own_batches(&catalog, &target, false, None, &[], &[], None),
+            ["# fresh QUIC\n"]
         );
     }
 
@@ -5030,10 +5508,10 @@ mod tests {
     fn own_rank_before_matches_c() {
         use crate::catalog::Plan;
 
-        fn ranked(plan: &Plan, lead: bool, tier: u8, confirmed: i64) -> super::RankedOwnPlan<'_> {
+        fn ranked(plan: &Plan, lead: bool, tier: u8, confirmed: i64) -> super::RankedOwnPlan {
             super::RankedOwnPlan {
-                box_id: "box",
-                plan,
+                index: super::OwnPlanIndex::new(0, 0),
+                plan_successes: plan.successes,
                 lead,
                 tier,
                 compatible_successes: 0,

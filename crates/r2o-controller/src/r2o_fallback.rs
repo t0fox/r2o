@@ -50,11 +50,19 @@ impl ProbeCounts {
 
 /// C `fnv1a` (`core/sched.c:3574-3581`): полный FNV-1a 64 по тексту плана.
 pub fn tried_key(text: &str) -> u64 {
-    let text = text.replacen("r2o-plan", "d2k-plan", 1);
-    text.bytes()
-        .fold(1_469_598_103_934_665_603_u64, |hash, byte| {
+    fn hash_bytes(hash: u64, bytes: &[u8]) -> u64 {
+        bytes.iter().fold(hash, |hash, &byte| {
             (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
         })
+    }
+
+    let offset = 1_469_598_103_934_665_603;
+    if let Some((prefix, suffix)) = text.split_once("r2o-plan") {
+        let hash = hash_bytes(offset, prefix.as_bytes());
+        hash_bytes(hash_bytes(hash, b"d2k-plan"), suffix.as_bytes())
+    } else {
+        hash_bytes(offset, text.as_bytes())
+    }
 }
 
 pub struct FallbackQueue {
@@ -428,6 +436,25 @@ pub fn plan_from_arm(a: &Poison, shape: u8, send_cap: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tried_key_matches_first_header_replacement() {
+        for text in [
+            "",
+            "abc",
+            "r2o-plan",
+            "# ё r2o-plan\nr2o-plan 1 10\n",
+            "d2k-plan",
+        ] {
+            let expected = text
+                .replacen("r2o-plan", "d2k-plan", 1)
+                .bytes()
+                .fold(1_469_598_103_934_665_603_u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+                });
+            assert_eq!(super::tried_key(text), expected);
+        }
+    }
+
     #[test]
     fn fnv1a_key_matches_c_full_u64() {
         fn c_fnv1a(text: &str) -> u64 {
