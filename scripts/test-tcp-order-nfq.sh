@@ -60,7 +60,7 @@ table ip r2o_order_test {
     }
 }
 EOF
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=order.example \
+openssl req -config /dev/null -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=order.example \
     -addext 'subjectAltName=DNS:order.example' -keyout "$work/key.pem" -out "$work/cert.pem" \
     >"$work/cert.log" 2>&1
 
