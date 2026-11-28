@@ -58,3 +58,5 @@ pub mod verify;
 pub mod voice_discovery;
 pub mod voice_measure;
 pub mod voice_targets;
+
+pub mod raw_discovery;

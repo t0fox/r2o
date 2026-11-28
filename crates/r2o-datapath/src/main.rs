@@ -1844,6 +1844,14 @@ mod app {
         let mut udp_receive_seq = 0_u64;
         let mut icmp_guard = R2oIcmpGuard::default();
         let mut next_execution_id = 1_u64;
+        let mut opaque_flows = (r2k_core::raw_flow::enabled()
+            && options.control_wire == r2k_core::control::WireProfile::V48
+            && options.mode == RuntimeMode::Apply)
+            .then(|| r2o_datapath::raw_discovery::RawDiscovery::new(name_plans.epoch()))
+            .flatten();
+        if opaque_flows.is_some() {
+            eprintln!("r2o-datapath: RAW включён, TCP — измерение повтора, UDP — наблюдение");
+        }
         let mut next_session_sweep = Instant::now();
         let mut next_stats = options
             .stats_interval
@@ -2184,6 +2192,9 @@ mod app {
                 next_stats = options.stats_interval.map(|interval| now + interval);
             }
             if now >= next_session_sweep {
+                if let Some(opaque) = opaque_flows.as_mut() {
+                    opaque.expire(now);
+                }
                 holding.expire_http_requests(now);
                 let reverse_queue_visible = options.reverse_queue_visible
                     && control.as_ref().is_some_and(ControlServer::is_connected);
@@ -2396,12 +2407,13 @@ mod app {
                 }
             };
             // NFQA_TIMESTAMP относится к skb, поэтому возраст включает участок до NFQUEUE.
-            let received_wall =
-                if received.is_some() && (next_stats.is_some() || nfq_health_enabled) {
-                    SystemTime::now().duration_since(UNIX_EPOCH).ok()
-                } else {
-                    None
-                };
+            let received_wall = if received.is_some()
+                && (next_stats.is_some() || nfq_health_enabled || opaque_flows.is_some())
+            {
+                SystemTime::now().duration_since(UNIX_EPOCH).ok()
+            } else {
+                None
+            };
             let route_ready = r2o_poll_extra_ready(&extra_revents, route_poll_index);
             let control_wake = r2o_poll_extra_ready(&extra_revents, control_listen_index)
                 || r2o_poll_extra_ready(&extra_revents, control_peer_index);
@@ -2553,6 +2565,21 @@ mod app {
                             );
                         }
                         ack
+                    } else if command.kind == r2k_core::raw_flow::COMMAND_RAW_TRIAL {
+                        let trial = r2k_core::raw_flow::Trial::from_frame(&command);
+                        let ok = trial
+                            .zip(opaque_flows.as_mut())
+                            .is_some_and(|(trial, opaque)| {
+                                opaque.arm(trial, Instant::now(), r2o_raw_wall_ns())
+                            });
+                        Ack {
+                            command: command.kind,
+                            ok,
+                            reason: if ok { ACK_OK } else { ACK_BAD_ARGS },
+                            trial_id: trial.map(|trial| trial.token),
+                            area_id: None,
+                            binding_context: None,
+                        }
                     } else {
                         handle_control_command(&mut name_plans, &mut tcp_sessions, &command)
                     };
@@ -2569,6 +2596,9 @@ mod app {
                     journal_seen = 0;
                     journal_peer_connected = false;
                     name_plans.clear_probes();
+                    if let Some(opaque) = opaque_flows.as_mut() {
+                        opaque.disconnect();
+                    }
                     // Keep voice proofs for the bounded retry window after a short IPC reconnect.
                 }
             }
@@ -3066,7 +3096,7 @@ mod app {
                     let mut udp_selected_plan = None;
                     let mut address_stun_replan = false;
                     let mut owned_dns_probe = false;
-                    let decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
+                    let mut decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
                         if packet_mode == RuntimeMode::Apply {
                             if !controller_probe {
                                 scheduled.observe(bytes, now);
@@ -3834,6 +3864,79 @@ mod app {
                         None
                     };
                     let tx_original = synthetic.as_deref().or(original);
+                    let mut opaque_trial = None;
+                    if !controller_probe
+                        && !global_plan_present
+                        && packet_mode == RuntimeMode::Apply
+                        && matches!(decision, PacketDecision::Accept)
+                        && synthetic.is_none()
+                        && let (Some(opaque), Some(peer), Some(bytes)) =
+                            (opaque_flows.as_mut(), control.as_mut(), original_from_queue)
+                        && peer.is_connected()
+                    {
+                        use r2o_datapath::raw_discovery::Observation;
+                        let context = tcp_sessions.raw_context(bytes);
+                        if let Some(udp_context) = udp_sessions.raw_context(bytes)
+                            && let Some((sample, prior_reply)) = opaque.udp(bytes, udp_context, now)
+                        {
+                            let mut body = [0; r2k_core::raw_flow::Sample::WIDTH + 1];
+                            body[..r2k_core::raw_flow::Sample::WIDTH]
+                                .copy_from_slice(&sample.encode());
+                            body[r2k_core::raw_flow::Sample::WIDTH] = u8::from(prior_reply);
+                            peer.send_event(r2k_core::raw_flow::EVENT_RAW_UDP_REPEAT, &body)?;
+                        }
+                        let captured_ns = packet.timestamp_ns.filter(|&timestamp| {
+                            received_wall
+                                .and_then(|received| {
+                                    received.checked_sub(Duration::from_nanos(timestamp))
+                                })
+                                .is_some_and(|age| age < Duration::from_secs(2))
+                        });
+                        match opaque.tcp(bytes, context, now, captured_ns) {
+                            Some(Observation::Measured(sample)) => peer.send_event(
+                                r2k_core::raw_flow::EVENT_RAW_MEASURED,
+                                &sample.encode(),
+                            )?,
+                            Some(Observation::Confirmed(report)) => peer.send_event(
+                                r2k_core::raw_flow::EVENT_RAW_RESULT,
+                                &report.encode(),
+                            )?,
+                            Some(Observation::TimingUnavailable(endpoint)) => {
+                                eprintln!(
+                                    "RAW TCP {endpoint}: inconclusive (просроченная или отсутствующая метка NFQUEUE)"
+                                );
+                            }
+                            Some(Observation::Attempt(trial)) => {
+                                opaque_trial = Some(trial);
+                                let cap = raw
+                                    .as_ref()
+                                    .map_or(0, |raw| raw.tls_route_segment_cap(bytes));
+                                let mut packet = R2oConntrackPacket::new(bytes);
+                                if conntrack_gate.r2o_preflight_packet(
+                                    &mut packet,
+                                    true,
+                                    false,
+                                    true,
+                                ) {
+                                    let candidate = r2o_datapath::engine::decide_raw_tcp_packet(
+                                        trial.plan,
+                                        trial.sample.profile,
+                                        bytes,
+                                        cap,
+                                    );
+                                    decision = guard_packet_decision(
+                                        &mut conntrack_gate,
+                                        &mut packet,
+                                        candidate,
+                                        trial.plan,
+                                        false,
+                                        true,
+                                    );
+                                }
+                            }
+                            None => {}
+                        }
+                    }
                     let tx_sequence = tx_original.and_then(|packet| {
                         r2k_core::packet::PacketView::parse(packet)?
                             .tcp_segment(packet)
@@ -3935,14 +4038,17 @@ mod app {
                         }
                         _ => (0, false),
                     };
-                    let tcp_execution =
+                    let tcp_execution = if opaque_trial.is_none() {
                         tx_original
                             .zip(decision_execution_id)
                             .and_then(|(packet, id)| {
                                 tcp_sessions
                                     .r2o_begin_execution(packet, id, r2o_n_out, r2o_original_taken)
                                     .map(|key| R2oTcpExecution { key, id })
-                            });
+                            })
+                    } else {
+                        None
+                    };
                     let mut applied_candidate = decision_execution_id.and_then(|execution_id| {
                         tx_original.and_then(|bytes| {
                             if let Some(selected) = udp_selected_plan {
@@ -4515,6 +4621,17 @@ mod app {
                             false,
                             false,
                         );
+                    }
+                    if let Some((trial, opaque)) = opaque_trial.zip(opaque_flows.as_mut())
+                        && let Some(report) = opaque.finish(
+                            trial,
+                            decision_execution_id.filter(|_| execution_succeeded),
+                            Instant::now(),
+                            r2o_raw_wall_ns(),
+                        )
+                        && let Some(peer) = control.as_mut()
+                    {
+                        peer.send_event(r2k_core::raw_flow::EVENT_RAW_RESULT, &report.encode())?;
                     }
                     if execution_succeeded && let Some(event) = applied_candidate {
                         if !controller_probe && let Some(packet) = tx_original {
@@ -5302,6 +5419,14 @@ mod app {
 
     fn journal_timestamp(_journal_origin: &Instant) -> u64 {
         r2o_now_ns()
+    }
+
+    fn r2o_raw_wall_ns() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|span| u64::try_from(span.as_nanos()).ok())
+            .unwrap_or(0)
     }
 
     #[cfg(test)]

@@ -30,3 +30,5 @@ pub mod raw;
 pub mod reason_stats;
 pub mod scheduler;
 pub mod session_stats;
+
+pub mod raw_discovery;

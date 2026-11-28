@@ -533,6 +533,7 @@ pub enum R2oWorkerType {
     Verify,
     Voice,
     DnsHealth,
+    Raw,
 }
 
 /// C `worker_type`: тип worker'а для диагностики (`worker_oldest_type`).
@@ -544,6 +545,7 @@ pub const fn r2o_worker_type(worker: R2oWorkerType) -> &'static str {
         R2oWorkerType::Contact => "CONTACT",
         R2oWorkerType::Voice => "VOICE",
         R2oWorkerType::DnsHealth => "DNS_HEALTH",
+        R2oWorkerType::Raw => "RAW",
         R2oWorkerType::Unknown => "UNKNOWN",
     }
 }

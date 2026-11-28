@@ -219,6 +219,9 @@ impl Default for NamePlans {
 }
 
 impl NamePlans {
+    pub fn epoch(&self) -> [u8; 16] {
+        self.epoch
+    }
     pub fn with_capacity(exact_capacity: usize) -> Self {
         let mut epoch = [0; 16];
         if std::fs::File::open("/dev/urandom")
@@ -822,8 +825,17 @@ impl NamePlans {
             if !tls.is_client_hello || tls.extensions_truncated {
                 return None;
             }
-            let plan = self
-                .find_addr(view.dst, shape)
+            let exact = tls
+                .record_end
+                .filter(|&end| control::valid_no_sni_client_hello(&payload[..end]))
+                .and_then(|_| {
+                    self.find_endpoint(view.dst, shape, tcp.destination_port)
+                        .or_else(|| {
+                            self.find_endpoint(view.dst, bridge_shape, tcp.destination_port)
+                        })
+                });
+            let plan = exact
+                .or_else(|| self.find_addr(view.dst, shape))
                 .or_else(|| self.find_addr(view.dst, bridge_shape))
                 .or_else(|| self.find_addr_shape_fits(view.dst, shape));
             if plan.is_none() {
@@ -1605,7 +1617,13 @@ impl NamePlans {
         if dns_endpoint != dns_transport.is_some() {
             return (false, control::ACK_BAD_ARGS);
         }
-        let transport = dns_transport.unwrap_or(17);
+        let transport = dns_transport.unwrap_or_else(|| {
+            if matches!(shape, SHAPE_QUIC | SHAPE_VOICE) {
+                17
+            } else {
+                6
+            }
+        });
         let (dns_query_len, records) = if dns_endpoint {
             let Some(([high, low], rest)) = records.split_first_chunk::<2>() else {
                 return (false, control::ACK_BAD_ARGS);
@@ -3228,6 +3246,7 @@ fn addr_plan_matches_shape(shape: u8, plan: &Plan) -> bool {
         SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
         SHAPE_QUIC => valid_quic_plan(plan),
         SHAPE_VOICE => plan.transport == 17 && plan.proto == PROTO_VOICE,
+        _ if is_tcp_context_shape(shape) => plan.transport == 6 && plan.proto == 1,
         _ => false,
     }
 }
@@ -7795,6 +7814,46 @@ mod tests {
         assert!(hello.sni_range.is_none());
         assert!(!hello.extensions_truncated);
         packet
+    }
+
+    #[test]
+    fn measured_tls_endpoint_is_not_an_address_wide_rule() {
+        use std::net::SocketAddr;
+
+        for server in ["198.51.100.20:8443", "[2001:db8::20]:8443"] {
+            let endpoint: SocketAddr = server.parse().unwrap();
+            let other = SocketAddr::new(endpoint.ip(), 443);
+            let mut plans = NamePlans::default();
+            let set =
+                control::encode_set_endpoint(endpoint, SHAPE_MODERN, &tls_plan_records([3; 16]))
+                    .unwrap();
+            assert!(
+                plans
+                    .handle(&control::read_frame(&mut set.as_slice()).unwrap())
+                    .ok
+            );
+            assert_eq!(
+                plans
+                    .select(&no_sni_tls_packet(endpoint, 40_000))
+                    .map(|p| p.id),
+                Some([3; 16])
+            );
+            assert!(plans.select(&no_sni_tls_packet(other, 40_000)).is_none());
+            let wrong = control::encode_delete_endpoint(other, SHAPE_MODERN).unwrap();
+            assert!(
+                plans
+                    .handle(&control::read_frame(&mut wrong.as_slice()).unwrap())
+                    .ok
+            );
+            assert!(plans.select(&no_sni_tls_packet(endpoint, 40_000)).is_some());
+            let del = control::encode_delete_endpoint(endpoint, SHAPE_MODERN).unwrap();
+            assert!(
+                plans
+                    .handle(&control::read_frame(&mut del.as_slice()).unwrap())
+                    .ok
+            );
+            assert!(plans.select(&no_sni_tls_packet(endpoint, 40_000)).is_none());
+        }
     }
 
     #[test]

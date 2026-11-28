@@ -4316,6 +4316,7 @@ fn r2o_newer_name_binding(
                     .recheck_since
                     .is_none_or(|recheck_since| recheck_since == 0)
                     && other.kind == binding.kind
+                    && other.port == binding.port
                     && r2o_catalog_binding_beats(other, binding)
                     && r2o_catalog_binding_transport(other)
                         == r2o_catalog_binding_transport(binding)
@@ -4400,6 +4401,10 @@ fn catalog_commands_with_send_cap(
                 skipped += 1;
                 continue;
             }
+            // RAW bindings are offered only after a fresh flow measurement.
+            if binding.kind == "raw" {
+                continue;
+            }
             if binding.kind == "addr" {
                 if control::dns_endpoint_transport(binding.shape).is_some()
                     && binding.dns_query_bytes != 0
@@ -4456,14 +4461,12 @@ fn catalog_commands_with_send_cap(
                 };
                 let command = if binding.port == 0 {
                     r2o_catalog_encode_set_addr(address, shape, wire_records)
-                } else if binding.transport == 17 {
+                } else {
                     control::encode_set_endpoint(
                         std::net::SocketAddr::new(address, binding.port),
                         shape,
                         wire_records,
                     )
-                } else {
-                    Err("порт допустим только в адресной UDP-привязке")
                 };
                 let Ok(command) = command else {
                     skipped += 1;
@@ -4831,6 +4834,28 @@ fn r2o_target_delete_command(
         encode_delete_name(&target.host, transport, shape, target.family)
             .map(|command| (command, control::COMMAND_DEL_NAME))
     }
+}
+
+#[cfg(unix)]
+fn r2o_discovery_delete_commands(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    transport: u8,
+    update: &r2o_controller::discovery::DirectClearBindingUpdate,
+) -> Result<Vec<(Vec<u8>, u16)>, &'static str> {
+    let mut commands = update
+        .delete_shapes()
+        .map(|shape| r2o_target_delete_command(target, transport, shape))
+        .collect::<Result<Vec<_>, _>>()?;
+    for shape in update.delete_endpoint_shapes() {
+        let endpoint = target
+            .address_endpoint()
+            .ok_or("не задан endpoint для снятия плана")?;
+        commands.push((
+            control::encode_delete_endpoint(endpoint, shape)?,
+            control::COMMAND_DEL_ENDPOINT,
+        ));
+    }
+    Ok(commands)
 }
 
 #[cfg(unix)]
@@ -24687,6 +24712,9 @@ fn control_command_trial_id(command: &[u8], expected: u16) -> Option<[u8; 16]> {
     if expected == control::COMMAND_DEL_NAME_PROBE {
         return control::name_probe_delete_trial_id(body);
     }
+    if expected == r2k_core::raw_flow::COMMAND_RAW_TRIAL {
+        return r2k_core::raw_flow::Trial::decode(body).map(|trial| trial.token);
+    }
     let trial = match expected {
         control::COMMAND_SET_NAME_BOUND
         | control::COMMAND_SET_NAME_PROBE
@@ -26068,6 +26096,9 @@ impl ControlClient {
             );
         let mut tcp_hello_names = R2oTcpHelloCache::default();
         let mut clean_handshakes = R2oCleanHandshakeCache::default();
+        let mut opaque_trials = (r2k_core::raw_flow::enabled()
+            && r2o_control_wire() == control::WireProfile::V48)
+            .then(r2o_controller::raw_discovery::Trials::default);
         let mut legacy_client_tcp =
             HashMap::<[u8; r2k_core::control::KEY_LEN], (Vec<u8>, std::time::Instant)>::new();
         let mut quic_deny = R2oQuicDenyCache::default();
@@ -26164,6 +26195,9 @@ impl ControlClient {
                     break Ok(());
                 }
                 let now = std::time::Instant::now();
+                if let Some(trials) = opaque_trials.as_mut() {
+                    trials.expire(now);
+                }
                 for (_, trial) in stun_trials.extract_if(|_, trial| now >= trial.expires) {
                     if let Err(error) = self.write_command(&trial.delete()?) {
                         eprintln!(
@@ -29724,6 +29758,127 @@ impl ControlClient {
                         );
                     }
                     std::io::stdout().flush()?;
+                    continue;
+                }
+                if matches!(
+                    frame.kind,
+                    r2k_core::raw_flow::EVENT_RAW_MEASURED
+                        | r2k_core::raw_flow::EVENT_RAW_RESULT
+                        | r2k_core::raw_flow::EVENT_RAW_UDP_REPEAT
+                ) {
+                    use r2k_core::raw_flow::{
+                        COMMAND_RAW_TRIAL, EVENT_RAW_MEASURED, EVENT_RAW_UDP_REPEAT, Report,
+                        Sample, Trial,
+                    };
+                    let (Some(trials), Some((worker, catalog, path, _))) =
+                        (opaque_trials.as_mut(), discovery.as_mut())
+                    else {
+                        continue;
+                    };
+                    let now = std::time::Instant::now();
+                    if frame.kind == EVENT_RAW_UDP_REPEAT {
+                        if let Some((&prior, bytes)) = frame.body.split_last()
+                            && prior <= 1
+                            && let Some(sample) =
+                                Sample::decode(bytes).filter(|sample| sample.key[37] == 17)
+                        {
+                            let result = if prior == 0 {
+                                "reply-unknown"
+                            } else {
+                                "inconclusive (нет связи обратной датаграммы с конкретным запросом)"
+                            };
+                            println!(
+                                "RAW UDP {} measurement={}: {result}",
+                                sample.server(),
+                                sample.measurement
+                            );
+                        }
+                    } else if frame.kind == EVENT_RAW_MEASURED {
+                        let Some(sample) = Sample::decode(&frame.body) else {
+                            continue;
+                        };
+                        if !trials.admits(sample) {
+                            continue;
+                        }
+                        let Some((plan, own)) =
+                            r2o_controller::raw_discovery::candidate(catalog, sample)
+                        else {
+                            continue;
+                        };
+                        let Some(mut permit) = worker.measurement_gate.r2o_try_acquire() else {
+                            println!("RAW {}: inconclusive (Discovery budget)", sample.server());
+                            continue;
+                        };
+                        permit.r2o_set_worker_type(
+                            r2o_controller::r2o_resource_limit::R2oWorkerType::Raw,
+                        );
+                        let trial = Trial {
+                            sample,
+                            token: random_id()?,
+                            plan,
+                        };
+                        let result = self.exchange_command_with_timeout(
+                            &trial.frame()?,
+                            COMMAND_RAW_TRIAL,
+                            std::time::Duration::from_millis(250),
+                        );
+                        match result {
+                            Ok(ack) if ack.ok && ack.trial_id == Some(trial.token) => {
+                                trials.installed(trial, permit, now);
+                                println!(
+                                    "RAW {} measurement={}: installed own={own}",
+                                    sample.server(),
+                                    sample.measurement
+                                );
+                            }
+                            _ => {
+                                println!(
+                                    "RAW {} measurement={}: inconclusive (install refused or timed out)",
+                                    sample.server(),
+                                    sample.measurement
+                                );
+                            }
+                        }
+                    } else if let Some(report) = Report::decode(&frame.body)
+                        && let Some(confirmed) = trials.report(report, now)
+                    {
+                        let sample = confirmed.trial.sample;
+                        let saved = (|| -> Result<(), Box<dyn Error>> {
+                            let (_lock, previous) = locked_catalog_for_persistence(
+                                path,
+                                catalog,
+                                catalog_persistence.as_ref(),
+                            )?;
+                            let wall = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)?
+                                .as_secs() as i64;
+                            let mut updated = previous;
+                            r2o_controller::raw_discovery::save_confirmed(
+                                &mut updated,
+                                confirmed,
+                                wall,
+                            )?;
+                            persist_catalog_update(
+                                &updated,
+                                path,
+                                wall,
+                                catalog_persistence.as_mut(),
+                            )?;
+                            *catalog = updated;
+                            Ok(())
+                        })();
+                        match saved {
+                            Ok(()) => println!(
+                                "RAW {} measurement={} execution={}: transport-ack saved",
+                                sample.server(),
+                                sample.measurement,
+                                confirmed.execution
+                            ),
+                            Err(error) => {
+                                eprintln!("RAW {}: catalog update failed: {error}", sample.server())
+                            }
+                        }
+                    }
                     continue;
                 }
                 if frame.kind == EVENT_R2O_TCP_CLEAN_HANDSHAKE {
@@ -34005,26 +34160,10 @@ impl ControlClient {
         }
         *catalog = updated;
         if result.delete_runtime {
-            let shapes: Vec<u8> = result.delete_shapes().collect();
-            let shapes = if shapes.is_empty() {
-                vec![target.shape]
-            } else {
-                shapes
-            };
-            for shape in shapes {
-                let (command, command_kind) = match r2o_target_delete_command(target, 6, shape) {
-                    Ok(command) => command,
-                    Err(error) => {
-                        eprintln!(
-                            "не удалось собрать команду снятия привязки для {} shape={shape}: {error}",
-                            target.host
-                        );
-                        continue;
-                    }
-                };
+            for (command, command_kind) in r2o_discovery_delete_commands(target, 6, &result)? {
                 if let Err(error) = self.send_command(&command, command_kind) {
                     eprintln!(
-                        "снятие привязки для {} shape={shape} не подтверждено: {error}",
+                        "снятие привязки для {} не подтверждено: {error}",
                         target.host
                     );
                 }
@@ -34153,14 +34292,9 @@ impl ControlClient {
         persist_catalog_update(&updated, catalog_path, now, persistence)?;
         if result.delete_runtime {
             let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
-            let shapes: Vec<u8> = result.delete_shapes().collect();
-            let shapes = if shapes.is_empty() {
-                vec![target.shape]
-            } else {
-                shapes
-            };
-            for shape in shapes {
-                let (command, command_kind) = r2o_target_delete_command(target, transport, shape)?;
+            for (command, command_kind) in
+                r2o_discovery_delete_commands(target, transport, &result)?
+            {
                 if let Err(delete_error) = self.send_command(&command, command_kind) {
                     *catalog = updated;
                     return Err(format!(
@@ -34320,6 +34454,9 @@ impl ControlClient {
                 | EVENT_R2O_TCP_REPEAT
                 | EVENT_R2O_TCP_RST_CUT
                 | EVENT_R2O_TCP_EXCHANGE
+                | r2k_core::raw_flow::EVENT_RAW_MEASURED
+                | r2k_core::raw_flow::EVENT_RAW_RESULT
+                | r2k_core::raw_flow::EVENT_RAW_UDP_REPEAT
                 | EVENT_R2O_VOICE_PROOF
                 | EVENT_R2O_VOICE_RTP_PROOF
                 | EVENT_R2O_VOICE_STUN_PROOF
@@ -47126,6 +47263,24 @@ mod tests {
         catalog.boxes[0].bindings[0].tcp_profile = r2k_core::control::TCP_PROFILE_NO_TS;
         let compiled = catalog_commands(&catalog).unwrap();
         assert_eq!(compiled.commands.len(), 2);
+
+        // Тот же профиль на разных серверных портах тоже независим.
+        catalog.boxes[0].bindings[0].tcp_profile = r2k_core::control::TCP_PROFILE_TS;
+        catalog.boxes[0].bindings[0].port = 443;
+        catalog.boxes[1].bindings[0].port = 8443;
+        let compiled = catalog_commands(&catalog).unwrap();
+        let mut endpoints = Vec::new();
+        for (_, bytes) in compiled.commands {
+            let frame = read_frame(&mut bytes.as_slice()).unwrap();
+            assert_eq!(frame.kind, r2k_core::control::COMMAND_SET_ENDPOINT);
+            let (endpoint, shape) = r2k_core::control::decode_endpoint_key(
+                &frame.body[..r2k_core::control::ENDPOINT_KEY_LEN],
+            )
+            .unwrap();
+            assert_eq!(shape, r2k_core::control::SHAPE_MODERN_TS);
+            endpoints.push(endpoint.port());
+        }
+        assert_eq!(endpoints, [443, 8443]);
     }
 
     #[cfg(unix)]

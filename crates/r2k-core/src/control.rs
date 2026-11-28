@@ -1776,8 +1776,8 @@ pub fn decode_endpoint_key(bytes: &[u8]) -> Option<(SocketAddr, u8)> {
 const fn endpoint_shape_valid(shape: u8) -> bool {
     matches!(
         shape,
-        SHAPE_QUIC | SHAPE_VOICE | SHAPE_DNS_PROBE | SHAPE_DNS_TCP
-    )
+        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_QUIC | SHAPE_VOICE | SHAPE_DNS_PROBE | SHAPE_DNS_TCP
+    ) || is_tcp_context_shape(shape)
 }
 
 pub const fn dns_endpoint_shape(transport: u8) -> Option<u8> {
@@ -2580,7 +2580,11 @@ pub fn encode_ack_with_identifiers_profile(
                 | COMMAND_SET_DNS_PROBE
                 | COMMAND_DEL_ADDR_PROBE
         )
-        && !(profile == WireProfile::V48 && command == COMMAND_DEL_NAME_PROBE)
+        && !(profile == WireProfile::V48
+            && matches!(
+                command,
+                COMMAND_DEL_NAME_PROBE | crate::raw_flow::COMMAND_RAW_TRIAL
+            ))
     {
         return Err("trial ID ACK разрешён только для временной привязки");
     }
@@ -2673,7 +2677,11 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
             | COMMAND_SET_ADDR_PROBE
             | COMMAND_SET_DNS_PROBE
             | COMMAND_DEL_ADDR_PROBE
-    ) || profile == WireProfile::V48 && command == COMMAND_DEL_NAME_PROBE;
+    ) || profile == WireProfile::V48
+        && matches!(
+            command,
+            COMMAND_DEL_NAME_PROBE | crate::raw_flow::COMMAND_RAW_TRIAL
+        );
     let supports_area_id = matches!(
         command,
         COMMAND_SET_SUFFIX | COMMAND_DEL_SUFFIX | COMMAND_SET_BYPASS | COMMAND_DEL_BYPASS
@@ -3441,7 +3449,7 @@ pub fn decode_client_shape(frame: &Frame) -> Result<ClientShapeEvent, &'static s
     Ok(event)
 }
 
-fn valid_flow_key(key: &[u8; KEY_LEN]) -> bool {
+pub(crate) fn valid_flow_key(key: &[u8; KEY_LEN]) -> bool {
     matches!(key[0], 4 | 6)
         && matches!(key[37], 6 | 17)
         && (key[0] != 4

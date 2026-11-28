@@ -178,6 +178,8 @@ pub struct Binding {
     /// Измеренное число байтов запроса обычного DNS.
     #[serde(skip_serializing_if = "is_zero")]
     pub dns_query_bytes: u16,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub raw_profile: String,
     pub transport: u8,
     #[serde(default = "default_family", serialize_with = "serialize_family")]
     pub family: u8,
@@ -666,6 +668,13 @@ impl Catalog {
                         "box {box_index}: binding.tcp_profile must be 0, 1 or 2"
                     )));
                 }
+                if (binding.kind == "raw" || !binding.raw_profile.is_empty())
+                    && !crate::raw_discovery::valid_binding(binding)
+                {
+                    return Err(CatalogError::new(format!(
+                        "box {box_index}: invalid RAW endpoint binding"
+                    )));
+                }
                 if let Some(recheck_since) = binding.recheck_since {
                     format_timestamp(recheck_since)?;
                 }
@@ -1016,6 +1025,11 @@ fn merge_binding(base: Option<&Binding>, local: &Binding, latest: &Binding) -> B
             base.map(|base| &base.dns_query_bytes),
             &local.dns_query_bytes,
             &latest.dns_query_bytes,
+        ),
+        raw_profile: merge_field(
+            base.map(|base| &base.raw_profile),
+            &local.raw_profile,
+            &latest.raw_profile,
         ),
         family: local.family,
         shape: local.shape,

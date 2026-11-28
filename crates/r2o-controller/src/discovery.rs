@@ -48,12 +48,17 @@ pub struct DirectClearBindingUpdate {
     /// Битовая маска wire-shape привязок, снятых с runtime (C
     /// `binding_wire_shape`), чтобы DEL_NAME шёл точной формой привязки.
     pub delete_shape_mask: u32,
+    pub delete_endpoint_shape_mask: u32,
 }
 
 impl DirectClearBindingUpdate {
     /// Wire-shape привязок, которые нужно снять с runtime.
     pub fn delete_shapes(&self) -> impl Iterator<Item = u8> + '_ {
         (0_u8..=31).filter(move |shape| self.delete_shape_mask & (1_u32 << shape) != 0)
+    }
+
+    pub fn delete_endpoint_shapes(&self) -> impl Iterator<Item = u8> + '_ {
+        (0_u8..=31).filter(move |shape| self.delete_endpoint_shape_mask & (1_u32 << shape) != 0)
     }
 }
 
@@ -78,6 +83,7 @@ pub fn own_first_bound_plan_id(
     shape: u8,
 ) -> Option<String> {
     let target_transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
+    let mut broad = None;
     for box_record in &catalog.boxes {
         for binding in &box_record.bindings {
             if !binding.enabled
@@ -85,6 +91,7 @@ pub fn own_first_bound_plan_id(
                 || binding.level > 0 && binding.level < 3
                 || binding.kind != target.binding_kind()
                 || binding.target != target.host
+                || !target.matches_binding_port(binding)
                 || normalized_transport(binding.transport) != target_transport
                 || normalized_family(binding.family) != target.family
                 || binding.shape != shape
@@ -98,10 +105,14 @@ pub fn own_first_bound_plan_id(
             {
                 continue;
             }
-            return Some(binding.plan_id.clone());
+            if binding.kind == "addr" && binding.port == 0 {
+                broad.get_or_insert(&binding.plan_id);
+            } else {
+                return Some(binding.plan_id.clone());
+            }
         }
     }
-    None
+    broad.cloned()
 }
 
 fn normalized_transport(transport: u8) -> u8 {
@@ -141,6 +152,7 @@ fn newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
                 && binding_beats(other, binding)
                 && other.kind == binding.kind
                 && other.target == binding.target
+                && other.port == binding.port
                 && normalized_transport(other.transport) == normalized_transport(binding.transport)
                 && normalized_family(other.family) == normalized_family(binding.family)
                 && other.shape == binding.shape
@@ -709,6 +721,18 @@ impl DiscoveryTarget {
         }
     }
 
+    pub fn address_endpoint(&self) -> Option<std::net::SocketAddr> {
+        self.address_key()?;
+        self.endpoint.parse().ok()
+    }
+
+    fn matches_binding_port(&self, binding: &Binding) -> bool {
+        binding.port == 0
+            || self
+                .address_endpoint()
+                .is_some_and(|endpoint| endpoint.port() == binding.port)
+    }
+
     /// Временный TCP-опыт по IP ограничен ещё и серверным портом.
     /// Ключ передаётся только по control socket и никогда не идёт в SNI.
     pub fn probe_key(&self) -> String {
@@ -1223,6 +1247,7 @@ pub fn has_covering_binding_for_shape(
                 && binding.recheck_since.is_none()
                 && binding.kind == target.binding_kind()
                 && binding.target == target.host
+                && target.matches_binding_port(binding)
                 && family == target.family
                 && transport == 6
                 && binding_matches_tcp_profile(binding, tcp_profile)
@@ -1288,6 +1313,7 @@ fn has_usable_binding_with_input(
                 || binding.recheck_since.is_some()
                 || binding.kind != target.binding_kind()
                 || binding.target != target.host
+                || !target.matches_binding_port(binding)
                 || !(binding.family == target.family || binding.family == 0 && target.family == 4)
                 || !(binding.transport == 6 || binding.transport == 0)
                 || !(binding.shape == 0
@@ -1422,7 +1448,7 @@ pub fn update_direct_clear_bindings(
                 target.tcp_profile(),
                 target.shape,
             );
-            if !matches_target {
+            if !matches_target || !target.matches_binding_port(binding) {
                 index += 1;
                 continue;
             }
@@ -1451,7 +1477,12 @@ pub fn update_direct_clear_bindings(
             let wire_shape =
                 r2o_binding_wire_shape(binding.shape, binding.transport, binding.tcp_profile);
             update.delete_runtime = true;
-            update.delete_shape_mask |= 1_u32 << wire_shape.min(31);
+            let mask = if binding.port == 0 {
+                &mut update.delete_shape_mask
+            } else {
+                &mut update.delete_endpoint_shape_mask
+            };
+            *mask |= 1_u32 << wire_shape.min(31);
             index += 1;
         }
         if changed {
@@ -1495,11 +1526,18 @@ pub fn bind_confirmed(
     if kind.is_empty() || kind.len() >= 8 || target.is_empty() || target.len() > 255 {
         return Err("catalog binding kind or target is invalid".into());
     }
-    if port != 0
-        && (kind != "addr"
-            || !(transport == 17 || (transport == 6 && shape == r2k_core::control::SHAPE_DNS_TCP)))
-    {
-        return Err("порт поддерживается только адресными UDP- и DNS/TCP-привязками".into());
+    let endpoint_shape = match kind {
+        "addr" => {
+            transport == 17
+                || transport == 6
+                    && (matches!(r2k_link_shape_tcp_base(shape), SHAPE_MODERN | SHAPE_LEGACY)
+                        || shape == r2k_core::control::SHAPE_DNS_TCP)
+        }
+        "raw" => transport == 6 && shape == r2k_core::raw_flow::SHAPE_RAW_TCP && proto == "raw",
+        _ => false,
+    };
+    if port != 0 && !endpoint_shape || kind == "raw" && port == 0 {
+        return Err("неверная область привязки конечной точки".into());
     }
     if !matches!(family, 4 | 6) {
         return Err("catalog binding family is invalid".into());
@@ -1869,7 +1907,7 @@ fn add_measured_binding_with_fingerprint_in_box_learn(
         if address_target { 5 } else { 1 },
         input,
         now,
-        0,
+        if address_target { endpoint.port() } else { 0 },
         observed_fingerprint,
     )?;
 
@@ -2470,6 +2508,7 @@ mod tests {
         assert_eq!(binding.target, target.host);
         assert_eq!(binding.verified_by, 5);
         assert_eq!(binding.transport, 6);
+        assert_eq!(binding.port, 8443);
         assert_eq!(binding.tcp_profile, target.tcp_profile);
         assert!(catalog.domain_state.is_none());
         assert!(super::has_usable_binding(&catalog, &target));
@@ -2478,6 +2517,10 @@ mod tests {
         let mut wrong_target = target.clone();
         wrong_target.host = "198.51.100.21".into();
         wrong_target.endpoint = "198.51.100.21:8443".into();
+        assert!(!super::has_usable_binding(&catalog, &wrong_target));
+        assert!(!super::has_covering_binding(&catalog, &wrong_target));
+        wrong_target = target.clone();
+        wrong_target.endpoint = "198.51.100.20:443".into();
         assert!(!super::has_usable_binding(&catalog, &wrong_target));
         assert!(!super::has_covering_binding(&catalog, &wrong_target));
         wrong_target = target.clone();
@@ -2568,15 +2611,19 @@ mod tests {
         let mut neighbor = catalog.boxes[0].bindings[0].clone();
         neighbor.target = peer.host;
         catalog.boxes[0].bindings.push(neighbor);
+        let mut other_port = catalog.boxes[0].bindings[0].clone();
+        other_port.port = 8443;
+        catalog.boxes[0].bindings.push(other_port);
         let now = std::time::Instant::now();
         let update = super::update_direct_clear_bindings(&mut catalog, &target, 101, now);
         assert_eq!(update.marked, 1);
         assert!(update.delete_runtime);
         assert_eq!(
-            update.delete_shapes().collect::<Vec<_>>(),
+            update.delete_endpoint_shapes().collect::<Vec<_>>(),
             vec![r2k_core::control::SHAPE_MODERN_TS]
         );
         assert!(catalog.boxes[0].bindings[1].recheck_since.is_none());
+        assert!(catalog.boxes[0].bindings[2].recheck_since.is_none());
         let update = super::update_direct_clear_bindings(
             &mut catalog,
             &target,
@@ -2584,7 +2631,7 @@ mod tests {
             now + std::time::Duration::from_secs(61),
         );
         assert_eq!(update.removed, 1);
-        assert_eq!(catalog.boxes[0].bindings.len(), 1);
+        assert_eq!(catalog.boxes[0].bindings.len(), 2);
         assert_eq!(catalog.boxes[0].bindings[0].target, "198.51.100.21");
     }
 

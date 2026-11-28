@@ -131,6 +131,8 @@ pub struct R2oTcpFlowMetrics {
 }
 
 struct TcpSession {
+    raw_generation: u64,
+    raw_server_seq: Option<u32>,
     initiator: TcpEndpoint,
     direction_known: bool,
     controller_probe: bool,
@@ -211,6 +213,8 @@ impl TcpSession {
         now: Instant,
     ) -> Self {
         Self {
+            raw_generation: 0,
+            raw_server_seq: None,
             initiator,
             direction_known,
             controller_probe: false,
@@ -449,6 +453,7 @@ struct TrackedTcpPacket {
 /// Ограниченное состояние потока для runtime-защит и очистки соединений.
 pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
+    raw_generation: u64,
     flow_capacity: R2oFlowCapacity,
     tcp_flow_refusals: u64,
     /// C `d2k_session.applied`: пакеты, к которым применён план.
@@ -509,6 +514,7 @@ impl TcpSessions {
         tcp_silence_events.try_reserve(flow_capacity.slots())?;
         Ok(Self {
             flows,
+            raw_generation: 0,
             flow_capacity,
             tcp_flow_refusals: 0,
             session_applied: 0,
@@ -1285,6 +1291,8 @@ impl TcpSessions {
                     },
                 );
             let mut session = TcpSession::new(source, true, Some(now), now);
+            self.raw_generation = self.raw_generation.wrapping_add(1).max(1);
+            session.raw_generation = self.raw_generation;
             session.capture_anchor = Some(tcp.sequence.wrapping_add(1));
             session.controller_probe = controller_probe;
             let syn_options = packet.get(tcp.options.clone()).unwrap_or_default();
@@ -1508,6 +1516,14 @@ impl TcpSessions {
             session.metrics.reverse_bytes =
                 session.metrics.reverse_bytes.saturating_add(packet_bytes);
             session.reverse_seen = true;
+            if syn
+                && ack
+                && session.raw_server_seq.is_none()
+                && session.capture_anchor == Some(tcp.acknowledgment)
+                && payload.is_empty()
+            {
+                session.raw_server_seq = Some(tcp.sequence.wrapping_add(1));
+            }
             session.reverse_syn_ack_seen |= syn && ack;
             if session.hello_at.is_some() {
                 session.reverse_packets_after_hello =
@@ -1778,6 +1794,51 @@ impl TcpSessions {
             forward_packet_count: session.metrics.forward_packets,
             first_payload_byte: (!rst && !fin).then(|| payload.first().copied()).flatten(),
             controller_probe,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct RawTcpContext {
+    pub key: [u8; KEY_LEN],
+    pub generation: u64,
+    pub client_is_low: bool,
+    pub reverse: bool,
+    pub first_seq: u32,
+    pub server_seq: u32,
+    pub forward_seen: u32,
+    pub tcp_profile: u8,
+    pub recognized: bool,
+    pub planned: bool,
+}
+
+impl TcpSessions {
+    pub fn raw_context(&self, packet: &[u8]) -> Option<RawTcpContext> {
+        let key = TcpFlowKey::from_packet(packet)?;
+        let view = PacketView::parse(packet)?;
+        let tcp = view.tcp_segment(packet)?;
+        let session = self.flows.get(&key)?;
+        if session.raw_generation == 0
+            || !session.reverse_syn_ack_seen
+            || session.controller_probe
+            || session.damaged
+        {
+            return None;
+        }
+        Some(RawTcpContext {
+            key: key.wire_key(),
+            generation: session.raw_generation,
+            client_is_low: session.initiator == key.low,
+            reverse: session.initiator.address != view.src
+                || session.initiator.port != tcp.source_port,
+            first_seq: session.capture_anchor?,
+            server_seq: session.raw_server_seq?,
+            forward_seen: session.forward_data_packets,
+            tcp_profile: session
+                .client_offered_tcp_timestamps
+                .map_or(0, |ts| if ts { 2 } else { 1 }),
+            recognized: session.hello_at.is_some() || session.client_shape != 0,
+            planned: session.plan_done || session.r2o_execution_pending,
         })
     }
 }
@@ -2660,6 +2721,43 @@ fn decide_tcp(
     let Ok(actions) = plan.apply(&input) else {
         return PacketDecision::Refused { plan_id: plan.id };
     };
+    tcp_actions_to_wire(packet, actions)
+}
+
+/// Only the midpoint split derived from the guarded opaque sample can reach
+/// this entry point. TLS/HTTP and DNS continue through their existing verifiers.
+pub fn decide_raw_tcp_packet(
+    plan_id: [u8; 16],
+    profile: r2k_core::raw_flow::Profile,
+    packet: &[u8],
+    segment_cap: usize,
+) -> PacketDecision {
+    let Some(view) = PacketView::parse(packet).filter(|view| view.fragment & 0x3fff == 0) else {
+        return PacketDecision::Accept;
+    };
+    let Some(tcp) = view.tcp_segment(packet) else {
+        return PacketDecision::Accept;
+    };
+    let Some(payload) = packet.get(tcp.payload) else {
+        return PacketDecision::Accept;
+    };
+    if payload.len() != usize::from(profile.length)
+        || tcp.flags & 0x17 != 0x10
+        || segment_cap == 0
+        || payload.len().div_ceil(2) > segment_cap
+    {
+        return PacketDecision::Accept;
+    }
+    let mut input = PacketInput::new(payload, tcp.sequence);
+    input.segment_cap = segment_cap;
+    input.tcp_flags = Some(tcp.wire_flags);
+    let Ok(actions) = profile.tcp_split(plan_id).apply(&input) else {
+        return PacketDecision::Refused { plan_id };
+    };
+    tcp_actions_to_wire(packet, actions)
+}
+
+fn tcp_actions_to_wire(packet: &[u8], actions: r2k_core::plan::Actions) -> PacketDecision {
     if actions.emits.is_empty() {
         return if actions.fate == OriginalFate::Drop {
             PacketDecision::Drop

@@ -99,6 +99,7 @@ impl StunAttempt {
 }
 
 struct FlowState {
+    raw_generation: u64,
     last_seen: Instant,
     plan_applied: bool,
     /// C `fl->sends_left` для UDP-исполнения: n_out + оригинал.
@@ -152,6 +153,7 @@ pub struct R2oUdpTableStats {
 /// Ограниченное состояние всех корректных UDP-кортежей datapath.
 pub struct R2oUdpSessions {
     flows: HashMap<R2oUdpFlowKey, FlowState>,
+    raw_generation: u64,
     udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
     flow_capacity: R2oFlowCapacity,
     refusals: u64,
@@ -181,6 +183,7 @@ impl R2oUdpSessions {
         udp_exchange_events.try_reserve(flow_capacity.limit())?;
         Ok(Self {
             flows,
+            raw_generation: 0,
             udp_exchange_events,
             flow_capacity,
             refusals: 0,
@@ -255,9 +258,11 @@ impl R2oUdpSessions {
             }
             return false;
         }
+        self.raw_generation = self.raw_generation.wrapping_add(1).max(1);
         self.flows.insert(
             key,
             FlowState {
+                raw_generation: self.raw_generation,
                 last_seen: now,
                 plan_applied: false,
                 plan_sends_left: 0,
@@ -274,6 +279,23 @@ impl R2oUdpSessions {
             },
         );
         true
+    }
+
+    pub fn raw_context(&self, packet: &[u8]) -> Option<crate::raw_discovery::RawUdpContext> {
+        let (source, destination) = flow_endpoints_from_packet(packet)?;
+        let key = R2oUdpFlowKey::new(source, destination);
+        let flow = self.flows.get(&key)?;
+        let side = flow.r2o_client_is_low?;
+        if flow.controller_probe || flow.plan_applied || flow.damaged || flow.quic_deny {
+            return None;
+        }
+        Some(crate::raw_discovery::RawUdpContext {
+            key: key.wire_key(),
+            generation: flow.raw_generation,
+            client_is_low: side,
+            reverse: (source == key.low) != side,
+            recognized: flow.hello_seen || flow.stun.is_some(),
+        })
     }
 
     /// Связать ответный STUN Binding с первым запросом UDP-потока.
